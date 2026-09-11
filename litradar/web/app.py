@@ -334,18 +334,62 @@ def interests_page(request: Request, saved: int = 0):
 @app.post("/interests")
 def interests_save(request: Request, raw: str = Form(...)):
     require_token(request)
+    import shutil
+
     import yaml
 
     cfg = get_cfg()
-    try:
-        yaml.safe_load(raw)          # 先校验,避免写坏文件
-    except yaml.YAMLError as e:
+
+    def fail(msg: str):
         return templates.TemplateResponse(request, "interests.html", ctx(
             request, raw=raw, prof=load_interests(cfg), saved=False,
-            error=f"YAML 语法错误: {e}", page="interests"), status_code=400)
-    cfg.interests_file.write_text(raw, encoding="utf-8")
+            error=msg, page="interests"), status_code=400)
+
+    # 1) YAML 语法
+    try:
+        data = yaml.safe_load(raw)
+    except yaml.YAMLError as e:
+        return fail(f"YAML 语法错误: {e}")
+
+    # 2) 结构校验 —— 光"语法合法"远远不够。
+    #    实测教训:提交一段合法但极小的 YAML(如 `search_queries:\n  - a`)会通过
+    #    语法检查、把整份配置清空(实测把 7.9KB 的配置写成 22 字节)。
+    #    所以必须确认它是 mapping 且含预期键。
+    if not isinstance(data, dict):
+        return fail("内容必须是一个 YAML 映射(顶层是 key: value),不能是列表或标量")
+    missing = {"direction", "search_queries", "keywords", "journals"} - set(data)
+    if missing:
+        return fail(f"缺少必要字段:{'、'.join(sorted(missing))}。"
+                    "若确实要清空某项,请保留该键并把值留空,不要提交不完整的文件。")
+
+    # 3) 写前备份 —— 覆盖配置不可逆,必须留后路
+    target = cfg.interests_file
+    if target.exists():
+        shutil.copy2(target, target.with_suffix(target.suffix + ".bak"))
+
+    target.write_text(raw, encoding="utf-8")
     _cfg_cache.clear()               # 让下次请求重新加载
     return RedirectResponse("/interests?saved=1", status_code=303)
+
+
+# ── 旧路由兼容 ──────────────────────────────────────────────────────────────
+# /profile 是早期名字。留重定向,避免旧书签/缓存页面撞 404
+# (实测有人在旧页面点保存,拿到 404)。
+@app.get("/profile")
+def profile_redirect_get():
+    return RedirectResponse("/interests", status_code=301)
+
+
+@app.post("/profile")
+async def profile_redirect_post(request: Request):
+    """旧页面表单 action 指向 /profile,把提交内容转到新处理器。"""
+    from urllib.parse import parse_qs
+
+    body = (await request.body()).decode("utf-8", "replace")
+    raw = (parse_qs(body).get("raw") or [""])[0]
+    if raw:
+        return interests_save(request, raw=raw)
+    return RedirectResponse("/interests", status_code=303)
 
 
 # ------------------------------------------------------------------ actions
