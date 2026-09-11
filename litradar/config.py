@@ -95,6 +95,9 @@ class SourceConfig:
     s2_search_max_pages: int = 1      # 每页 1000 条,一般 1 页足够
     # 传给 bulk 的 venue 过滤(逗号分隔)。实测多刊必须用逗号,用 | 会返回 0。
     s2_venues: list[str] = field(default_factory=list)
+    # 引用滚雪球(前向:谁引用了种子)。每个种子 1 次请求。
+    snowball_enabled: bool = True
+    snowball_max_seeds: int = 10
 
     # OpenAlex:2026 年起改为 API Key + 额度制,不配 key 会 "Insufficient budget",
     # 因此默认关闭;配上 OPENALEX_API_KEY 才启用。
