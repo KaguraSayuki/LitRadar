@@ -299,19 +299,28 @@ CITE_FIELDS = ("title,abstract,venue,year,publicationDate,externalIds,"
                "citationCount,openAccessPdf")
 
 
-def fetch_citations(paper_ref: str, *, since: str | None = None, limit: int = 500,
+def fetch_citations(paper_ref: str, *, year: str | None = None,
+                    since: str | None = None, limit: int = 100,
                     retries: int = 3, verbose: bool = False,
                     interval: float | None = None) -> list[dict]:
     """前向滚雪球:谁引用了这篇。``paper_ref`` 可以是 ``DOI:10.x/y`` 或 S2 paperId。
 
-    **直接传 ``DOI:`` 前缀,不用先解析 paperId** —— 省掉一次请求,
-    对 1 req/s 的限流来说是实打实的收益。
-
     为什么只做前向:前向引用必然是**更新的**文献,符合"雷达"的定位;
     后向(它引用了谁)拉回的是经典老文献,那是另一类需求。
 
-    ⚠️ 种子必须是 1-3 年前的。实测:2026 年的新论文被引 0-1 次,
-    拿它当种子什么都滚不出来。
+    **直接传 ``DOI:`` 前缀,不用先解析 paperId** —— 省掉一次请求,
+    对 1 req/s 的限流来说是实打实的收益。
+
+    ``year`` 交给服务端先粗筛一遍(如 ``"2025-2026"``),省得多翻几页。
+
+    ⚠️ 实测两条坑:
+      · ``year=`` **并不严格** —— 传 ``year=2026-2026`` 照样会返回 2023 年的条目。
+        所以 ``since`` 这一天级过滤必须留在本地,不能省。
+      · 种子必须是 1 年以上的。实测 2026 年的新论文被引 0-1 次,滚不出东西;
+        真正能滚的是开题报告里那种已经沉淀下来的基础文献。
+
+    单种子最多只要 ``limit`` 条(默认 100)。引用上百条的基础文献不少,
+    往下翻页只会把噪声一起拉进来 —— 精确率靠调用方的共被引闸门保证。
     """
     if not os.environ.get("S2_API_KEY"):
         return []
@@ -319,8 +328,10 @@ def fetch_citations(paper_ref: str, *, since: str | None = None, limit: int = 50
     out: list[dict] = []
     offset = 0
     while len(out) < limit:
-        params: dict[str, Any] = {"fields": CITE_FIELDS, "limit": min(100, limit - len(out)),
-                                  "offset": offset}
+        take = min(100, limit - len(out))
+        params: dict[str, Any] = {"fields": CITE_FIELDS, "limit": take, "offset": offset}
+        if year:
+            params["year"] = year
         r = None
         last = ""
         for attempt in range(max(1, retries)):
@@ -354,10 +365,12 @@ def fetch_citations(paper_ref: str, *, since: str | None = None, limit: int = 50
             d = citing.get("publicationDate") or ""
             if since and d and d < since:
                 continue          # 只要窗口内的新文献
+            if not d:
+                continue          # 没日期就没法判断新旧,宁可不要
             rec = _to_dict(citing)
             if rec.get("title"):
                 out.append(rec)
-        if len(data) < params["limit"]:
+        if len(data) < take:
             break
         offset += len(data)
     return out

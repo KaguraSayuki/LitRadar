@@ -98,8 +98,22 @@ class SourceConfig:
     # 传给 bulk 的 venue 过滤(逗号分隔)。实测多刊必须用逗号,用 | 会返回 0。
     s2_venues: list[str] = field(default_factory=list)
     # 引用滚雪球(前向:谁引用了种子)。每个种子 1 次请求。
+    # 种子取自 interests.yaml 的 seed_dois。
     snowball_enabled: bool = True
-    snowball_max_seeds: int = 10
+    snowball_max_seeds: int = 25      # 总共用多少个种子(取自 interests.yaml)
+    # 每轮刷新几个种子。**故意小**:S2 突发很容易 429,一轮连打十几个会失败一半,
+    # 而共被引计数一旦丢种子就会静默漏判。轮着刷新反而更稳、覆盖也不差。
+    snowball_seeds_per_run: int = 5
+    # 至少被几个**不同种子**引用才收。默认 1 = 全收。
+    #
+    # 一开始我把它当精度闸门设成 2,实测太狠:严格日期过滤后,15 个种子
+    # 全查一遍总共才 ~40 条候选(老论文在 200 天窗口内被引 0-13 次),
+    # 而门槛 2 挡掉的 29 条里有 18 条标题明显对口。既然量这么小,
+    # 精确率交给 LLM 精排就够了 —— 共被引改成**质量标注**(source_ref 里的
+    # cocite:N),让人一眼看出这条是被几个种子共同引用的。
+    # 种子规模涨到几百篇之后再考虑调高。
+    snowball_min_cocitations: int = 1
+    snowball_per_seed: int = 100      # 单个种子最多取多少条引用方
 
     # OpenAlex:2026 年起改为 API Key + 额度制,不配 key 会 "Insufficient budget",
     # 因此默认关闭;配上 OPENALEX_API_KEY 才启用。

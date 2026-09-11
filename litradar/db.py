@@ -91,6 +91,27 @@ CREATE TABLE IF NOT EXISTS journal_rank (
     hit          INTEGER DEFAULT 1   -- 0 = 接口明确说查不到,别再反复问
 );
 
+-- 引用滚雪球的引用关系。**每次只刷新几个种子,关系累积在这里** ——
+-- 一轮里连打十几个种子必然撞限流,而且部分失败会把共被引计数打散:
+-- 只被那失败种子引用的论文就永远凑不够票。落表之后,共被引是在
+-- 全部种子、全部历史轮次上统计的,单次失败不再影响判断。
+CREATE TABLE IF NOT EXISTS seed_cite (
+    seed_doi   TEXT NOT NULL,        -- 引用方引用了哪个种子
+    citing_doi TEXT NOT NULL,        -- 引用方
+    item_json  TEXT,                 -- 引用方元数据,凑够票时直接入库,不再查一次
+    first_seen TEXT,
+    PRIMARY KEY (seed_doi, citing_doi)
+);
+CREATE INDEX IF NOT EXISTS idx_seed_cite_citing ON seed_cite(citing_doi);
+
+-- 每个种子上次刷新时间。挑最久没查的先查,轮着来。
+CREATE TABLE IF NOT EXISTS seed_query (
+    seed_doi   TEXT PRIMARY KEY,
+    queried_at TEXT,
+    n_cites    INTEGER DEFAULT 0,
+    status     TEXT                  -- ok / failed
+);
+
 CREATE TABLE IF NOT EXISTS score (
     item_id      INTEGER PRIMARY KEY REFERENCES item(id) ON DELETE CASCADE,
     rule_score   REAL,
@@ -591,6 +612,77 @@ def save_journal_rank(conn: sqlite3.Connection, journal: str,
          json.dumps(ranks or {}, ensure_ascii=False), "easyscholar", now(),
          1 if ranks else 0),
     )
+
+
+def pick_seeds_to_query(conn: sqlite3.Connection, seeds: list[str],
+                        k: int) -> list[str]:
+    """挑最久没刷新的 k 个种子。从没查过的排最前。
+
+    为什么轮着查而不是一次全查:S2 免费 key 名义上 1 req/s,实际突发很容易
+    429(实测连打十几个种子,一半失败)。一轮只查几个,既避开限流,
+    又让每个种子隔几天被刷新一次 —— 日报场景完全够。
+    """
+    if k <= 0 or not seeds:
+        return []
+    order = {s: i for i, s in enumerate(seeds)}
+    rows = {r["seed_doi"]: r["queried_at"] for r in conn.execute(
+        "SELECT seed_doi, queried_at FROM seed_query")}
+    # 没查过的排最前(空串最小),其次按时间从早到晚
+    return sorted(seeds, key=lambda s: (rows.get(s) or "", order[s]))[:k]
+
+
+def save_seed_cites(conn: sqlite3.Connection, seed_doi: str,
+                    items: list[dict]) -> int:
+    """记录"这些论文引用了这个种子"。返回写入条数。"""
+    stamp = now()
+    n = 0
+    for it in items:
+        doi = (it.get("doi") or "").lower()
+        if not doi:
+            continue
+        cur = conn.execute(
+            """INSERT OR IGNORE INTO seed_cite (seed_doi, citing_doi, item_json, first_seen)
+               VALUES (?,?,?,?)""",
+            (seed_doi, doi, json.dumps(it, ensure_ascii=False), stamp))
+        n += cur.rowcount
+    return n
+
+
+def mark_seed_queried(conn: sqlite3.Connection, seed_doi: str,
+                      n_cites: int, status: str = "ok") -> None:
+    conn.execute(
+        """INSERT INTO seed_query (seed_doi, queried_at, n_cites, status)
+           VALUES (?,?,?,?)
+           ON CONFLICT(seed_doi) DO UPDATE SET
+             queried_at=excluded.queried_at, n_cites=excluded.n_cites,
+             status=excluded.status""",
+        (seed_doi, now(), n_cites, status))
+
+
+def cocited_items(conn: sqlite3.Connection, min_seeds: int) -> list[dict]:
+    """共被引达到门槛、且**还不在库里**的候选。
+
+    过滤在库的:这些论文每轮都会被重新算出来,不去掉就会反复走一遍入库路径。
+    """
+    out: list[dict] = []
+    for r in conn.execute(
+            """SELECT citing_doi, COUNT(DISTINCT seed_doi) n,
+                      MAX(item_json) item_json
+               FROM seed_cite
+               WHERE citing_doi NOT IN
+                     (SELECT LOWER(doi) FROM item WHERE doi IS NOT NULL)
+               GROUP BY citing_doi
+               HAVING n >= ?""", (max(1, min_seeds),)):
+        try:
+            item = json.loads(r["item_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not item.get("title"):
+            continue
+        item["source"] = "snowball"
+        item["source_ref"] = f"cocite:{r['n']}"
+        out.append(item)
+    return out
 
 
 def starred_ids(conn: sqlite3.Connection) -> set[int]:

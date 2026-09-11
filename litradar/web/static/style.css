@@ -244,6 +244,8 @@ h2 small { font-weight: 400; color: var(--ink-3); font-size: 13px; margin-left: 
 }
 .tag--if { background: var(--amber-tint); color: var(--amber-ink); }
 .tag--oa, .tag--hit { background: var(--accent-tint); color: var(--accent); }
+/* 滚雪球来源:和普通来源区分开,一眼看出这条不是关键词召回来的 */
+.tag--snowball { background: var(--accent-tint); color: var(--accent-strong); font-weight: 600; }
 /* 手动决定的状态标签。用和按钮一致的语义色:收藏=琥珀,否决=砖红。
    放在 meta 最前面,让人一眼看出"这条为什么在这儿"。 */
 .tag--starred { background: var(--amber-tint); color: var(--amber-ink); font-weight: 600; }

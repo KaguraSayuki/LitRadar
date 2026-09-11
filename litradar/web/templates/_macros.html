@@ -51,8 +51,19 @@
 
 {# 来源标识的展示名 #}
 {% macro source_name(s) -%}
-{{ {'crossref': 'Crossref', 'xmol': 'X-MOL', 'openalex': 'OpenAlex', 'manual': '手动'}.get(s, s) }}
+{{ {'crossref': 'Crossref', 'xmol': 'X-MOL', 'openalex': 'OpenAlex', 'manual': '手动', 'snowball': '滚雪球'}.get(s, s) }}
 {%- endmacro %}
+
+{# 来源标签。滚雪球额外带上共被引数 —— "被几个种子文献共同引用"是这个来源
+   唯一的强度信号,不显示出来就只是一句"滚雪球",没法判断可信度。 #}
+{% macro source_tag(it) %}
+  {%- set ref = it['source_ref'] or '' -%}
+  {%- if it['source'] == 'snowball' and ref.startswith('cocite:') -%}
+    <span class="tag tag--snowball" title="顺着开题报告的基础文献滚出来的。×N = 有 N 篇种子文献同时被它引用,数字越大越可能是同一条脉络里的工作">{{ source_name('snowball') }} ×{{ ref.split(':')[1] }}</span>
+  {%- else -%}
+    <span class="tag">{{ source_name(it['source']) }}</span>
+  {%- endif -%}
+{% endmacro %}
 
 {# 相关度分档:加权后满分约 60(LLM 0.85 + BM25 0.10 + 规则 0.05),
    ≥50 琥珀实底,30–49 琥珀浅底,<30 灰底,未评分虚线框 #}
@@ -92,7 +103,7 @@
         {% if it['journal'] %}<span class="meta__journal">{{ it['journal']|unesc }}</span>{% endif %}
         {% if it['published_at'] %}<time datetime="{{ it['published_at'] }}">{{ it['published_at'] }}</time>{% endif %}
         {% if it['impact_factor'] %}<span class="tag tag--if">IF {{ it['impact_factor'] }}</span>{% endif %}
-        <span class="tag">{{ source_name(it['source']) }}</span>
+        {{ source_tag(it) }}
         {% if it['cited_by_count'] %}<span class="tag">被引 {{ it['cited_by_count'] }}</span>{% endif %}
         {% if it['is_oa'] %}<span class="tag tag--oa">开放获取</span>{% endif %}
         {# 期刊等级(影响因子/分区/北核…),来自 easyScholar 缓存。
