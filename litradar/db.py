@@ -1,12 +1,31 @@
 """SQLite 数据层:连接、建表、常用读写。单用户场景,不引入 ORM。"""
 from __future__ import annotations
 
+import html
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator
+
+
+def clean_journal(name: str | None) -> str | None:
+    """把来源给的刊名洗干净。
+
+    Crossref 的 container-title 有两个坑,实测都踩到了:
+      · HTML 实体没解码 —— 存进来是 "Organic &amp; Biomolecular Chemistry"
+      · 名字里带换行 —— "Journal of the American\\nChemical Society"
+    显示上靠模板的 |unesc 和 HTML 折叠还能糊弄过去,但会污染一切按刊名做的
+    功能:统计页按刊名分组时 JACS 裂成两行;按刊名查期刊分区(如 easyScholar)
+    更是直接查不到。所以在入库这个唯一入口上洗干净。
+    """
+    if name is None:
+        return None
+    s = html.unescape(str(name))
+    s = re.sub(r"\s+", " ", s).strip()
+    return s or None
 
 SCHEMA = """
 PRAGMA journal_mode = WAL;
@@ -59,6 +78,17 @@ CREATE TABLE IF NOT EXISTS item_enrichment (
     openalex_json  TEXT,
     crossref_json  TEXT,
     enriched_at    TEXT
+);
+
+-- 期刊等级缓存(easyScholar)。按刊名缓存,同一本刊只查一次 ——
+-- 开放接口是按次计额的,36 本刊 36 次就够,之后全走本地。
+CREATE TABLE IF NOT EXISTS journal_rank (
+    journal_norm TEXT PRIMARY KEY,   -- 归一化后的刊名(小写、去空白)
+    journal      TEXT,               -- 原始刊名,便于核对
+    ranks_json   TEXT,               -- {"sci": "Q1", "sciUp": "化学1区", ...}
+    source       TEXT DEFAULT 'easyscholar',
+    fetched_at   TEXT,
+    hit          INTEGER DEFAULT 1   -- 0 = 接口明确说查不到,别再反复问
 );
 
 CREATE TABLE IF NOT EXISTS score (
@@ -145,12 +175,30 @@ def now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
+# 已经跑过建表 + 迁移的库路径(进程级)。见 connect()
+_READY: set[str] = set()
+
+
 class Database:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def connect(self) -> sqlite3.Connection:
+        # 每个库在每个进程里自动建表 + 跑一次迁移。
+        #
+        # 以前只有 `litradar init-db` 会走 init(),于是任何新增的表/字段在
+        # 别的命令里都是 "no such table" —— 实测加 journal_rank 表时,
+        # `enrich` 直接报错,而且那次连 journal 清洗迁移也没跑过。
+        # 让 connect() 兜住这件事,省掉"记得先 init-db"这个隐性前提。
+        key = str(self.path)
+        if key not in _READY:
+            _READY.add(key)                # 先标记:init() 内部会回调 connect()
+            try:
+                self.init()
+            except Exception:
+                _READY.discard(key)        # 失败就允许下次重试
+                raise
         conn = sqlite3.connect(self.path, timeout=30)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
@@ -182,6 +230,13 @@ class Database:
     def _migrate(conn: sqlite3.Connection) -> None:
         """轻量迁移:已存在的库就地升级,不动老数据。"""
         import contextlib
+
+        # journal:洗掉历史遗留的 HTML 实体与换行(见 clean_journal)
+        for rid, j in conn.execute(
+                "SELECT id, journal FROM item WHERE journal IS NOT NULL").fetchall():
+            cj = clean_journal(j)
+            if cj != j:
+                conn.execute("UPDATE item SET journal=? WHERE id=?", (cj, rid))
 
         # summary.title_zh
         cols = {r[1] for r in conn.execute("PRAGMA table_info(summary)")}
@@ -233,6 +288,8 @@ def upsert_item(conn: sqlite3.Connection, data: dict[str, Any]) -> tuple[int, bo
     ).fetchone()
 
     payload = {k: data.get(k) for k in ITEM_FIELDS}
+    # 刊名在入库这个唯一入口统一洗干净(HTML 实体 / 换行),见 clean_journal
+    payload["journal"] = clean_journal(payload.get("journal"))
     for k in ("authors", "matched_keywords"):
         if isinstance(payload.get(k), (list, tuple)):
             payload[k] = json.dumps(list(payload[k]), ensure_ascii=False)
@@ -470,6 +527,69 @@ def save_enrichment(conn: sqlite3.Connection, item_id: int, data: dict) -> None:
              enriched_at=excluded.enriched_at""",
         (item_id, data.get("cited_by_count"), data.get("is_oa"), data.get("oa_url"),
          data.get("openalex_id"), data.get("openalex_json"), data.get("crossref_json"), now()),
+    )
+
+
+def norm_journal(name: str | None) -> str:
+    """期刊缓存键:小写 + 折叠空白。
+
+    不能更激进(比如去掉标点)—— "Organic & Biomolecular Chemistry" 和
+    "Organic and Biomolecular Chemistry" 是同一本刊,但去标点也救不了,
+    而误合并两本不同的刊更糟。easyScholar 自己会做模糊匹配。
+    """
+    return re.sub(r"\s+", " ", (name or "").strip()).lower()
+
+
+def journal_ranks(conn: sqlite3.Connection) -> dict[str, dict[str, str]]:
+    """一次读全缓存,避免在模板渲染里逐条查库。"""
+    out: dict[str, dict[str, str]] = {}
+    for r in conn.execute(
+            "SELECT journal_norm, ranks_json FROM journal_rank WHERE hit=1"):
+        try:
+            out[r["journal_norm"]] = json.loads(r["ranks_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+    return out
+
+
+def journal_ranks_by_issn(conn: sqlite3.Connection) -> dict[str, dict[str, str]]:
+    """ISSN → 期刊等级。
+
+    有些来源只给刊名的**短形式**("Angewandte Chemie"、"Org. Lett."),
+    easyScholar 按全名查不到,但同一 ISSN 下往往已经有别的条目查到了全名。
+    实测 "Angewandte Chemie" 与 "Angewandte Chemie International Edition"
+    共用 ISSN 1433-7851 —— 用 ISSN 兜一道,4 条里能救回 2 条。
+    """
+    out: dict[str, dict[str, str]] = {}
+    for r in conn.execute(
+            """SELECT DISTINCT i.issn, jr.ranks_json
+               FROM item i
+               JOIN journal_rank jr ON jr.journal_norm = lower(trim(i.journal))
+               WHERE i.issn IS NOT NULL AND i.issn <> '' AND jr.hit = 1"""):
+        if r["issn"] in out:
+            continue
+        try:
+            ranks = json.loads(r["ranks_json"] or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if ranks:
+            out[r["issn"]] = ranks
+    return out
+
+
+def save_journal_rank(conn: sqlite3.Connection, journal: str,
+                      ranks: dict[str, str] | None) -> None:
+    """写缓存。ranks=None 表示接口明确说查不到,记 hit=0 免得反复消耗额度。"""
+    conn.execute(
+        """INSERT INTO journal_rank (journal_norm, journal, ranks_json, source,
+                                     fetched_at, hit)
+           VALUES (?,?,?,?,?,?)
+           ON CONFLICT(journal_norm) DO UPDATE SET
+             journal=excluded.journal, ranks_json=excluded.ranks_json,
+             fetched_at=excluded.fetched_at, hit=excluded.hit""",
+        (norm_journal(journal), journal,
+         json.dumps(ranks or {}, ensure_ascii=False), "easyscholar", now(),
+         1 if ranks else 0),
     )
 
 

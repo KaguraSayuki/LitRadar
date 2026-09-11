@@ -15,7 +15,7 @@ import sqlite3
 
 from . import db
 from .config import Config
-from .sources import crossref_search, openalex_search, semanticscholar
+from .sources import crossref_search, easyscholar, openalex_search, semanticscholar
 
 
 def _merge(doi: str, cr: dict | None, s2: dict | None, oa: dict | None) -> dict | None:
@@ -94,6 +94,53 @@ def _pending(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
     return out
 
 
+def _journal_ranks(conn, cfg: Config, *, verbose: bool = True) -> dict:
+    """补齐还没缓存过的期刊等级。返回统计信息。
+
+    接口按次计额,所以:
+      · 查过的刊不重复查 —— hit=0 表示接口明确说没有,不该反复问
+        (例外:后来给它配了别名,那是新线索,值得再试一次)
+      · 单次运行有上限(cfg.journal_rank.max_lookups),异常数据打不爆额度
+    """
+    stat = {"jr_checked": 0, "jr_found": 0, "jr_missing": 0}
+    if not cfg.journal_rank.enabled or not easyscholar.available():
+        return stat
+
+    aliases = {db.norm_journal(k): v
+               for k, v in (cfg.journal_rank.aliases or {}).items()}
+
+    # 候选 = 从没查过的 + (上次没查到、但现在配了别名的)。
+    # 后一条不能省:实测先跑了没有别名的一轮,"Youji huaxue" 被记成查不到,
+    # 之后再加别名也永远不会重试 —— 缓存把修复路径一起锁死了。
+    need: list[str] = []
+    for r in conn.execute(
+            """SELECT DISTINCT i.journal AS journal, jr.hit AS hit
+               FROM item i
+               LEFT JOIN journal_rank jr ON jr.journal_norm = lower(trim(i.journal))
+               WHERE i.journal IS NOT NULL AND i.journal <> ''"""):
+        if r["hit"] is None or (r["hit"] == 0
+                                and db.norm_journal(r["journal"]) in aliases):
+            need.append(r["journal"])
+    need = sorted(set(need))[:max(0, cfg.journal_rank.max_lookups)]
+
+    for name in need:
+        # 短名/罗马字名先换成 easyScholar 认得的全名再查,并按全名缓存
+        target = aliases.get(db.norm_journal(name), name)
+        ranks = easyscholar.fetch_rank(target)
+        db.save_journal_rank(conn, target, ranks)
+        stat["jr_checked"] += 1
+        if ranks:
+            stat["jr_found"] += 1
+            if verbose:
+                print(f"  期刊等级 {target}: {ranks.get('sciUp') or ranks.get('sci') or ''}")
+        else:
+            stat["jr_missing"] += 1
+            if verbose:
+                print(f"  [warn] 期刊等级没查到: {target}")
+        conn.commit()          # 逐条提交:中断也不会白白浪费已花掉的额度
+    return stat
+
+
 def run(cfg: Config, *, limit: int = 300, verbose: bool = True) -> dict:
     """对缺摘要或未富化的条目做一次富化。
 
@@ -169,6 +216,11 @@ def run(cfg: Config, *, limit: int = 300, verbose: bool = True) -> dict:
         stat["total_papers"] = conn.execute(
             "SELECT COUNT(*) FROM item WHERE kind='paper'"
         ).fetchone()[0]
+
+        # ---- 4. 期刊等级(easyScholar)----
+        # 影响因子/分区 Crossref 和 S2 都不给,只能另找。按**刊名**查,
+        # 所以这一步和逐条富化无关:全库也就几十本刊,查一遍进缓存,之后全走本地。
+        stat.update(_journal_ranks(conn, cfg, verbose=verbose))
 
         db.log_run(conn, "enrich", "ok", stat, started_at=started)
         conn.commit()

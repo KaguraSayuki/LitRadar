@@ -95,6 +95,9 @@
         <span class="tag">{{ source_name(it['source']) }}</span>
         {% if it['cited_by_count'] %}<span class="tag">被引 {{ it['cited_by_count'] }}</span>{% endif %}
         {% if it['is_oa'] %}<span class="tag tag--oa">开放获取</span>{% endif %}
+        {# 期刊等级(影响因子/分区/北核…),来自 easyScholar 缓存。
+           加粗一档:它和"来源/被引"不是一类信息,是判断要不要读的重要信号。 #}
+        {% for t in it['rank_tags'] %}<span class="tag tag--rank" title="期刊等级(easyScholar)">{{ t }}</span>{% endfor %}
         {% for k in it['matched_keywords']|fromjson %}<span class="tag tag--hit">X-MOL 命中 {{ k }}</span>{% endfor %}
       </div>
 

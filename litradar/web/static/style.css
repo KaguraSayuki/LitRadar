@@ -248,6 +248,12 @@ h2 small { font-weight: 400; color: var(--ink-3); font-size: 13px; margin-left: 
    放在 meta 最前面,让人一眼看出"这条为什么在这儿"。 */
 .tag--starred { background: var(--amber-tint); color: var(--amber-ink); font-weight: 600; }
 .tag--ignored { background: var(--red-tint); color: var(--red-ink); font-weight: 600; }
+/* 期刊等级(影响因子 / 分区 / 北核…)。给它一档更实的样式:
+   它和"来源:crossref""被引 3"这类元信息不是一回事,是判断要不要读的信号。 */
+.tag--rank {
+  background: var(--surface-3); color: var(--ink); font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
 /* 被否决的条目整体压暗一点 —— 在"不感兴趣"页签里翻的时候,视觉上就不像推荐 */
 .entry:has(.tag--ignored) .entry__body { opacity: .72; }
 

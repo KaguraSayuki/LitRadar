@@ -93,3 +93,58 @@ ranking:
     coarse: 0.10
     rule: 0.05
   coarse_method: "bm25"           # DeepSeek 无 embedding API,故用 BM25
+
+# ============================================================================
+# 期刊等级(影响因子 / 中科院分区 / 北核 …) —— easyScholar 开放接口
+# ----------------------------------------------------------------------------
+# 影响因子和分区是付费专有数据(Clarivate JCR / 中科院文献情报中心),
+# Crossref 和 Semantic Scholar 都不提供。密钥申请:https://www.easyscholar.cc
+# 拿到后写进 .env:  EASYSCHOLAR_SECRET_KEY=xxxx
+#
+# 接口按【刊名】查询且按次计额,所以结果会缓存进 journal_rank 表 ——
+# 全库几十本刊查一遍就够,之后不再消耗额度。
+# ============================================================================
+journal_rank:
+  enabled: true
+  api_key_env: "EASYSCHOLAR_SECRET_KEY"
+  max_lookups: 40                 # 单次富化最多查几本新刊
+
+  # 只展示这些字段。接口一口气返回十几个体系(含各高校自己的分级),
+  # 全铺在卡片上会把真正重要的信息淹掉。
+  fields: [sciwarn, sci, sciUp, sciif, pku, cssci]
+
+  # 刊名别名:来源给的短名/罗马字名 → easyScholar 认的全名。
+  # "Youji huaxue" 是 S2 对《有机化学》的罗马字写法;
+  # "Angewandte Chemie" 在 S2 里通常指国际版(有 ISSN 时会先走 ISSN 兜底)。
+  aliases:
+    "Youji huaxue": "Chinese Journal of Organic Chemistry"
+    "Angewandte Chemie": "Angewandte Chemie International Edition"
+
+
+  # 压缩显示。两类规则各管各的:
+  #   · 普通键 —— 匹配【字段名】,决定标签叫什么(空字符串 = 不显示标签名,只显示值)
+  #   · /正则/  —— 匹配【值】,$1 是捕获组(化学1区 → 化1)
+  # 空标签 ≠ 隐藏字段:把某个字段整个去掉,请从上面的 fields 里删。
+  map:
+    北大中文核心: 北核
+    SCI: ""
+    SCIIF: ""
+    SCIIF(5): ""
+    CSCD: ""
+    EI检索: EI
+    SCI升级版: ""
+    SCIWARN: ""
+    "/生物学(\\d+)区/": "生$1"
+    "/农林科学(\\d+)区/": "农$1"
+    "/环境科学与生态学(\\d+)区/": "环$1"
+    "/工程技术(\\d+)区/": "工$1"
+    "/地球科学(\\d+)区/": "地$1"
+    "/计算机科学(\\d+)区/": "计$1"
+    "/人文科学(\\d+)区/": "人$1"
+    "/综合性期刊(\\d+)区/": "综$1"
+    "/社会学(\\d+)区/": "社$1"
+    "/材料科学(\\d+)区/": "材$1"
+    "/医学(\\d+)区/": "医$1"
+    "/教育学(\\d+)区/": "教育$1"
+    "/化学(\\d+)区/": "化$1"
+    "/物理与天体物理(\\d+)区/": "物$1"
