@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 
+from .journal_rank import DEFAULT_FIELDS, DEFAULT_MAP
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # 显式加载项目根目录的 .env —— 不要依赖当前工作目录,
@@ -163,12 +165,34 @@ class AppConfig:
 
 
 @dataclass
+class JournalRankConfig:
+    """期刊等级(easyScholar)。影响因子/分区是付费专有数据,Crossref 与
+    Semantic Scholar 都不提供 —— 之前只有 X-MOL 邮件里的条目才有 IF,
+    全库 209 条只有 2 条,卡片上看着像随机出现。"""
+
+    enabled: bool = True
+    api_key_env: str = "EASYSCHOLAR_SECRET_KEY"
+    # 只展示这些字段。接口一口气返回十几个体系(还有各高校自己的分级),
+    # 全铺在卡片上会把真正重要的信息淹掉。
+    fields: list[str] = field(default_factory=lambda: list(DEFAULT_FIELDS))
+    # 字段名 → 短标签(空 = 不印名字);"/正则/" 键作用于值。见 journal_rank.py
+    map: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_MAP))
+    # 一次富化最多查几本新刊。开放接口按次计额,给个上限免得被异常数据打爆。
+    max_lookups: int = 40
+    # 刊名别名:来源给的短名/罗马字名 → easyScholar 认的全名。
+    # 例:"Youji huaxue" 是 S2 对《有机化学》的罗马字写法;
+    #    "Angewandte Chemie" 在 S2 里常指国际版(有 ISSN 时优先走 ISSN 兜底)。
+    aliases: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class Config:
     app: AppConfig = field(default_factory=AppConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     mail: MailConfig = field(default_factory=MailConfig)
     sources: SourceConfig = field(default_factory=SourceConfig)
     ranking: RankingConfig = field(default_factory=RankingConfig)
+    journal_rank: JournalRankConfig = field(default_factory=JournalRankConfig)
     interests_data: dict[str, Any] = field(default_factory=dict)
 
     # 解析后的绝对路径
@@ -204,6 +228,7 @@ def load_config(path: str | Path | None = None) -> Config:
         mail=_build(MailConfig, raw.get("mail")),
         sources=_build(SourceConfig, raw.get("sources")),
         ranking=_build(RankingConfig, raw.get("ranking")),
+        journal_rank=_build(JournalRankConfig, raw.get("journal_rank")),
     )
 
     pf = cfg.interests_file

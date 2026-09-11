@@ -16,6 +16,7 @@
 | 召回 B | **Semantic Scholar `/paper/search/bulk`** | 精确 AND 查询,召回低但准确率高 | 免费(需 key) |
 | 摘要 | **Semantic Scholar `/paper/batch`** | 按 DOI 补摘要 —— 实测 ACS 系期刊 4/4 都能补到 | 免费 |
 | 精排 | **DeepSeek `deepseek-chat`** | 打分 + 给"为什么推给你"的理由 | 极低 |
+| 期刊等级 | **easyScholar 开放接口** | 影响因子、中科院分区、北核、CSCD 等 | 按次计额,结果本地缓存 |
 
 ### 两条召回腿为什么互补
 
@@ -216,6 +217,50 @@ DOI。连不上或解析不出会分别给出对应排查方向。
 期刊匹配做了缩写归一:`Org. Lett.` ↔ `Organic Letters`、
 `Angew. Chem. Int. Ed.` ↔ `Angewandte Chemie International Edition` 都能对上
 (用首字母串比对,有测试覆盖)。
+
+---
+
+## 期刊等级(影响因子 / 分区)
+
+影响因子和分区是**付费专有数据**(Clarivate JCR / 中科院文献情报中心),
+Crossref 和 Semantic Scholar 都不提供 —— 这也是为什么早先的 IF 标签
+只出现在 X-MOL 来的那两条上,看着像随机出现。
+
+现在走 [easyScholar 开放接口](https://www.easyscholar.cc),按**刊名**查,
+结果缓存进 `journal_rank` 表:全库几十本刊查一遍就够,之后不再消耗额度。
+
+```bash
+# 密钥写进 .env(不写进 config.yaml)
+echo 'EASYSCHOLAR_SECRET_KEY=你的密钥' >> .env
+.venv/bin/python -m litradar.cli enrich --limit 0   # 只补期刊等级,不动条目
+```
+
+卡片上是压缩过的短标签,**规则在 `config.yaml` 的 `journal_rank` 下**:
+
+```yaml
+journal_rank:
+  fields: [sciwarn, sci, sciUp, sciif, pku, cssci]   # 只展示这些
+  map:
+    北大中文核心: 北核        # 字段名 → 标签名;留空 = 只显示值
+    SCI: ""
+    "/化学(\\d+)区/": "化$1"   # /正则/ 作用于值,把"化学1区"压成"化1"
+  aliases:                   # 来源给的短名/罗马字名 → easyScholar 认的全名
+    "Youji huaxue": "Chinese Journal of Organic Chemistry"
+```
+
+三类规则各管各的,不会互相打架:
+
+| 写法 | 作用对象 | 例子 |
+|---|---|---|
+| `字段显示名: 短标签` | 标签名 | `北大中文核心` → `北核` |
+| `字段显示名: ""` | 去掉标签名,**只留值** | `SCI: ""` 把 `SCI Q1` 变成 `Q1` |
+| `"/正则/": "替换"` | **值**,`$1` 是捕获组 | `化学1区` → `化1` |
+
+> ⚠️ 空标签**不等于**隐藏字段 —— 把字段整个去掉要从 `fields` 里删。
+> 否则用户列出的 6 个字段里有一半在 map 里是空的,一"隐藏"就全没了。
+
+刊名在入库时统一清洗(`&amp;` → `&`、换行 → 空格)。这不只是显示问题:
+统计页按刊名分组时,带换行的 JACS 会裂成两行,按刊名查等级也直接查不到。
 
 ---
 

@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from markupsafe import Markup
 
-from .. import db, pipeline, rank, summarize
+from .. import db, journal_rank, pipeline, rank, summarize
 from ..config import Config, load_config
 from ..normalize import days_ago
 from ..rank import load_interests
@@ -187,6 +187,49 @@ def _conn():
     return db.Database(get_cfg().db_file).connect()
 
 
+# --------------------------------------------------------------- 期刊等级标签
+_renderer_cache: dict[int, Any] = {}
+
+
+def _rank_renderer(cfg: Config):
+    """按 config 缓存渲染器。规则解析有点开销,而每个请求都要用。"""
+    key = id(cfg)
+    r = _renderer_cache.get(key)
+    if r is None:
+        r = journal_rank.Renderer(cfg.journal_rank.fields, cfg.journal_rank.map)
+        _renderer_cache.clear()      # 单份配置,留着旧的没意义
+        _renderer_cache[key] = r
+    return r
+
+
+def _decorate(rows, conn):
+    """给条目挂上期刊等级标签。
+
+    渲染规则(哪些字段、怎么缩写)属于展示层,不该塞进 db.get_items ——
+    否则 CLI / 测试也会被拖上 web 的配置。所以在这里统一补一列。
+    缓存表一次读全(几十行),不逐条查库。
+    """
+    cfg = get_cfg()
+    if not cfg.journal_rank.enabled:
+        return rows
+    ranks = db.journal_ranks(conn)
+    # 刊名查不到时用 ISSN 兜底(短刊名 / 只给缩写的来源)
+    by_issn = db.journal_ranks_by_issn(conn)
+    aliases = {db.norm_journal(k): v
+               for k, v in (cfg.journal_rank.aliases or {}).items()}
+    renderer = _rank_renderer(cfg)
+    out = []
+    for r in rows:
+        d = dict(r)
+        j = d.get("journal")
+        j = aliases.get(db.norm_journal(j), j)      # 短名 → 全名
+        got = (ranks.get(db.norm_journal(j))
+               or by_issn.get((d.get("issn") or "").strip()))
+        d["rank_tags"] = renderer.tags(got)
+        out.append(d)
+    return out
+
+
 # --------------------------------------------------------------------- auth
 @app.get("/healthz")
 def healthz():
@@ -231,8 +274,8 @@ def inbox(request: Request, state: str = "new", kind: str = "paper",
         total_filtered = db.count_items(conn, **filt)
         pages = max(1, -(-total_filtered // PER_PAGE))     # 向上取整
         page = min(max(1, page), pages)                     # 越界就夹到有效范围
-        rows = db.get_items(conn, **filt, limit=PER_PAGE,
-                            offset=(page - 1) * PER_PAGE)
+        rows = _decorate(db.get_items(conn, **filt, limit=PER_PAGE,
+                                      offset=(page - 1) * PER_PAGE), conn)
         # 副标题里"共 N 篇"的分母必须跟当前页签是同一批条目,
         # 否则在"不感兴趣"页签会出现"共 59 篇…当前显示 149 篇"这种自相矛盾的读数。
         # 收藏/不感兴趣是独立清单,分母就是它们自己;
@@ -259,7 +302,8 @@ def week(request: Request):
     require_token(request)
     conn = _conn()
     try:
-        rows = db.get_items(conn, kind="paper", since=days_ago(7), limit=200)
+        rows = _decorate(db.get_items(conn, kind="paper", since=days_ago(7),
+                                      limit=200), conn)
         heads, rest = list(rows[:3]), list(rows[3:])
     finally:
         conn.close()
@@ -272,7 +316,7 @@ def patents(request: Request):
     require_token(request)
     conn = _conn()
     try:
-        rows = db.get_items(conn, kind="patent", state=None, limit=200)
+        rows = _decorate(db.get_items(conn, kind="patent", state=None, limit=200), conn)
     finally:
         conn.close()
     return templates.TemplateResponse(request, "patents.html", ctx(
@@ -292,7 +336,7 @@ def search(request: Request, q: str = "", page: int = 1):
             pages = max(1, -(-total_hits // per))
             page = min(max(1, page), pages)
             start = (page - 1) * per
-            rows = db.search_items(conn, q, limit=per, offset=start)
+            rows = _decorate(db.search_items(conn, q, limit=per, offset=start), conn)
     finally:
         conn.close()
     return templates.TemplateResponse(request, "search.html", ctx(
@@ -320,11 +364,14 @@ def item_detail(request: Request, item_id: int):
                WHERE i.id=?""",
             (item_id,),
         ).fetchone()
+        # 在连接还开着的时候挂标签 —— _decorate 要读期刊缓存表
+        it = _decorate([row], conn)[0] if row else None
     finally:
         conn.close()
-    if not row:
+    if it is None:
         raise HTTPException(404, "条目不存在")
-    return templates.TemplateResponse(request, "item.html", ctx(request, it=row, page="inbox"))
+    return templates.TemplateResponse(request, "item.html", ctx(
+        request, it=it, page="inbox"))
 
 
 @app.get("/stats", response_class=HTMLResponse)

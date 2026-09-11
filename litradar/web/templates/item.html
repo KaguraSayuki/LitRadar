@@ -24,6 +24,7 @@
       <span class="tag">{{ source_name(it['source']) }}</span>
       {% if it['depth'] %}<span class="tag">{{ '深度摘要' if it['depth'] == 'deep' else '一句话摘要' }}</span>{% endif %}
       {% if it['is_oa'] %}<span class="tag tag--oa">开放获取</span>{% endif %}
+      {% for t in it['rank_tags'] %}<span class="tag tag--rank" title="期刊等级(easyScholar)">{{ t }}</span>{% endfor %}
     </div>
 
     {% if it['ignored'] %}
