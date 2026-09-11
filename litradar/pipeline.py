@@ -133,7 +133,7 @@ def ingest_keyword_search(cfg: Config, *, verbose: bool = True) -> dict:
     try:
         raw: list[dict] = []
 
-        if cfg.sources.crossref_enabled:
+        if cfg.sources.crossref_search_enabled:
             # 多查询并集 —— 实测单查询 100 篇 → 4 条查询并集 186 篇(+86%),
             # 收益在**召回**而不在精确率(精确率反而略降),精确交给 LLM 精排。
             for q in queries:
@@ -170,6 +170,21 @@ def ingest_keyword_search(cfg: Config, *, verbose: bool = True) -> dict:
                         verbose=verbose,
                     )
                     stat["per_query"][f"[S2] {q}"] = len(got)
+                    stat["s2"] += len(got)
+                    raw += got
+
+                # 期刊定向的宽查询:替代 Crossref 原来的 ISSN 白名单覆盖
+                for q in prof.s2_venue_queries:
+                    got = semanticscholar.search_bulk(
+                        q,
+                        year=yr,
+                        since=cutoff.isoformat(),
+                        venues=cfg.sources.s2_venues or None,
+                        max_pages=cfg.sources.s2_search_max_pages,
+                        interval=cfg.sources.s2_min_interval,
+                        verbose=verbose,
+                    )
+                    stat["per_query"][f"[S2·venue] {q}"] = len(got)
                     stat["s2"] += len(got)
                     raw += got
 
