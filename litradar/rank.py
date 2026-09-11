@@ -82,6 +82,8 @@ class Profile:
     s2_queries: list[str] = field(default_factory=list)
     # 限定在核心期刊内的宽查询 —— 用来替代 Crossref 的期刊定向覆盖
     s2_venue_queries: list[str] = field(default_factory=list)
+    # 引用滚雪球的种子 DOI。必须是 1-3 年前的文献 —— 新论文被引 0-1 次,滚不出来。
+    seed_dois: list[str] = field(default_factory=list)
     exclude_title_prefixes: list[str] = field(default_factory=list)
 
     @classmethod
@@ -105,6 +107,7 @@ class Profile:
             search_queries=multi,
             s2_queries=[q for q in (d.get("s2_queries") or []) if q and q.strip()],
             s2_venue_queries=[q for q in (d.get("s2_venue_queries") or []) if q and q.strip()],
+            seed_dois=[x.strip() for x in (d.get("seed_dois") or []) if x and x.strip()],
             exclude_title_prefixes=[p.lower() for p in
                                     (d.get("exclude_title_prefixes") or [])],
         )

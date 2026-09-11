@@ -291,3 +291,73 @@ def search_bulk(query: str, *, year: str | None = None, since: str | None = None
         if not token or not data:
             break
     return out
+
+
+# ── 引用滚雪球 ──────────────────────────────────────────────────────────────
+
+CITE_FIELDS = ("title,abstract,venue,year,publicationDate,externalIds,"
+               "citationCount,openAccessPdf")
+
+
+def fetch_citations(paper_ref: str, *, since: str | None = None, limit: int = 500,
+                    retries: int = 3, verbose: bool = False,
+                    interval: float | None = None) -> list[dict]:
+    """前向滚雪球:谁引用了这篇。``paper_ref`` 可以是 ``DOI:10.x/y`` 或 S2 paperId。
+
+    **直接传 ``DOI:`` 前缀,不用先解析 paperId** —— 省掉一次请求,
+    对 1 req/s 的限流来说是实打实的收益。
+
+    为什么只做前向:前向引用必然是**更新的**文献,符合"雷达"的定位;
+    后向(它引用了谁)拉回的是经典老文献,那是另一类需求。
+
+    ⚠️ 种子必须是 1-3 年前的。实测:2026 年的新论文被引 0-1 次,
+    拿它当种子什么都滚不出来。
+    """
+    if not os.environ.get("S2_API_KEY"):
+        return []
+    interval = MIN_INTERVAL if interval is None else interval
+    out: list[dict] = []
+    offset = 0
+    while len(out) < limit:
+        params: dict[str, Any] = {"fields": CITE_FIELDS, "limit": min(100, limit - len(out)),
+                                  "offset": offset}
+        r = None
+        last = ""
+        for attempt in range(max(1, retries)):
+            _throttle(interval)
+            try:
+                r = requests.get(f"{BASE}/paper/{paper_ref}/citations",
+                                 params=params, headers=_headers(), timeout=60)
+            except Exception as e:  # noqa: BLE001
+                last = f"{type(e).__name__}: {str(e)[:60]}"
+                r = None
+                time.sleep(3 * (attempt + 1))
+                continue
+            if r.status_code in (429, 403):
+                wait = float(r.headers.get("Retry-After") or 0) or (8 * (attempt + 1))
+                last = f"HTTP {r.status_code} 限流"
+                if verbose:
+                    print(f"    [S2] 引用滚雪球限流,等 {wait:.0f}s 重试({attempt + 1}/{retries})")
+                time.sleep(wait)
+                continue
+            break
+        if r is None or r.status_code != 200:
+            if verbose:
+                print(f"    [warn] 滚雪球放弃({last or '未知'}): {paper_ref[:34]}")
+            break
+
+        data = r.json().get("data") or []
+        if not data:
+            break
+        for item in data:
+            citing = item.get("citingPaper") or {}
+            d = citing.get("publicationDate") or ""
+            if since and d and d < since:
+                continue          # 只要窗口内的新文献
+            rec = _to_dict(citing)
+            if rec.get("title"):
+                out.append(rec)
+        if len(data) < params["limit"]:
+            break
+        offset += len(data)
+    return out
