@@ -109,6 +109,71 @@ def ingest_mail(cfg: Config, *, verbose: bool = True) -> dict:
     return stat
 
 
+def _ingest_snowball(conn: sqlite3.Connection, cfg: Config, prof,
+                     stat: dict, *, verbose: bool = True) -> list[dict]:
+    """引用滚雪球:顺着自己领域的基础文献往前滚。
+
+    精度靠**共被引计数**,不靠关键词:
+
+        统计每篇候选被几个**不同**种子引用过。同时引用了我 2 个以上种子的
+        论文几乎必然在同一脉络里;而碰巧引到 1 个的不相关论文(MOF、离子
+        液体、纳米簇)不会。实测 11 条候选筛出 3 条,3 条全中;
+        正式跑一轮 34 条筛出 5 条,4 条入库、3 条对口。
+
+    为什么不用关键词卡:滚雪球的价值恰恰在于发现**换了说法**的新工作 ——
+    拿自己的检索词去卡,等于把它最擅长的那部分挡在门外。共被引依据的是
+    "这个领域的前辈们被谁共同引用",和我的词表无关。
+
+    为什么要落表、而不是一轮查完所有种子:
+      1. S2 免费 key 名义 1 req/s,实测连打十几个种子一半会 429。
+         一轮只刷新"最久没查的"几个,轮着来(日报场景完全够)。
+      2. 一次失败不影响判断 —— 共被引是在**全部种子、全部历史轮次**上统计的。
+         否则那 5 个失败种子引用的论文永远凑不够票,会静默漏掉。
+    """
+    stat.update({"snowball_refreshed": 0, "snowball_failed": 0,
+                 "snowball_new_cites": 0, "snowball_kept": 0})
+    seeds = [s.strip() for s in (prof.seed_dois or []) if s and s.strip()]
+    if not cfg.sources.snowball_enabled or not seeds:
+        return []
+    seeds = seeds[:cfg.sources.snowball_max_seeds]
+    if not os.environ.get("S2_API_KEY"):
+        stat["snowball_skipped"] = "未设 S2_API_KEY"
+        return []
+
+    from datetime import date, timedelta
+    cutoff = date.today() - timedelta(days=cfg.sources.s2_search_lookback_days)
+    yr = f"{cutoff.year}-{date.today().year}"
+
+    # ---- 1. 刷新最久没查的几个种子 ----
+    todo = db.pick_seeds_to_query(conn, seeds, cfg.sources.snowball_seeds_per_run)
+    for seed in todo:
+        got = semanticscholar.fetch_citations(
+            f"DOI:{seed}", year=yr, since=cutoff.isoformat(),
+            limit=cfg.sources.snowball_per_seed,
+            interval=cfg.sources.s2_min_interval, verbose=verbose)
+        if not got:
+            # 记失败也更新时间戳:否则一个 404 的死种子会每轮都排在最前面
+            db.mark_seed_queried(conn, seed, 0, status="failed")
+            stat["snowball_failed"] += 1
+            conn.commit()
+            continue
+        stat["snowball_new_cites"] += db.save_seed_cites(conn, seed, got)
+        db.mark_seed_queried(conn, seed, len(got), status="ok")
+        stat["snowball_refreshed"] += 1
+        conn.commit()          # 逐种子提交:中断也不丢已花掉的额度
+
+    # ---- 2. 在累积的引用关系上做共被引闸门 ----
+    kept = db.cocited_items(conn, cfg.sources.snowball_min_cocitations)
+    stat["snowball_kept"] = len(kept)
+    if verbose:
+        total = conn.execute("SELECT COUNT(DISTINCT citing_doi) FROM seed_cite").fetchone()[0]
+        print(f"  滚雪球 刷新 {stat['snowball_refreshed']}/{len(todo)} 个种子"
+              + (f"(失败 {stat['snowball_failed']})" if stat["snowball_failed"] else "")
+              + f" · 累计引用关系 {total} 条"
+              + f" → 共被引≥{cfg.sources.snowball_min_cocitations} 待入库 {len(kept)}")
+    return kept
+
+
 def ingest_keyword_search(cfg: Config, *, verbose: bool = True) -> dict:
     """用 interests.yaml 里的检索词做全量召回。
 
@@ -127,8 +192,8 @@ def ingest_keyword_search(cfg: Config, *, verbose: bool = True) -> dict:
     queries = prof.queries or ([prof.query] if prof.query else [])
     stat: dict[str, Any] = {"queries": queries, "s2_queries": prof.s2_queries,
                             "per_query": {}, "crossref": 0, "s2": 0,
-                            "unique": 0, "openalex": 0, "new": 0, "updated": 0,
-                            "errors": 0}
+                            "snowball": 0, "unique": 0, "openalex": 0,
+                            "new": 0, "updated": 0, "errors": 0}
     started = db.now()
     try:
         raw: list[dict] = []
@@ -201,6 +266,12 @@ def ingest_keyword_search(cfg: Config, *, verbose: bool = True) -> dict:
                 raw += got
         elif cfg.sources.openalex_enabled:
             stat["openalex_skipped"] = f"环境变量 {cfg.sources.openalex_api_key_env} 未设置"
+
+        # 引用滚雪球:第三条召回腿。前两条靠词表,这条靠领域前辈的引用关系 ——
+        # 所以它能捞到"换了说法"的工作,那是关键词召回天然的盲区。
+        got_snow = _ingest_snowball(conn, cfg, prof, stat, verbose=verbose)
+        stat["snowball"] = len(got_snow)
+        raw += got_snow
 
         # 入库前去重:Crossref 同一 DOI 可能被多条查询、甚至同一响应重复返回,
         # 不去重会白白多花 LLM 精排的钱。

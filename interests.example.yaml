@@ -179,3 +179,39 @@ journals:
 # ── 重点关注作者 ────────────────────────────────────────────────────────────
 authors_watch:
   - "<重点关注作者,填姓或全名都可以>"
+
+# ── 引用滚雪球的种子(前向:顺着这些文献往下滚) ────────────────────────
+# 取自开题报告的参考文献 —— 都是本方向已经沉淀下来的工作。
+# ⚠️ 种子的年份很关键:近一两年的新论文被引 0-1 次,滚不出东西。
+# 选 2014-2023 这一批,每篇每年都有十几次被引,才能滚出东西来。
+seed_dois:
+  # 2017 Organic Letters — Chiral Cyclic Ligand-Enabled Iridium-Catalyzed Asymmetric Arylation of
+  - 10.1021/acs.orglett.7b01631
+  # 2020 Advanced Synthesis & Catalysis — Pastor I. Anion-Dependent Imidazolium-Based Catalysts for Allylation o
+  - 10.1002/adsc.202000102
+  # 2023 Organic Letters — Regio- and Stereoselective Allylation of Anilines with Aryl Allenes in
+  - 10.1021/acs.orglett.3c01764
+  # 2020 Chemical Society Reviews — Recent progress on donor and donor–donor carbenes
+  - 10.1039/c9cs00542k
+  # 2016 Chemical Science — Enantioselective synthesis of α-alkenyl α-amino acids via N–H insertio
+  - 10.1039/c5sc03558a
+  # 2016 Advanced Synthesis & Catalysis — Enantioselective Copper-Catalyzed Intramolecular N−H Bond Insertion: S
+  - 10.1002/adsc.201600390
+  # 2019 Chemical Science — Enantioselective carbene insertion into the N–H bond of benzophenone i
+  - 10.1039/c9sc03354h
+  # 2019 Science — Highly enantioselective carbene insertion into N–H bonds of aliphatic 
+  - 10.1126/science.aaw9939
+  # 2022 ACS Catalysis — Enantioselective Synthesis of Unnatural Carbamate-Protected α-Alkyl Am
+  - 10.1021/acscatal.2c03937
+  # 2022 Nature Catalysis — Enantioselective synthesis of amino acids from ammonia
+  - 10.1038/s41929-022-00779-2
+  # 2015 Chemical Communications — Myoglobin-catalyzed intermolecular carbene N–H insertion with arylamin
+  - 10.1039/c4cc08753d
+  # 2018 Chemical Science — Blue light-promoted photolysis of aryldiazoacetates
+  - 10.1039/c8sc01165f
+  # 2021 Nature Chemistry — Dual-function enzyme catalysis for enantioselective carbon–nitrogen bo
+  - 10.1038/s41557-021-00794-z
+  # 2019 ACS Catalysis — A Tandem Iridium-Catalyzed “Chain-Walking”/Cope Rearrangement Sequence
+  - 10.1021/acscatal.9b00118
+  # 2020 Chemical Communications — Nickel(II)-catalyzed asymmetric thio-Claisen rearrangement of α-diazo 
+  - 10.1039/d0cc04590j

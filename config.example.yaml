@@ -76,6 +76,14 @@ sources:
   #    窗口内,其余永远不参与排序,纯属死重量。
   s2_search_lookback_days: 180
 
+  # ── 引用滚雪球(前向:顺着 seed_dois 往下滚) ──────────────────────────
+  # 种子写在 interests.yaml 的 seed_dois 里。做法见 pipeline._ingest_snowball。
+  snowball_enabled: true
+  snowball_max_seeds: 25          # 总共用多少个种子
+  snowball_seeds_per_run: 5       # 每轮刷新几个(轮着来,躲 S2 突发限流)
+  snowball_min_cocitations: 1     # ≥N 个种子共同引用才收;1 = 全收
+  snowball_per_seed: 100          # 单个种子最多取多少条引用方
+
   openalex_enabled: false         # ⚠️ 2026 年起 API Key + 额度制,未配 key 会
                                   #    返回 "Insufficient budget"。配上再开。
   openalex_api_key_env: "OPENALEX_API_KEY"
@@ -128,7 +136,7 @@ journal_rank:
   map:
     北大中文核心: 北核
     SCI: ""
-    SCIIF: ""
+    SCIIF: "IF"
     SCIIF(5): ""
     CSCD: ""
     EI检索: EI
