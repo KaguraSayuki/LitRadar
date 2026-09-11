@@ -407,8 +407,17 @@ def run(cfg: Config, *, days: int = 30, verbose: bool = True) -> dict:
 
         # 被规则丢掉的条目标记为 excluded —— 收件箱据此隐藏它们。
         # 之前它们只是"没有分数",仍排在列表末尾逼用户手动忽略。
+        #
+        # 例外:用户已经手动表过态的条目(收藏/已读/不感兴趣)不参与自动排除。
+        # 手动决定必须压过规则 —— 否则收藏一篇之后某次收紧了检索词,
+        # 它会静悄悄被标成 excluded 从收藏夹里消失。
+        touched = db.user_touched_ids(conn)
         kept_ids_now = {int(r["id"]) for r, _, _ in kept}
-        dropped_ids = [int(r["id"]) for r in rows if int(r["id"]) not in kept_ids_now]
+        auto_dropped = [int(r["id"]) for r in rows if int(r["id"]) not in kept_ids_now]
+        dropped_ids = [i for i in auto_dropped if i not in touched]
+        # 反过来说,历史上被旧逻辑误伤的已反馈条目要恢复出来
+        db.set_excluded(conn, [i for i in auto_dropped if i in touched], False)
+        stat["protected_by_feedback"] = len(auto_dropped) - len(dropped_ids)
         db.set_excluded(conn, dropped_ids, True)
         conn.commit()
 

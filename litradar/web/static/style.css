@@ -181,6 +181,13 @@ h2 small { font-weight: 400; color: var(--ink-3); font-size: 13px; margin-left: 
 }
 .seg a:hover { color: var(--ink); text-decoration: none; }
 .seg a.is-on { background: var(--surface); color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px rgba(0, 0, 0, .08); }
+/* 标签上的计数(目前只有"收藏"用)。选中态用琥珀底色呼应收藏按钮的语义色 */
+.seg__n {
+  margin-left: 6px; padding: 0 5px; border-radius: 999px; background: var(--surface-3);
+  color: var(--ink-3); font-size: 11.5px; font-weight: 600; line-height: 16px;
+  font-variant-numeric: tabular-nums;
+}
+.seg a.is-on .seg__n { background: var(--amber-tint); color: var(--amber-ink); }
 .toolbar__right { margin-left: auto; color: var(--ink-3); font-size: 12.5px; font-variant-numeric: tabular-nums; }
 
 /* ---------------------------------------------------------------- 条目列表 */
