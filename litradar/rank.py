@@ -74,6 +74,9 @@ class Profile:
     authors_watch: list[str]
     search_query: str = ""
     search_queries: list[str] = field(default_factory=list)
+    # Semantic Scholar bulk 端点的检索词。**必须用查询语法**(+ = AND,| = OR,
+    # "..." = 短语),裸词会被当短语匹配而返回 0 条。
+    s2_queries: list[str] = field(default_factory=list)
     exclude_title_prefixes: list[str] = field(default_factory=list)
 
     @classmethod
@@ -94,6 +97,7 @@ class Profile:
             authors_watch=d.get("authors_watch") or [],
             search_query=(d.get("search_query") or "").strip(),
             search_queries=multi,
+            s2_queries=[q for q in (d.get("s2_queries") or []) if q and q.strip()],
             exclude_title_prefixes=[p.lower() for p in
                                     (d.get("exclude_title_prefixes") or [])],
         )

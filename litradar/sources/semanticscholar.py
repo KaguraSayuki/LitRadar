@@ -170,6 +170,10 @@ def fetch_many_by_doi(dois: list[str], retries: int = 3,
 def _to_dict(p: dict, doi: str | None = None) -> dict:
     oa = p.get("openAccessPdf") or {}
     return {
+        # ⚠️ 必须带 kind。`_to_dict` 同时服务于「富化」和「检索」两条路径,
+        # 入库时 item.kind 是 NOT NULL —— 漏了会让整批插入失败:
+        #   NOT NULL constraint failed: item.kind
+        "kind": "paper",
         "title": p.get("title"),
         "abstract": p.get("abstract"),
         "tldr": (p.get("tldr") or {}).get("text"),
@@ -184,7 +188,10 @@ def _to_dict(p: dict, doi: str | None = None) -> dict:
 
 
 def search(query: str, *, limit: int = 20, year: str | None = None) -> list[dict]:
-    """关键词检索。无 API Key 时极易 429,仅作为可选补充。"""
+    """相关性检索(/paper/search)。最多 100 条、最多 1000 条结果,不支持查询语法。
+
+    仅作兜底;正式召回请用 search_bulk() —— 那个支持语法且单次可拉 1000 篇。
+    """
     if not os.environ.get("S2_API_KEY"):
         return []
     params: dict[str, Any] = {"query": query, "limit": min(limit, 100), "fields": FIELDS}
@@ -199,3 +206,76 @@ def search(query: str, *, limit: int = 20, year: str | None = None) -> list[dict
         return [_to_dict(p) for p in r.json().get("data", [])]
     except Exception:  # noqa: BLE001
         return []
+
+
+# bulk 端点单页最多 1000 条(官方文档)
+BULK_PAGE = 1000
+
+# ⚠️ bulk 端点**不支持 tldr** —— 共用 FIELDS 会直接 400:
+#     {"error":"Unrecognized or unsupported fields: [tldr]"}
+# 实测 title,tldr -> 400;下面这套 -> 200。所以单独一份。
+BULK_FIELDS = ("title,abstract,venue,year,publicationDate,externalIds,"
+               "citationCount,openAccessPdf,authors,publicationTypes,url")
+
+
+def search_bulk(query: str, *, year: str | None = None, sort: str = "publicationDate:desc",
+                max_pages: int = 1, retries: int = 3, verbose: bool = False,
+                interval: float | None = None) -> list[dict]:
+    """批量检索(/paper/search/bulk)。单页最多 1000 条,支持查询语法与排序。
+
+    查询条件应显式使用布尔运算符；裸词组合可能被按短语处理。
+    以下仅演示语法，不代表真实研究偏好或实际命中数量。
+    语法:``+`` = AND,``|`` = OR,``"..."`` = 短语,``-`` = 排除。
+
+    与 Crossref 的分工:Crossref 模糊匹配、召回高但噪声大;bulk 是精确 AND、
+    召回低但准确率高。两者互补,不是替换关系。
+    """
+    if not os.environ.get("S2_API_KEY"):
+        return []
+    interval = MIN_INTERVAL if interval is None else interval
+    out: list[dict] = []
+    token: str | None = None
+
+    for page in range(max(1, max_pages)):
+        params: dict[str, Any] = {"query": query, "fields": BULK_FIELDS, "sort": sort}
+        if year:
+            params["year"] = year
+        if token:
+            params["token"] = token
+        r = None
+        last = ""
+        for attempt in range(max(1, retries)):
+            _throttle(interval)
+            try:
+                r = requests.get(f"{BASE}/paper/search/bulk", params=params,
+                                 headers=_headers(), timeout=60)
+            except Exception as e:  # noqa: BLE001
+                last = f"{type(e).__name__}: {str(e)[:70]}"
+                r = None
+                time.sleep(3 * (attempt + 1))
+                continue
+            if r.status_code in (429, 403):
+                # 实测:5s 后仍 429,15s 后成功。响应里**没有** Retry-After,
+                # 所以自己退避,别直接放弃(之前的实现就是直接放弃,导致静默少数据)。
+                wait = float(r.headers.get("Retry-After") or 0) or (8 * (attempt + 1))
+                last = f"HTTP {r.status_code} 限流"
+                if verbose:
+                    print(f"    [S2] 限流,等 {wait:.0f}s 重试({attempt + 1}/{retries})")
+                time.sleep(wait)
+                continue
+            break
+
+        if r is None or r.status_code != 200:
+            print(f"    [warn] S2 bulk 放弃({last or '未知'}): query={query[:44]!r}")
+            break
+
+        j = r.json()
+        data = j.get("data") or []
+        if verbose:
+            print(f"    [S2] {query[:44]!r} 第 {page + 1} 页:命中 {j.get('total')},"
+                  f"本页 {len(data)}")
+        out += [_to_dict(p) for p in data]
+        token = j.get("token")
+        if not token or not data:
+            break
+    return out

@@ -10,7 +10,7 @@ from . import db, enrich, rank, summarize
 from .config import Config
 from .normalize import title_norm
 from .rank import load_interests
-from .sources import crossref_search, mail, openalex_search, xmol_email
+from .sources import crossref_search, mail, openalex_search, semanticscholar, xmol_email
 
 
 # ------------------------------------------------------------------ ingest
@@ -125,7 +125,8 @@ def ingest_keyword_search(cfg: Config, *, verbose: bool = True) -> dict:
     database = db.Database(cfg.db_file)
     conn = database.connect()
     queries = prof.queries or ([prof.query] if prof.query else [])
-    stat: dict[str, Any] = {"queries": queries, "per_query": {}, "crossref": 0,
+    stat: dict[str, Any] = {"queries": queries, "s2_queries": prof.s2_queries,
+                            "per_query": {}, "crossref": 0, "s2": 0,
                             "unique": 0, "openalex": 0, "new": 0, "updated": 0,
                             "errors": 0}
     started = db.now()
@@ -146,6 +147,24 @@ def ingest_keyword_search(cfg: Config, *, verbose: bool = True) -> dict:
                 stat["per_query"][q] = len(got)
                 raw += got
             stat["crossref"] = len(raw)
+
+        # Semantic Scholar bulk:第三条腿。与 Crossref 互补 —— Crossref 模糊匹配、
+        # 召回高噪声大;bulk 是精确 AND、召回低但准确率高。用 DOI 合并。
+        if cfg.sources.s2_search_enabled and prof.s2_queries:
+            if not os.environ.get("S2_API_KEY"):
+                stat["s2_skipped"] = "未设 S2_API_KEY"
+            else:
+                for q in prof.s2_queries:
+                    got = semanticscholar.search_bulk(
+                        q,
+                        year=cfg.sources.s2_search_year or None,
+                        max_pages=cfg.sources.s2_search_max_pages,
+                        interval=cfg.sources.s2_min_interval,
+                        verbose=verbose,
+                    )
+                    stat["per_query"][f"[S2] {q}"] = len(got)
+                    stat["s2"] += len(got)
+                    raw += got
 
         if cfg.sources.openalex_enabled and os.environ.get(cfg.sources.openalex_api_key_env):
             for q in queries:
