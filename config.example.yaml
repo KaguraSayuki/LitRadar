@@ -13,6 +13,11 @@ app:
   token_env: "LITRADAR_TOKEN"
   interests: "./interests.yaml"   # 你的检索词与偏好
 
+  # 流水线时间窗(天)。**必须 ≥ 抓取窗口**(sources.s2_search_lookback_days),
+  # 否则抓回来的文献进了库却落在排序窗口之外,永远拿不到分数。
+  # 定时任务、命令行 --days、网页上的"排序/摘要"按钮都默认用它。
+  pipeline_window_days: 200
+
 llm:
   provider: deepseek
   base_url: "https://api.deepseek.com"

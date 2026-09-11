@@ -101,7 +101,9 @@ async function litradarRun(stage, btn) {
   btn.textContent = '运行中…';
   if (out) out.textContent = '正在运行「' + stage + '」,可能要几分钟,请不要关掉页面……';
   try {
-    var r = await fetch('/admin/run/' + stage + '?days=30', { method: 'POST' });
+    // 不带 days —— 服务端统一取 config 里的 app.pipeline_window_days。
+    // 写死 30 天会让抓取(180 天)回来的条目永远进不了排序器。
+    var r = await fetch('/admin/run/' + stage, { method: 'POST' });
     var text = await r.text();
     try { text = JSON.stringify(JSON.parse(text), null, 2); } catch (e) { /* 不是 JSON 就原样显示 */ }
     if (out) out.textContent = text;
