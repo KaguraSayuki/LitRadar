@@ -232,16 +232,34 @@ query.title         精确短句 标题含 ≥2 个核心概念: 4–18/60
 
 ---
 
-## 部署
+## 部署(systemd)
+
+三个单元都是**模板单元**,`%i` 是运行用户,所以仓库里不出现任何用户名。
 
 ```bash
-sudo cp deploy/litradar-web.service /etc/systemd/system/litradar@.service
-sudo cp deploy/litradar-daily.{service,timer} /etc/systemd/system/
+cd /srv/Work/LitRadar
+
+# 注意结尾的 @ —— 模板单元,不能省
+sudo cp deploy/litradar-web.service        /etc/systemd/system/litradar@.service
+sudo cp deploy/litradar-daily@.service     /etc/systemd/system/
+sudo cp deploy/litradar-daily.timer        /etc/systemd/system/
+
 sudo systemctl daemon-reload
-sudo systemctl enable --now litradar@<你的用户名> litradar-daily.timer
+
+# 把 <你的用户名> 换成 whoami 的结果
+sudo systemctl enable --now litradar@<你的用户名>.service
+sudo systemctl enable --now litradar-daily@<你的用户名>.timer
+
+# 查看
+systemctl status litradar@<你的用户名>.service
+systemctl list-timers 'litradar*'
+journalctl -u litradar@<你的用户名>.service -f
 ```
 
-> `litradar-web.service` 用了 `%i` 模板实例,所以拷贝时要改名成 `litradar@.service`。
+> ⚠️ `litradar-daily@.service` 用了 `User=%i`,**必须**以模板实例名安装。
+> 直接拷成 `litradar-daily.service` 会让 `%i` 为空,systemd 拒绝启动。
+
+对外访问由 nginx 反代,见 `deploy/litradar-nginx.conf`(应用只绑 `127.0.0.1:8090`)。
 
 ---
 

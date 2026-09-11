@@ -1,10 +1,13 @@
 [Unit]
-Description=LitRadar 每日定时触发
+Description=LitRadar 每日定时触发(%i 实例)
 
 [Timer]
+# 指向同实例的服务。两者都是模板(%i = 用户名),这样仓库里不出现任何用户名。
+Unit=litradar-daily@%i.service
 # 每天 07:00 跑一次;机器关机错过则开机后补跑
 OnCalendar=*-*-* 07:00:00
 Persistent=true
+# 打散一点,避免整点撞车
 RandomizedDelaySec=600
 
 [Install]

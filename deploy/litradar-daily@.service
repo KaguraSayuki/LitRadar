@@ -1,3 +1,5 @@
+# 模板单元 —— 用 litradar-daily@<用户名>.service 引用(%i 会被替换)。
+# 不要直接拷成 litradar-daily.service:那会让 %i 为空,systemd 拒绝启动。
 [Unit]
 Description=LitRadar 每日流水线(采集 → 富化 → 排序 → 摘要)
 After=network-online.target
