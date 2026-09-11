@@ -1,0 +1,58 @@
+{%- from "_macros.html" import icon -%}
+{#- 导航项只定义一次:桌面顶栏和手机底栏共用 -#}
+{%- set nav_items = [
+  ('inbox',     '/',          '收件箱',   'inbox'),
+  ('week',      '/week',      '本期精选', 'sparkles'),
+  ('patents',   '/patents',   '专利',     'award'),
+  ('search',    '/search',    '检索',     'search'),
+  ('stats',     '/stats',     '统计',     'chart'),
+  ('interests', '/interests', '检索词',   'sliders'),
+] -%}
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#FFFFFF" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1C201E" media="(prefers-color-scheme: dark)">
+  <title>{% block title %}LitRadar{% endblock %}</title>
+  {# 在样式加载前读回上次手动选的主题,避免刷新时闪一下 #}
+  <script>(function(){try{var t=localStorage.getItem('litradar-theme');if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}})();</script>
+  <link rel="stylesheet" href="/static/style.css?v={{ static_v }}">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%231F6B5A' stroke-width='2.2' stroke-linecap='round'%3E%3Cpath d='M2.29 9.62A10 10 0 1 0 21.31 8.35'/%3E%3Cpath d='M16.24 7.76A6 6 0 1 0 8.23 16.67'/%3E%3Ccircle cx='12' cy='12' r='2' fill='%231F6B5A'/%3E%3Cpath d='m13.41 10.59 5.66-5.66'/%3E%3C/svg%3E">
+</head>
+<body {% block bodyattr %}{% endblock %}>
+
+<header class="topbar">
+  <a class="brand" href="/">{{ icon('radar') }}<span>LitRadar</span></a>
+  <nav class="nav" aria-label="主导航">
+    {% for key, href, label, ico in nav_items %}
+      <a href="{{ href }}" class="{{ 'is-on' if page == key }}"{% if page == key %} aria-current="page"{% endif %}>{{ label }}</a>
+    {% endfor %}
+  </nav>
+  <span class="topbar__spacer"></span>
+  <button type="button" class="iconbtn theme-toggle" onclick="litradarToggleTheme()" title="切换浅色 / 深色" aria-label="切换浅色 / 深色">
+    {{ icon('moon', 'icon-moon') }}{{ icon('sun', 'icon-sun') }}
+  </button>
+</header>
+
+<main class="main">
+{% block body %}{% endblock %}
+</main>
+
+<footer class="footer">
+  LitRadar,个人自用。X-MOL 订阅邮件与 Crossref 检索汇集,Semantic Scholar 补摘要,DeepSeek 精排与中文摘要。
+</footer>
+
+{# 手机底部标签栏(桌面隐藏) #}
+<nav class="tabbar" aria-label="主导航">
+  {% for key, href, label, ico in nav_items %}
+    <a href="{{ href }}" class="{{ 'is-on' if page == key }}"{% if page == key %} aria-current="page"{% endif %}>{{ icon(ico) }}<span>{{ label }}</span></a>
+  {% endfor %}
+</nav>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script src="/static/app.js?v={{ static_v }}"></script>
+</body>
+</html>

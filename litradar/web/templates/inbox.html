@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% from "_macros.html" import card, pager with context %}
+{% block title %}收件箱 · LitRadar{% endblock %}
+{% block bodyattr %}data-state="{{ state }}"{% endblock %}
+
+{% block body %}
+{# 阅读状态与相关度阈值两组筛选互相保留 #}
+{% set ms = ('&min_score=%d' % min_score) if min_score else '' %}
+
+<div class="page-head">
+  <div>
+    <h1>收件箱</h1>
+    <p class="page-sub">
+      库里共 <b>{{ total }}</b> 篇
+      {%- if total_filtered != total %},当前筛选 <b>{{ total_filtered }}</b> 篇{% endif %}
+      {%- if not llm_ready %}。还没配 DeepSeek API Key,现在只按关键词排序{% endif %}
+    </p>
+  </div>
+</div>
+
+<div class="toolbar">
+  <nav class="seg" aria-label="阅读状态">
+    <a href="/?state=new{{ ms }}" class="{{ 'is-on' if state == 'new' }}">未读</a>
+    <a href="/?state=read{{ ms }}" class="{{ 'is-on' if state == 'read' }}">已读</a>
+    <a href="/?state=all{{ ms }}" class="{{ 'is-on' if state == 'all' }}">全部</a>
+  </nav>
+  {# 阈值按实际分布定:加权后最高只到 ~60,原来的 ≥70/≥85 永远是空的 #}
+  <nav class="seg" aria-label="相关度筛选">
+    <a href="/?state={{ state }}" class="{{ 'is-on' if not min_score }}">全部分数</a>
+    <a href="/?state={{ state }}&min_score=30" class="{{ 'is-on' if min_score == 30 }}">≥ 30 分</a>
+    <a href="/?state={{ state }}&min_score=40" class="{{ 'is-on' if min_score == 40 }}">≥ 40 分</a>
+  </nav>
+  {% if pages > 1 %}<span class="toolbar__right">第 {{ page_no }} / {{ pages }} 页</span>{% endif %}
+</div>
+
+{% if items %}
+  <section class="list" aria-label="条目列表">
+    {% for it in items %}{{ card(it) }}{% endfor %}
+  </section>
+  {{ pager(page_no, pages, qs) }}
+{% elif total > 0 %}
+  <div class="empty">
+    当前筛选下没有条目。<br>
+    <a href="/">回到未读</a>
+  </div>
+{% else %}
+  <div class="empty">
+    这里还没有条目。<br>
+    把 X-MOL 订阅邮件导出为 .eml 放进 <code>data/inbox/</code>,然后运行<br>
+    <code>.venv/bin/python -m litradar.cli run</code>
+  </div>
+{% endif %}
+{% endblock %}

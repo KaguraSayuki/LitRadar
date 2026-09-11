@@ -1,0 +1,19 @@
+{# 反馈按钮组。POST /item/{id}/action 后服务端返回这一整块,前端原地替换。
+   三个按钮各占一个语义色:收藏 = 琥珀,已读 = 铑绿,不感兴趣 = 砖红。 #}
+{% from "_macros.html" import icon %}
+<div class="acts" id="acts-{{ it['id'] }}">
+  <button type="button" class="btn btn--star{{ ' is-on' if it['starred'] }}" aria-pressed="{{ 'true' if it['starred'] else 'false' }}"
+          onclick="litradarAction({{ it['id'] }}, '{{ 'unstar' if it['starred'] else 'star' }}')">
+    {{ icon('star') }}{{ '已收藏' if it['starred'] else '收藏' }}
+  </button>
+  {% if it['state'] == 'new' %}
+    <button type="button" class="btn btn--read" onclick="litradarAction({{ it['id'] }}, 'read')">{{ icon('check') }}已读</button>
+  {% else %}
+    <button type="button" class="btn btn--read is-on" onclick="litradarAction({{ it['id'] }}, 'unread')">{{ icon('undo') }}设为未读</button>
+  {% endif %}
+  {% if it['ignored'] %}
+    <button type="button" class="btn btn--ignore is-on" onclick="litradarAction({{ it['id'] }}, 'unignore')">{{ icon('undo') }}恢复</button>
+  {% else %}
+    <button type="button" class="btn btn--ignore" onclick="litradarAction({{ it['id'] }}, 'ignore')">{{ icon('x') }}不感兴趣</button>
+  {% endif %}
+</div>

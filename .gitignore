@@ -1,0 +1,34 @@
+# 环境与密钥
+.env
+*.env
+!.env.example
+
+# 私人配置(含邮箱、研究方向、关注作者)—— 只提交对应的 .example
+config.yaml
+interests.yaml
+
+# 数据与运行时产物
+data/
+*.db
+*.db-wal
+*.db-shm
+logs/
+
+# Playwright 下载的 Chromium(体积大,不入库)
+.playwright/
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store

@@ -1,0 +1,16 @@
+[Unit]
+Description=LitRadar 每日流水线(采集 → 富化 → 排序 → 摘要)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=%i
+WorkingDirectory=/srv/Work/LitRadar
+EnvironmentFile=/srv/Work/LitRadar/.env
+ExecStart=/srv/Work/LitRadar/.venv/bin/python -m litradar.cli run --days 30
+
+# 单次运行超时保护(富化要逐条请求,给足时间)
+TimeoutStartSec=3600
+NoNewPrivileges=true
+PrivateTmp=true

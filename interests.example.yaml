@@ -1,0 +1,166 @@
+# ============================================================================
+# LitRadar 检索词与偏好 —— 示例模板
+# ----------------------------------------------------------------------------
+# 用法: cp interests.example.yaml interests.yaml 然后按自己的方向改。
+# 真实的 interests.yaml 已在 .gitignore 中排除,不会进版本库。
+#
+# 下面每个字段都会被代码实际读取;用不到的可以留空列表。
+# ============================================================================
+
+# 研究方向(中文可读,会拼进 LLM 精排与摘要的 prompt)
+direction: >
+  <在这里写你的研究方向。中文可读即可,它会拼进 LLM 精排与摘要的 prompt。> 示例:有机合成方法学 / 过渡金属催化。以 XX 为底物,经 XX 催化构建 XX 中间体,
+
+# ── 检索词(必须英文,多条取并集) ─────────────────────────────────────────
+# 实测(45 天窗口、按 DOI 去重):单条宽查询 100 篇 → 4 条并集 186 篇(+86%)。
+# 收益在【召回】不在精确率 —— 拆开后单条精确率反而略降。精确交给 LLM 精排。
+search_queries:
+  - "<英文检索词,多条取并集>"
+  - 'example: "N-H insertion" diazo aniline asymmetric'
+  - 'example: "aza-Claisen" rearrangement tandem carbene'
+
+# ── 关键词(规则打分用) ────────────────────────────────────────────────────
+keywords:
+  core:
+  - <核心关键词,命中即高分>
+  - metal carbene
+  - N-H insertion
+  bonus:
+  - <加分关键词>
+  - enantioselective
+  - copper catalysis
+  current_challenges:
+  - <你当前实验卡在哪 —— 能对症的论文会被 LLM 显著加权>
+  boost_topics:
+  - <希望优先命中的主题>
+
+# ── 非论文记录:按标题【前缀】排除 ──────────────────────────────────────────
+# Crossref 会登记同行评审与更正声明。用前缀而非子串,避免误伤正当标题。
+exclude_title_prefixes:
+  - "review for"
+  - "author response for"
+  - "decision letter for"
+  - "corrigendum"
+  - "correction to"
+  - "author correction"
+  - "erratum"
+  - "frontispiece"
+  - "addendum"
+  - "editorial"
+  - "retraction"
+
+# ── 排除方向(子串匹配,命中直接丢弃,省 LLM 额度) ─────────────────────────
+# ⚠️ 只放【通用领域词】。不要从单篇论文标题抄词组 —— 那是过拟合,会误杀相关论文。
+negative:
+  - "supplementary material"
+  - "polymerization"
+  - "polymer electrolyte"
+  - "lithium battery"
+  - "electrocatalysis"
+  - "water splitting"
+  - "CO2 reduction"
+  - "metal-organic framework"
+  - "covalent organic framework"
+  - "photovoltaic"
+  - "drug delivery"
+  - "formulation"
+  - "clinical trial"
+  - "biomarker discovery"
+
+# ── 期刊白名单(issn 已通过 Crossref 逐本反查核实) ────────────────────────
+journals:
+  core:
+  - Journal of the American Chemical Society
+  - Organic Letters
+  - Angewandte Chemie International Edition
+  - The Journal of Organic Chemistry
+  - ACS Catalysis
+  - Chemical Science
+  - Chemical Communications
+  ok:
+  - Chemical Society Reviews
+  - Chemical Reviews
+  - Accounts of Chemical Research
+  - Advanced Synthesis & Catalysis
+  - Tetrahedron
+  - Tetrahedron Letters
+  - Organic & Biomolecular Chemistry
+  - Green Chemistry
+  - Organic Chemistry Frontiers
+  - Nature Chemistry
+  - Nature Catalysis
+  - Nature Communications
+  - Science
+  - JACS Au
+  - Chem Catalysis
+  - Journal of Organometallic Chemistry
+  - European Journal of Organic Chemistry
+  issn:
+    Journal of the American Chemical Society:
+    - 0002-7863
+    - 1520-5126
+    Organic Letters:
+    - 1523-7060
+    - 1523-7052
+    Angewandte Chemie International Edition:
+    - 1433-7851
+    - 1521-3773
+    The Journal of Organic Chemistry:
+    - 0022-3263
+    - 1520-6904
+    ACS Catalysis:
+    - 2155-5435
+    Chemical Science:
+    - 2041-6520
+    - 2041-6539
+    Chemical Communications:
+    - 1359-7345
+    - 1364-548X
+    Chemical Society Reviews:
+    - 0306-0012
+    - 1460-4744
+    Chemical Reviews:
+    - 0009-2665
+    - 1520-6890
+    Accounts of Chemical Research:
+    - 0001-4842
+    - 1520-4898
+    Advanced Synthesis & Catalysis:
+    - 1615-4150
+    - 1615-4169
+    Tetrahedron:
+    - 0040-4020
+    Tetrahedron Letters:
+    - 0040-4039
+    Organic & Biomolecular Chemistry:
+    - 1477-0520
+    - 1477-0539
+    Green Chemistry:
+    - 1463-9262
+    - 1463-9270
+    Organic Chemistry Frontiers:
+    - 2052-4110
+    - 2052-4129
+    Nature Chemistry:
+    - 1755-4330
+    - 1755-4349
+    Nature Catalysis:
+    - 2520-1158
+    Nature Communications:
+    - 2041-1723
+    Science:
+    - 0036-8075
+    - 1095-9203
+    JACS Au:
+    - 2691-3704
+    Chem Catalysis:
+    - 2667-1093
+    Journal of Organometallic Chemistry:
+    - 0022-328X
+    European Journal of Organic Chemistry:
+    - 1434-193X
+    - 1099-0690
+
+# ── 重点关注作者 ────────────────────────────────────────────────────────────
+authors_watch:
+  - "<重点关注作者,填姓或全名都可以>"

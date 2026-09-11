@@ -1,0 +1,29 @@
+[project]
+name = "litradar"
+version = "0.1.0"
+description = "个人化学文献雷达 —— X-MOL 订阅邮件 + OpenAlex/Crossref 关键词检索 + DeepSeek 精排,局域网 Web 自用"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "jinja2>=3.1",
+    "pyyaml>=6.0",
+    "requests>=2.31",
+    "rank-bm25>=0.2.2",
+    "openai>=1.30",
+    "python-dotenv>=1.0",
+    "python-multipart>=0.0.9",
+]
+
+[project.scripts]
+litradar = "litradar.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["litradar*"]
+
+[tool.setuptools.package-data]
+"litradar.web" = ["templates/**/*.html", "static/**/*"]

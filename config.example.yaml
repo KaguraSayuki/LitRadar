@@ -1,0 +1,80 @@
+# ============================================================================
+# LitRadar 配置示例 —— 复制成 config.yaml 后按需修改
+# 密钥一律不写在这里,只放环境变量名,真实值写进 .env
+# ============================================================================
+
+app:
+  host: "127.0.0.1"               # 由 nginx 前置反代;见 deploy/litradar-nginx.conf
+  port: 8090
+  db_path: "./data/litradar.db"
+  timezone: "Asia/Shanghai"
+  # 没有账号体系。绑 0.0.0.0 时建议设 LITRADAR_TOKEN,
+  # 否则同网段任何人都能调 /admin/run/* 烧掉你的 DeepSeek 额度。
+  token_env: "LITRADAR_TOKEN"
+  interests: "./interests.yaml"   # 你的检索词与偏好
+
+llm:
+  provider: deepseek
+  base_url: "https://api.deepseek.com"
+  model: "deepseek-chat"          # 精排与摘要都用 V3,性价比最高
+  api_key_env: "DEEPSEEK_API_KEY"
+  temperature: 0.2                # 打分要稳定,低温
+  rerank_batch_size: 20           # listwise 每批条数
+  rerank_top_k: 50                # 粗排后进入 LLM 的条数上限(硬上限)
+  deep_summary_top_n: 8           # 前 N 名做深度摘要,其余一句话
+  timeout: 120
+  enabled: true
+
+# ── 邮件接入 ────────────────────────────────────────────────────────────────
+# 注意:Outlook 个人账号已禁用密码登录(IMAP 返回 LOGINDISABLED),
+#       所以走「Outlook 转发到 Gmail/QQ + 应用专用密码」这条路。
+mail:
+  mode: "folder"                  # folder | maildir | imap
+  folder: "./data/inbox"          # folder/maildir 模式读取目录
+  move_processed_to: "./data/inbox/processed"
+
+  # mode=imap 时使用(Gmail / QQ / 163)
+  # ⚠️ 这台机器上 imap.gmail.com 不通(DNS 被透明代理拦到 198.18.x.x,
+  #    SSL 握手 EOF)。实测可用:imap.qq.com / imap.163.com / imap.126.com /
+  #    imap.feishu.cn / imap.exmail.qq.com。
+  imap_host: "imap.qq.com"     # Gmail: imap.gmail.com ; QQ: imap.qq.com
+  imap_port: 993
+  imap_user: ""                   # 你的转发目标邮箱
+  imap_password_env: "IMAP_PASSWORD"   # 应用专用密码,写进 .env
+  imap_folder: "INBOX"
+  imap_search: 'FROM "newsletter.x-mol.com"'
+  imap_mark_seen: true
+
+# ── 数据源 ──────────────────────────────────────────────────────────────────
+# 分工是实测得出的:Crossref 负责检索,Semantic Scholar 负责补摘要,
+# OpenAlex 因 2026 年改为额度制而降级为可选。
+sources:
+  xmol_enabled: true              # X-MOL 订阅邮件:高精度精选(通常每次 2 条)
+
+  crossref_enabled: true          # 关键词检索主力:免费、稳定、无请求预算
+  crossref_lookback_days: 14
+  crossref_rows: 100
+
+  s2_enabled: true                # Semantic Scholar:摘要主力,实测 ACS 论文 4/4 都有
+  # ⚠️ 官方限流是 1 请求/秒(跨所有端点),且**有 Key 也只是独立配额,
+  #    不是更高速率**。这里默认 5s/请求更稳;batch 端点一次吃 100 个 DOI,
+  #    169 篇文献总共只需 2 次请求,放慢几乎不增加耗时。
+  s2_min_interval: 5.0
+
+  openalex_enabled: false         # ⚠️ 2026 年起 API Key + 额度制,未配 key 会
+                                  #    返回 "Insufficient budget"。配上再开。
+  openalex_api_key_env: "OPENALEX_API_KEY"
+  openalex_per_query: 60
+  openalex_lookback_days: 14
+
+  mailto: ""                      # 填你的邮箱,进入 Crossref polite pool(建议填)
+
+ranking:
+  # LLM 必须占主导:BM25 与规则只负责"召回",判断交给 LLM。
+  # 原 0.6/0.25/0.15 时,一篇 LLM 只给 35 分(理由写明"与研究方向不同")的论文
+  # 靠 BM25/规则的高分冲到了第 1 名 —— 聪明的信号被笨的信号淹没了。
+  weights:
+    llm: 0.85
+    coarse: 0.10
+    rule: 0.05
+  coarse_method: "bm25"           # DeepSeek 无 embedding API,故用 BM25

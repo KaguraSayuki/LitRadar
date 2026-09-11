@@ -1,0 +1,23 @@
+[Unit]
+Description=LitRadar Web (个人化学文献雷达)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/srv/Work/LitRadar
+EnvironmentFile=/srv/Work/LitRadar/.env
+# 只绑本机 —— 对外由 nginx 反代(见 deploy/litradar-nginx.conf)。
+# 直接绑 0.0.0.0 会绕过 nginx 的 TLS 与口令保护。
+ExecStart=/srv/Work/LitRadar/.venv/bin/uvicorn litradar.web.app:app \
+    --host 127.0.0.1 --port 8090
+Restart=on-failure
+RestartSec=5
+
+# 基础加固
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
