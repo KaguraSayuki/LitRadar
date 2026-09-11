@@ -170,7 +170,7 @@ def run(cfg: Config, *, limit: int = 200, days: int = 30, verbose: bool = True,
                 LEFT JOIN score            sc ON sc.item_id = i.id
                 LEFT JOIN item_enrichment  e  ON e.item_id  = i.id
                 WHERE {where} AND i.kind='paper'
-                  AND COALESCE(i.published_at,'') >= date('now', ?)
+                  AND {db.in_window('i')}
                 ORDER BY fs DESC, i.published_at DESC
                 LIMIT ?""",
             (f"-{days} days", limit),

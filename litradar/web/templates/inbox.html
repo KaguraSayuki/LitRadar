@@ -29,11 +29,13 @@
     </a>
     <a href="/?state=all{{ ms }}" class="{{ 'is-on' if state == 'all' }}">全部</a>
   </nav>
-  {# 阈值按实际分布定:加权后最高只到 ~60,原来的 ≥70/≥85 永远是空的 #}
+  {# 阈值按实际分布定:加权后满分约 100,但绝大多数条目落在 40 以下。
+     精排覆盖整个窗口之后,高分档才是"雷达真正想让你看的"那一小撮。 #}
   <nav class="seg" aria-label="相关度筛选">
     <a href="/?state={{ state }}" class="{{ 'is-on' if not min_score }}">全部分数</a>
-    <a href="/?state={{ state }}&min_score=30" class="{{ 'is-on' if min_score == 30 }}">≥ 30 分</a>
-    <a href="/?state={{ state }}&min_score=40" class="{{ 'is-on' if min_score == 40 }}">≥ 40 分</a>
+    <a href="/?state={{ state }}&min_score=30" class="{{ 'is-on' if min_score == 30 }}">≥ 30</a>
+    <a href="/?state={{ state }}&min_score=40" class="{{ 'is-on' if min_score == 40 }}">≥ 40</a>
+    <a href="/?state={{ state }}&min_score=60" class="{{ 'is-on' if min_score == 60 }}">≥ 60</a>
   </nav>
   {% if pages > 1 %}<span class="toolbar__right">第 {{ page_no }} / {{ pages }} 页</span>{% endif %}
 </div>

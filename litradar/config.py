@@ -117,7 +117,10 @@ class LLMConfig:
     api_key_env: str = "DEEPSEEK_API_KEY"
     temperature: float = 0.2
     rerank_batch_size: int = 20
-    rerank_top_k: int = 40
+    # 进 LLM 精排的条数上限。**0 = 不截断**(默认)。
+    # 候选池只有 ~200 条,省这点调用微不足道;而硬截断会让 BM25 有"一票否决权",
+    # 实测粗排 53/96/108 名的三篇被丢掉后永远是"未评分"。粗排只该给顺序。
+    rerank_top_k: int = 0
     deep_summary_top_n: int = 8
     timeout: int = 120
     enabled: bool = True

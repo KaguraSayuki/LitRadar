@@ -80,12 +80,14 @@ def test_other_views_still_hide_excluded(conn):
     assert db.count_items(conn, state="all") == 0
 
 
-def test_user_touched_ids_covers_every_action(conn):
+def test_starred_ids_only_covers_starred(conn):
+    """保护范围**只限收藏**。已读/不感兴趣不算 —— 它们本来就不在未读视图里,
+    保护它们只会让被规则丢掉的噪音滞留在"已读/全部",还都是没分数的。"""
     a, b, c = _add(conn, "a"), _add(conn, "b"), _add(conn, "c")
     db.set_action(conn, a, "star")
     db.set_action(conn, b, "read")
     db.set_action(conn, c, "ignore")
-    assert db.user_touched_ids(conn) == {a, b, c}
+    assert db.starred_ids(conn) == {a}
 
 
 def test_starred_count_respects_kind(conn):

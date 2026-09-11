@@ -105,10 +105,20 @@ def test_粗排把相关项排前(profile):
     assert picked[0][0]["id"] == 2, "最相关的那篇应排第一"
 
 
-def test_粗排topk截断(profile):
+def test_粗排默认不截断(profile):
+    """top_k=0(默认)必须原样返回全部 —— 截断会让 BM25 拿到"一票否决权",
+    被截掉的条目永远拿不到 LLM 判断,在收件箱里长成一片"未评分"。"""
     rows = [_row(id=i, title=f"Optical sensor study number {i}") for i in range(1, 21)]
     kept, _ = rule_filter(rows, profile)
-    assert len(coarse_rank(kept, profile, top_k=5)) <= 20
+    assert len(coarse_rank(kept, profile)) == len(kept) == 20
+    assert len(coarse_rank(kept, profile, top_k=0)) == 20
+
+
+def test_粗排显式topk才截断(profile):
+    """仍保留截断能力:显式给了正数才生效(给限量试跑用)。"""
+    rows = [_row(id=i, title=f"Optical sensor study number {i}") for i in range(1, 21)]
+    kept, _ = rule_filter(rows, profile)
+    assert len(coarse_rank(kept, profile, top_k=5)) == 5
 
 
 # ------------------------------------------------------------- 数据库
@@ -136,6 +146,35 @@ def test_已有字段不被空值覆盖(tmp_path):
                           "title": "T", "title_norm": "t", "abstract": None,
                           "source": "crossref"})
     assert conn.execute("SELECT abstract FROM item").fetchone()[0] == "好摘要"
+
+
+def test_时间窗捞回只有年份的条目(tmp_path):
+    """只知道年份的记录入库时写成 YYYY-01-01 占位,按字面比会被窗口切掉,
+    于是今年的论文永远拿不到分数、在收件箱里显示成"未评分"。
+    `db.in_window` 要对这类占位单独按年份放行。"""
+    import datetime
+
+    database = db.Database(tmp_path / "t.db")
+    database.init()
+    conn = database.connect()
+    this_year = datetime.date.today().year
+    old_year = this_year - 3
+
+    def add(key, pub):
+        db.upsert_item(conn, {"kind": "paper", "dedup_key": f"doi:10.1/{key}",
+                              "doi": f"10.1/{key}", "title": key, "title_norm": key,
+                              "published_at": pub, "source": "test"})
+
+    add("placeholder-now", f"{this_year}-01-01")
+    add("placeholder-old", f"{old_year}-01-01")
+    add("old-exact", f"{old_year}-06-15")
+
+    sql = f"SELECT i.doi FROM item i WHERE i.kind='paper' AND {db.in_window('i')}"
+    got = {r[0].split("/")[-1] for r in conn.execute(sql, ("-200 days",))}
+    assert "placeholder-now" in got, "今年只有年份的条目必须进窗"
+    assert "placeholder-old" not in got, "往年的占位日期不该被捞回来"
+    assert "old-exact" not in got
+    assert db.in_window("").startswith("(COALESCE(published_at"), "无别名也要能用"
 
 
 def test_反馈记录(tmp_path):
