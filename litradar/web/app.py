@@ -226,11 +226,14 @@ def inbox(request: Request, state: str = "new", kind: str = "paper",
         rows = db.get_items(conn, **filt, limit=PER_PAGE,
                             offset=(page - 1) * PER_PAGE)
         total_lib = conn.execute("SELECT COUNT(*) FROM item").fetchone()[0]
+        # 收藏夹有多少条 —— 放在标签上,不然用户不知道值不值得点进去
+        starred_total = db.count_items(conn, kind=kind, state="starred")
     finally:
         conn.close()
     return templates.TemplateResponse(request, "inbox.html", ctx(
         request, items=rows, state=state, kind=kind, min_score=min_score,
         total=total_lib, total_filtered=total_filtered,
+        starred_total=starred_total,
         page_no=page, pages=pages, per_page=PER_PAGE,
         qs=_page_params(state=state if state != "new" else None,
                         min_score=min_score),

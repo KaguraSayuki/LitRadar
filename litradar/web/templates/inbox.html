@@ -22,6 +22,11 @@
   <nav class="seg" aria-label="阅读状态">
     <a href="/?state=new{{ ms }}" class="{{ 'is-on' if state == 'new' }}">未读</a>
     <a href="/?state=read{{ ms }}" class="{{ 'is-on' if state == 'read' }}">已读</a>
+    {# 收藏是一条独立的轴(未读/已读都可能被收藏),所以并列在这里而不是另开一级导航。
+       带上条数:空的时候得让人一眼看出来是空,而不是以为自己点错了。 #}
+    <a href="/?state=starred{{ ms }}" class="{{ 'is-on' if state == 'starred' }}">
+      收藏{% if starred_total %} <span class="seg__n">{{ starred_total }}</span>{% endif %}
+    </a>
     <a href="/?state=all{{ ms }}" class="{{ 'is-on' if state == 'all' }}">全部</a>
   </nav>
   {# 阈值按实际分布定:加权后最高只到 ~60,原来的 ≥70/≥85 永远是空的 #}
@@ -38,6 +43,11 @@
     {% for it in items %}{{ card(it) }}{% endfor %}
   </section>
   {{ pager(page_no, pages, qs) }}
+{% elif state == 'starred' %}
+  <div class="empty">
+    收藏夹还是空的。<br>
+    在卡片上点<b>收藏</b>,之后就能在这里回看 —— 收藏的条目不会再被自动规则筛掉。
+  </div>
 {% elif total > 0 %}
   <div class="empty">
     当前筛选下没有条目。<br>

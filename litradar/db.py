@@ -283,14 +283,24 @@ def _item_filters(*, kind: str | None, state: str | None,
     if kind:
         where.append("i.kind = ?")
         params.append(kind)
-    if state == "new":
+    # state="starred" 是个"伪状态":它不是 item_state.state 的一个取值,
+    # 而是横切阅读状态的另一条轴(收藏的条目可能未读也可能已读)。
+    starred_only = state == "starred"
+    if starred_only:
+        where.append("COALESCE(s.starred,0) = 1")
+    elif state == "new":
         where.append("COALESCE(s.state,'new') = 'new' AND COALESCE(s.ignored,0) = 0")
     elif state:
         where.append("s.state = ?")
         params.append(state)
-    # 所有视图都隐藏被规则过滤的条目 —— 实测 139 条忽略反馈里 119 条属于这种,
-    # 它们本来就不该出现在收件箱里逼用户手动处理。
-    where.append("COALESCE(s.excluded,0) = 0")
+    if not starred_only:
+        # 其余视图隐藏被规则过滤的条目 —— 实测 139 条忽略反馈里 119 条属于这种,
+        # 它们本来就不该出现在收件箱里逼用户手动处理。
+        #
+        # 收藏视图例外:收藏是用户亲手挑出来的清单,必须免疫自动规则。
+        # 否则之后收紧检索词/加排除词,会把当初收藏的东西从收藏夹里"吃掉",
+        # 而用户根本收不到任何提示 —— 那是这个功能最不该有的行为。
+        where.append("COALESCE(s.excluded,0) = 0")
     if min_score is not None:
         where.append("COALESCE(sc.final_score,0) >= ?")
         params.append(min_score)
@@ -434,6 +444,16 @@ def save_enrichment(conn: sqlite3.Connection, item_id: int, data: dict) -> None:
         (item_id, data.get("cited_by_count"), data.get("is_oa"), data.get("oa_url"),
          data.get("openalex_id"), data.get("openalex_json"), data.get("crossref_json"), now()),
     )
+
+
+def user_touched_ids(conn: sqlite3.Connection) -> set[int]:
+    """用户手动反馈过的条目 id(收藏 / 已读 / 不感兴趣等)。
+
+    规则过滤必须给这些 id 让路:用户的手动决定优先于自动规则。
+    否则"收藏一篇 → 某天收紧了检索词 → 它被标成 excluded"这种无声的
+    数据丢失就会发生,而用户完全不知道自己去哪了。
+    """
+    return {int(r[0]) for r in conn.execute("SELECT DISTINCT item_id FROM feedback")}
 
 
 def set_excluded(conn: sqlite3.Connection, item_ids: list[int], excluded: bool = True) -> None:
