@@ -377,7 +377,7 @@ def rule_filter(items, profile) -> list[Item]:
 
 | 方法 | 路由 | 说明 |
 |---|---|---|
-| GET | `/` | 收件箱:未处理条目,按 `final` 降序 |
+| GET | `/` | 雷达页:仍在考虑范围内的条目,按 `final` 降序 |
 | GET | `/week` | 本周新增,3 篇必读 + 其余折叠 |
 | GET | `/patents` | 专利视图,按专利族聚合 |
 | GET | `/search?q=` | 全历史池检索(SQLite FTS5) |

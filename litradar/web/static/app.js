@@ -68,11 +68,17 @@ async function litradarAction(itemId, action) {
   }
 }
 
-/* 列表页:动作让条目不再属于当前视图(未读页点了已读 / 不感兴趣,
-   已读页点了设为未读)时,淡出移除,并给几秒撤销机会 —— 手机上误触很常见。 */
+/* 列表页:动作让条目不再属于当前视图时,淡出移除,并给几秒撤销机会 ——
+   手机上误触很常见。
+
+   "不感兴趣"会让条目从 未读/已读/全部 三个视图里同时消失(它只留在
+   "不感兴趣"页签),所以在这些视图里都要移除。反过来,在"不感兴趣"页签里
+   点"恢复",它也该立刻离开。收藏页签不吃这套:收藏的条目不受否决影响。 */
 function litradarAfterAction(itemId, action) {
   var view = document.body.dataset.state;
-  var leaves = (view === 'new' && (action === 'read' || action === 'ignore'))
+  var leaves = (action === 'ignore' && view !== 'ignored' && view !== 'starred')
+            || (action === 'unignore' && view === 'ignored')
+            || (view === 'new' && action === 'read')
             || (view === 'read' && action === 'unread');
   if (!leaves) return;
   var row = document.getElementById('card-' + itemId);
@@ -80,8 +86,10 @@ function litradarAfterAction(itemId, action) {
   var parent = row.parentNode, next = row.nextSibling;
   row.classList.add('is-leaving');
   var timer = setTimeout(function () { row.remove(); }, 260);
-  var label = { read: '已标为已读', ignore: '已标为不感兴趣', unread: '已设为未读' }[action];
-  var reverse = { read: 'unread', ignore: 'unignore', unread: 'read' }[action];
+  var label = { read: '已标为已读', ignore: '已否决,可在「不感兴趣」里找到',
+                unread: '已设为未读', unignore: '已恢复' }[action];
+  var reverse = { read: 'unread', ignore: 'unignore', unread: 'read',
+                  unignore: 'ignore' }[action];
   litradarToast(label, { ms: 4500, action: { label: '撤销', run: async function () {
     clearTimeout(timer);
     if (!row.isConnected) parent.insertBefore(row, (next && next.isConnected) ? next : null);

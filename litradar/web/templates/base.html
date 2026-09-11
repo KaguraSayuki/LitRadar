@@ -1,7 +1,7 @@
 {%- from "_macros.html" import icon -%}
 {#- 导航项只定义一次:桌面顶栏和手机底栏共用 -#}
 {%- set nav_items = [
-  ('inbox',     '/',          '收件箱',   'inbox'),
+  ('inbox',     '/',          home_label, 'inbox'),
   ('week',      '/week',      '本期精选', 'sparkles'),
   ('patents',   '/patents',   '专利',     'award'),
   ('search',    '/search',    '检索',     'search'),

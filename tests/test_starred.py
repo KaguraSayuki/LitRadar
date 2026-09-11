@@ -69,15 +69,15 @@ def test_starred_survives_exclusion(conn):
 
     assert db.count_items(conn, state="starred") == 1
     assert [r["id"] for r in db.get_items(conn, state="starred")] == [a]
-    # 其余视图照旧隐藏 excluded
-    assert db.count_items(conn, state="all") == 0
+    # 其余视图照旧隐藏 excluded(state=None 就是网页上的"全部")
+    assert db.count_items(conn, state=None) == 0
 
 
 def test_other_views_still_hide_excluded(conn):
     a = _add(conn, "a")
     db.set_excluded(conn, [a], True)
     assert db.count_items(conn, state="new") == 0
-    assert db.count_items(conn, state="all") == 0
+    assert db.count_items(conn, state=None) == 0
 
 
 def test_starred_ids_only_covers_starred(conn):
@@ -99,3 +99,58 @@ def test_starred_count_respects_kind(conn):
     assert db.count_items(conn, kind="paper", state="starred") == 1
     assert db.count_items(conn, kind="patent", state="starred") == 1
     assert db.count_items(conn, kind=None, state="starred") == 2
+
+
+# ------------------------------------------------- "不感兴趣"收纳(单独页签)
+
+def test_ignored_leaves_every_normal_view(conn):
+    """点了"不感兴趣"就不该再出现在 未读 / 已读 / 全部 里。
+
+    之前的实现只在"未读"过滤 ignored,于是"已读"和"全部"里还混着一堆
+    自己明确否决过的东西,卡片上又没有任何标记 —— 看不出它为什么在那儿。
+    """
+    a, b = _add(conn, "a"), _add(conn, "b")
+    db.set_action(conn, a, "ignore")
+    db.set_action(conn, b, "read")
+
+    for view in ("new", "read", None):
+        ids = {r["id"] for r in db.get_items(conn, state=view)}
+        assert a not in ids, f"被否决的条目不该出现在 state={view}"
+
+
+def test_ignored_has_its_own_view(conn):
+    a, b = _add(conn, "a"), _add(conn, "b")
+    db.set_action(conn, a, "ignore")
+    assert db.count_items(conn, state="ignored") == 1
+    assert [r["id"] for r in db.get_items(conn, state="ignored")] == [a]
+
+
+def test_unignore_restores_to_normal_views(conn):
+    a = _add(conn, "a")
+    db.set_action(conn, a, "ignore")
+    assert db.count_items(conn, state="new") == 0
+    db.set_action(conn, a, "unignore")
+    assert db.count_items(conn, state="ignored") == 0
+    assert db.count_items(conn, state="new") == 1
+
+
+def test_collection_still_shows_starred_even_if_ignored(conn):
+    """收藏优先于否决:两边都点过时,收藏夹里仍然要能看见它。
+    它同时也会出现在"不感兴趣"页签里 —— 重叠是允许的,卡片上有标签说明。"""
+    a = _add(conn, "a")
+    db.set_action(conn, a, "star")
+    db.set_action(conn, a, "ignore")
+    assert db.count_items(conn, state="starred") == 1
+    assert db.count_items(conn, state="ignored") == 1
+    assert db.count_items(conn, state=None) == 0
+
+
+def test_ignored_view_ignores_score_threshold_only_when_asked(conn):
+    """"不感兴趣"页签同样支持分数筛选 —— 回看时想只看高分的未采纳候选。"""
+    a, b = _add(conn, "a"), _add(conn, "b")
+    db.set_action(conn, a, "ignore")
+    db.set_action(conn, b, "ignore")
+    db.save_score(conn, a, final_score=80.0)
+    db.save_score(conn, b, final_score=10.0)
+    assert db.count_items(conn, state="ignored") == 2
+    assert db.count_items(conn, state="ignored", min_score=50) == 1
