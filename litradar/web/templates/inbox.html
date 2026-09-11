@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% from "_macros.html" import card, pager with context %}
-{% block title %}收件箱 · LitRadar{% endblock %}
+{% block title %}{{ home_label }} · LitRadar{% endblock %}
 {% block bodyattr %}data-state="{{ state }}"{% endblock %}
 
 {% block body %}
@@ -9,10 +9,10 @@
 
 <div class="page-head">
   <div>
-    <h1>收件箱</h1>
+    <h1>{{ home_label }}</h1>
     <p class="page-sub">
-      库里共 <b>{{ total }}</b> 篇
-      {%- if total_filtered != total %},当前筛选 <b>{{ total_filtered }}</b> 篇{% endif %}
+      共 <b>{{ total }}</b> 篇论文,按相关度排序
+      {%- if total_filtered != total %},当前显示 <b>{{ total_filtered }}</b> 篇{% endif %}
       {%- if not llm_ready %}。还没配 DeepSeek API Key,现在只按关键词排序{% endif %}
     </p>
   </div>
@@ -22,12 +22,19 @@
   <nav class="seg" aria-label="阅读状态">
     <a href="/?state=new{{ ms }}" class="{{ 'is-on' if state == 'new' }}">未读</a>
     <a href="/?state=read{{ ms }}" class="{{ 'is-on' if state == 'read' }}">已读</a>
-    {# 收藏是一条独立的轴(未读/已读都可能被收藏),所以并列在这里而不是另开一级导航。
-       带上条数:空的时候得让人一眼看出来是空,而不是以为自己点错了。 #}
+    {# 收藏与不感兴趣都是独立的轴(未读/已读都可能被收藏或被否决),所以并列在
+       这里而不是另开一级导航。带上条数:空的时候得让人一眼看出来是空,
+       而不是以为自己点错了。
+       "不感兴趣"必须有这个入口 —— 否则用户点了之后那篇就凭空消失,
+       连"我当时为什么否决它"都查不到,更别说撤销。 #}
     <a href="/?state=starred{{ ms }}" class="{{ 'is-on' if state == 'starred' }}">
       收藏{% if starred_total %} <span class="seg__n">{{ starred_total }}</span>{% endif %}
     </a>
-    <a href="/?state=all{{ ms }}" class="{{ 'is-on' if state == 'all' }}">全部</a>
+    <a href="/?state=ignored{{ ms }}" class="{{ 'is-on' if state == 'ignored' }}">
+      不感兴趣{% if ignored_total %} <span class="seg__n">{{ ignored_total }}</span>{% endif %}
+    </a>
+    <a href="/?state=all{{ ms }}" class="{{ 'is-on' if state == 'all' }}"
+       title="仍在考虑范围内的全部条目(不含「不感兴趣」和被规则过滤的)">全部</a>
   </nav>
   {# 阈值按实际分布定:加权后满分约 100,但绝大多数条目落在 40 以下。
      精排覆盖整个窗口之后,高分档才是"雷达真正想让你看的"那一小撮。 #}
@@ -49,6 +56,12 @@
   <div class="empty">
     收藏夹还是空的。<br>
     在卡片上点<b>收藏</b>,之后就能在这里回看 —— 收藏的条目不会再被自动规则筛掉。
+  </div>
+{% elif state == 'ignored' %}
+  <div class="empty">
+    这里还没有条目。<br>
+    你在卡片上点<b>不感兴趣</b>的文献会收到这里,不会再出现在未读 / 已读 / 全部里。
+    点<b>恢复</b>可以把它放回去。
   </div>
 {% elif total > 0 %}
   <div class="empty">

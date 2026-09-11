@@ -16,6 +16,8 @@
     {% endif %}
 
     <div class="meta">
+      {% if it['ignored'] %}<span class="tag tag--ignored">已否决</span>{% endif %}
+      {% if it['starred'] %}<span class="tag tag--starred">已收藏</span>{% endif %}
       {% if it['journal'] %}<span class="meta__journal">{{ it['journal']|unesc }}</span>{% endif %}
       {% if it['published_at'] %}<time datetime="{{ it['published_at'] }}">{{ it['published_at'] }}</time>{% endif %}
       {% if it['impact_factor'] %}<span class="tag tag--if">IF {{ it['impact_factor'] }}</span>{% endif %}
@@ -23,6 +25,14 @@
       {% if it['depth'] %}<span class="tag">{{ '深度摘要' if it['depth'] == 'deep' else '一句话摘要' }}</span>{% endif %}
       {% if it['is_oa'] %}<span class="tag tag--oa">开放获取</span>{% endif %}
     </div>
+
+    {% if it['ignored'] %}
+      <p class="notice notice--ignored">
+        你把它标成了<b>不感兴趣</b>,所以它只出现在
+        <a href="/?state=ignored">「不感兴趣」页签</a>里,不会回到未读 / 已读 / 全部。
+        点下面的<b>恢复</b>可以让它回到正常列表。
+      </p>
+    {% endif %}
 
     {% include "partials/actions.html" %}
   </header>

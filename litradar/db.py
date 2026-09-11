@@ -298,24 +298,36 @@ def _item_filters(*, kind: str | None, state: str | None,
     if kind:
         where.append("i.kind = ?")
         params.append(kind)
-    # state="starred" 是个"伪状态":它不是 item_state.state 的一个取值,
-    # 而是横切阅读状态的另一条轴(收藏的条目可能未读也可能已读)。
-    starred_only = state == "starred"
-    if starred_only:
+
+    # "收藏"和"不感兴趣"是两个**伪状态**:它们不是 item_state.state 的取值,
+    # 而是横切阅读状态的另外两条轴(收藏的条目可能未读也可能已读)。
+    # 它们各有自己的页签,是用户回看/撤销手动决定的地方,所以单独处理。
+    pseudo = state in ("starred", "ignored")
+    if state == "starred":
         where.append("COALESCE(s.starred,0) = 1")
+    elif state == "ignored":
+        where.append("COALESCE(s.ignored,0) = 1")
     elif state == "new":
-        where.append("COALESCE(s.state,'new') = 'new' AND COALESCE(s.ignored,0) = 0")
+        where.append("COALESCE(s.state,'new') = 'new'")
     elif state:
         where.append("s.state = ?")
         params.append(state)
-    if not starred_only:
-        # 其余视图隐藏被规则过滤的条目 —— 实测 139 条忽略反馈里 119 条属于这种,
-        # 它们本来就不该出现在收件箱里逼用户手动处理。
+
+    if not pseudo:
+        # 默认视图只显示"还在考虑范围内"的条目,两类被排除的都不出现:
         #
-        # 收藏视图例外:收藏是用户亲手挑出来的清单,必须免疫自动规则。
-        # 否则之后收紧检索词/加排除词,会把当初收藏的东西从收藏夹里"吃掉",
-        # 而用户根本收不到任何提示 —— 那是这个功能最不该有的行为。
+        # 1) ignored —— 用户已经明确否决。之前它只在"未读"里被过滤掉,
+        #    于是"已读"和"全部"里还混着一堆自己说过不要的东西,而且卡片上
+        #    没有任何标记,看不出为什么它在这儿。现在它们统一收进
+        #    "不感兴趣"页签,那里可以逐条恢复。
+        #
+        # 2) excluded —— 被规则过滤(实测 139 条忽略反馈里 119 条属于这种),
+        #    本来就不该出现在列表里逼用户手动处理。
+        where.append("COALESCE(s.ignored,0) = 0")
         where.append("COALESCE(s.excluded,0) = 0")
+    # 两个伪状态视图刻意**免疫**上面这两条:收藏是用户亲手挑的清单,
+    # 不能因为之后收紧了检索词就被"吃掉";不感兴趣页签本来就是收容所,
+    # 进去的东西必然带着 ignored=1。
     if min_score is not None:
         where.append("COALESCE(sc.final_score,0) >= ?")
         params.append(min_score)

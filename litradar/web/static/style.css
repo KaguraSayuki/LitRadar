@@ -244,6 +244,12 @@ h2 small { font-weight: 400; color: var(--ink-3); font-size: 13px; margin-left: 
 }
 .tag--if { background: var(--amber-tint); color: var(--amber-ink); }
 .tag--oa, .tag--hit { background: var(--accent-tint); color: var(--accent); }
+/* 手动决定的状态标签。用和按钮一致的语义色:收藏=琥珀,否决=砖红。
+   放在 meta 最前面,让人一眼看出"这条为什么在这儿"。 */
+.tag--starred { background: var(--amber-tint); color: var(--amber-ink); font-weight: 600; }
+.tag--ignored { background: var(--red-tint); color: var(--red-ink); font-weight: 600; }
+/* 被否决的条目整体压暗一点 —— 在"不感兴趣"页签里翻的时候,视觉上就不像推荐 */
+.entry:has(.tag--ignored) .entry__body { opacity: .72; }
 
 .reason {
   display: flex; gap: 8px; align-items: flex-start;
@@ -307,6 +313,15 @@ h2 small { font-weight: 400; color: var(--ink-3); font-size: 13px; margin-left: 
 .flash { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-radius: var(--radius-s); font-size: 13.5px; margin-bottom: 14px; }
 .flash--ok { background: var(--accent-tint); color: var(--accent); }
 .flash--err { background: var(--red-tint); color: var(--red-ink); }
+/* 说明"这条为什么不在正常列表里"。放在操作按钮上方,先解释再给按钮。 */
+.notice {
+  margin: 12px 0 0; padding: 9px 13px; border-radius: var(--radius-s);
+  font-size: 13px; line-height: 1.7; color: var(--ink-2);
+  background: var(--surface-2); border-left: 3px solid var(--line-strong);
+}
+.notice--ignored { background: var(--red-tint); border-left-color: var(--red-ink); color: var(--red-ink); }
+.notice--ignored a { color: inherit; text-decoration: underline; }
+.notice b { font-weight: 600; }
 
 /* ---------------------------------------------------------------- 表单 */
 .searchbar { display: flex; gap: 8px; max-width: 680px; margin-bottom: 18px; }

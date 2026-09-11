@@ -177,6 +177,7 @@ def ctx(request: Request, **kw) -> dict:
         # 让模板能判断"没评分"到底是没配 key,还是只是被规则过滤了
         "llm_ready": bool(cfg.llm.enabled and cfg.llm.api_key),
         "static_v": _static_version(),
+        "home_label": HOME_LABEL,
     }
     base.update(kw)
     return base
@@ -195,6 +196,13 @@ def healthz():
 # -------------------------------------------------------------------- pages
 # 每页条数。手机上一张卡片约 370px,25 条约 9 屏 —— 够扫一遍又不至于首屏太慢。
 PER_PAGE = 25
+
+# 首页在导航里的名字。这里只定义一次,顶栏、手机底栏、H1、标签页标题共用。
+#
+# 为什么不叫"收件箱":这个页面不是待处理的邮箱,而是雷达按相关度排出来的结果。
+# "收件箱"暗示"一堆等你清空的东西",恰好和这个工具的用途相反 ——
+# 它要回答的是"哪些值得看",而不是"还有多少没处理"。
+HOME_LABEL = "雷达"
 
 
 def _page_params(**kw) -> str:
@@ -225,15 +233,21 @@ def inbox(request: Request, state: str = "new", kind: str = "paper",
         page = min(max(1, page), pages)                     # 越界就夹到有效范围
         rows = db.get_items(conn, **filt, limit=PER_PAGE,
                             offset=(page - 1) * PER_PAGE)
-        total_lib = conn.execute("SELECT COUNT(*) FROM item").fetchone()[0]
+        # 副标题里"共 N 篇"的分母必须跟当前页签是同一批条目,
+        # 否则在"不感兴趣"页签会出现"共 59 篇…当前显示 149 篇"这种自相矛盾的读数。
+        # 收藏/不感兴趣是独立清单,分母就是它们自己;
+        # 未读/已读/全部共享同一个分母 —— 仍在考虑范围内的那批。
+        scope = state if state in ("starred", "ignored") else None
+        total_lib = db.count_items(conn, kind=kind, state=scope)
         # 收藏夹有多少条 —— 放在标签上,不然用户不知道值不值得点进去
         starred_total = db.count_items(conn, kind=kind, state="starred")
+        ignored_total = db.count_items(conn, kind=kind, state="ignored")
     finally:
         conn.close()
     return templates.TemplateResponse(request, "inbox.html", ctx(
         request, items=rows, state=state, kind=kind, min_score=min_score,
         total=total_lib, total_filtered=total_filtered,
-        starred_total=starred_total,
+        starred_total=starred_total, ignored_total=ignored_total,
         page_no=page, pages=pages, per_page=PER_PAGE,
         qs=_page_params(state=state if state != "new" else None,
                         min_score=min_score),
