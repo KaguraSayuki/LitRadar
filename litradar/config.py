@@ -80,6 +80,10 @@ class SourceConfig:
     # batch 端点一次吃 100 个 DOI,放慢几乎不增加总耗时。
     s2_enabled: bool = True
     s2_min_interval: float = 5.0
+    # S2 bulk 检索:精确 AND,召回低于 Crossref 但准确率高,作为互补的第三条腿
+    s2_search_enabled: bool = True
+    s2_search_year: str = ""          # 如 "2024-2026";留空不加年份过滤
+    s2_search_max_pages: int = 1      # 每页 1000 条,一般 1 页足够
 
     # OpenAlex:2026 年起改为 API Key + 额度制,不配 key 会 "Insufficient budget",
     # 因此默认关闭;配上 OPENALEX_API_KEY 才启用。

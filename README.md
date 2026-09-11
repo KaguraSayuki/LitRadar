@@ -12,9 +12,28 @@
 | 层 | 源 | 负责 | 成本 |
 |---|---|---|---|
 | 精选 | **X-MOL 订阅邮件** | 它替你按订阅词筛过的高精度结果(通常每次 2 条) | 免费 |
-| 召回 | **Crossref 关键词检索** | 按同一批关键词全量拉取,覆盖白名单里的 24 本期刊 | 免费、无预算限制 |
-| 摘要 | **Semantic Scholar** | 按 DOI 补摘要 —— 实测 ACS 系期刊 4/4 都能补到 | 免费 |
+| 召回 A | **Crossref 关键词检索** | 模糊匹配,召回高、噪声大;覆盖白名单里的 24 本期刊 | 免费、无预算限制 |
+| 召回 B | **Semantic Scholar `/paper/search/bulk`** | 精确 AND 查询,召回低但准确率高 | 免费(需 key) |
+| 摘要 | **Semantic Scholar `/paper/batch`** | 按 DOI 补摘要 —— 实测 ACS 系期刊 4/4 都能补到 | 免费 |
 | 精排 | **DeepSeek `deepseek-chat`** | 打分 + 给"为什么推给你"的理由 | 极低 |
+
+### 两条召回腿为什么互补
+
+```
+Crossref  模糊相关度匹配       单查询约 60-100 篇   噪声大
+S2 bulk   精确 AND 查询        单查询约 3-100 篇    准确率高
+```
+
+两者结果用 **DOI 合并**,所以同一条文献不会重复,而两条腿各自的盲区能被对方补上。
+
+> ⚠️ **S2 bulk 必须用查询语法**,否则**静默返回 0 条**:
+> ```
+> "N-H insertion" + diazo + aniline      -> 命中 3      ✅
+> diazo carbene N-H insertion aniline    -> 命中 0      ❌ 裸词被当短语
+> ```
+> 语法:`+` = AND,`|` = OR,双引号 = 短语,`-` = 排除。
+> 所以画像里 Crossref 用 `search_queries`(自然语言),S2 用 `s2_queries`(查询语法),
+> 两者分开配置 —— **不能共用一份检索词**。
 
 > ⚠️ **关于 OpenAlex**:2026 年起已改为 API Key + 额度制,未配 key 会直接返回
 > `Insufficient budget`。因此默认关闭;若你有 key,在 `.env` 里配 `OPENALEX_API_KEY`

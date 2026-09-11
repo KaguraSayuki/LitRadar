@@ -19,6 +19,21 @@ search_queries:
   - 'example: "N-H insertion" diazo aniline asymmetric'
   - 'example: "aza-Claisen" rearrangement tandem carbene'
 
+# ── Semantic Scholar bulk 检索词 ──────────────────────────────────────────────
+# ⚠️ 这个端点**必须用查询语法**,裸词会被当短语匹配而返回 0 条:
+#       "N-H insertion" + diazo + aniline      -> 命中 3
+#       diazo carbene N-H insertion aniline    -> 命中 0   ← 直接抄上面那行会失败
+#   语法:+ = AND,| = OR,双引号 = 短语,- = 排除。
+#
+# 为什么值得单独配:Crossref 是模糊匹配(召回高、噪声大),bulk 是精确 AND
+# (召回低、准确率高)。两条腿互补,用 DOI 合并。实测 ("para-selective" |
+# "para-allylation") + aniline 命中 14,含 "Asymmetric para-Functionalization
+# of Anilines Via Chiral Phosphoric..."。
+s2_queries:
+  - '"<英文短语>" + <词> + <词>'
+  - '("<说法A>" | "<说法B>") + <词>'
+  # + 是 AND,| 是 OR,双引号是短语
+
 # ── 关键词(规则打分用) ────────────────────────────────────────────────────
 keywords:
   core:
