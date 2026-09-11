@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% from "_macros.html" import card, pager, icon with context %}
+{% block title %}检索 · LitRadar{% endblock %}
+
+{% block body %}
+<div class="page-head">
+  <div>
+    <h1>检索</h1>
+    <p class="page-sub">在已入库的全部条目里搜标题、摘要、期刊和作者。</p>
+  </div>
+</div>
+
+<form method="get" action="/search" class="searchbar" role="search">
+  <label class="searchbar__field">
+    {{ icon('search') }}
+    <span class="sr-only">检索词</span>
+    <input class="input" type="search" name="q" value="{{ q }}" placeholder="例如 optical Sample detection" autofocus autocomplete="off">
+  </label>
+  <button class="btn btn--primary" type="submit">检索</button>
+</form>
+
+{% if q %}
+  {% if items %}
+    <p class="page-sub result-line">「{{ q }}」的结果{% if pages > 1 %},共 {{ pages }} 页{% endif %}</p>
+    <section class="list" aria-label="检索结果">
+      {% for it in items %}{{ card(it) }}{% endfor %}
+    </section>
+    {{ pager(page_no, pages, qs) }}
+  {% else %}
+    <div class="empty">没有命中「{{ q }}」。<br>检索按英文词头匹配,试试更短的词,比如 sensor。</div>
+  {% endif %}
+{% endif %}
+{% endblock %}

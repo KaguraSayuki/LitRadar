@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% from "_macros.html" import icon, source_name %}
+{% block title %}统计 · LitRadar{% endblock %}
+
+{% block body %}
+<div class="page-head">
+  <div>
+    <h1>统计</h1>
+    <p class="page-sub">看检索词调得对不对:哪个来源、哪本期刊的命中率高。</p>
+  </div>
+</div>
+
+<div class="tiles">
+  <div class="tile"><div class="tile__n">{{ s['items'] }}</div><div class="tile__l">条目总数</div></div>
+  <div class="tile"><div class="tile__n">{{ s['new'] }}</div><div class="tile__l">未读</div></div>
+  <div class="tile"><div class="tile__n">{{ s['starred'] }}</div><div class="tile__l">已收藏</div></div>
+  <div class="tile"><div class="tile__n">{{ s['ignored'] }}</div><div class="tile__l">不感兴趣</div></div>
+  <div class="tile"><div class="tile__n">{{ s['scored'] }}</div><div class="tile__l">已评分</div></div>
+  <div class="tile"><div class="tile__n">{{ s['summaries'] }}</div><div class="tile__l">已生成摘要</div></div>
+</div>
+
+{% set src_max = (s['by_source'] | map(attribute='n') | max) if s['by_source'] else 1 %}
+<h2>来源分布</h2>
+<div class="panel">
+  <div class="bars">
+    {% for r in s['by_source'] %}
+      <div class="row">
+        <span class="name">{{ source_name(r['source']) }}</span>
+        <span class="bar"><i style="--w:{{ (100 * r['n'] / src_max)|round(1) }}%"></i></span>
+        <span class="n">{{ r['n'] }}</span>
+      </div>
+    {% else %}
+      <p class="hint">还没有条目。</p>
+    {% endfor %}
+  </div>
+</div>
+
+{% set j_max = (s['by_journal'] | map(attribute='n') | max) if s['by_journal'] else 1 %}
+<h2>期刊命中率 <small>条目数排名前 {{ s['by_journal']|length }}</small></h2>
+<div class="panel">
+  <div class="bars">
+    <div class="row row--journal row--head">
+      <span>期刊</span><span></span><span class="n">篇</span><span class="n">平均相关度</span>
+    </div>
+    {% for r in s['by_journal'] %}
+      {% set a = r['avg_score'] %}
+      <div class="row row--journal">
+        <span class="name name--serif" title="{{ r['journal']|unesc }}">{{ r['journal']|unesc }}</span>
+        <span class="bar"><i style="--w:{{ (100 * r['n'] / j_max)|round(1) }}%"></i></span>
+        <span class="n">{{ r['n'] }}</span>
+        <span class="avg{{ ' avg--hot' if a is not none and a >= 40 else (' avg--warm' if a is not none and a >= 30 else '') }}">{{ a if a is not none else '—' }}</span>
+      </div>
+    {% else %}
+      <p class="hint">还没有条目。</p>
+    {% endfor %}
+  </div>
+</div>
+
+<h2>反馈</h2>
+<div class="panel">
+  {% if s['feedback'] %}
+    {% set fb_max = s['feedback'] | map(attribute='n') | max %}
+    {% set fb_name = {'star': '收藏', 'unstar': '取消收藏', 'read': '已读', 'unread': '设为未读',
+                      'ignore': '不感兴趣', 'unignore': '恢复', 'archive': '归档'} %}
+    <div class="bars">
+      {% for r in s['feedback'] %}
+        <div class="row">
+          <span class="name">{{ fb_name.get(r['action'], r['action']) }}</span>
+          <span class="bar"><i style="--w:{{ (100 * r['n'] / fb_max)|round(1) }}%"></i></span>
+          <span class="n">{{ r['n'] }}</span>
+        </div>
+      {% endfor %}
+    </div>
+    <p>反馈是整个系统里唯一会随时间变好的部分。攒够几十条后,可以把收藏过的条目做成精排提示词的示例。</p>
+  {% else %}
+    <p>还没有反馈。在收件箱点收藏、已读或不感兴趣就会记下来。</p>
+  {% endif %}
+</div>
+
+<h2 id="run">手动运行流水线</h2>
+<div class="panel">
+  <div class="steps">
+    <button type="button" class="btn" onclick="litradarRun('mail', this)"><span class="step-n">1</span>解析邮件</button>
+    <button type="button" class="btn" onclick="litradarRun('search', this)"><span class="step-n">2</span>关键词检索</button>
+    <button type="button" class="btn" onclick="litradarRun('enrich', this)"><span class="step-n">3</span>富化</button>
+    <button type="button" class="btn" onclick="litradarRun('rank', this)"><span class="step-n">4</span>排序</button>
+    <button type="button" class="btn" onclick="litradarRun('summarize', this)"><span class="step-n">5</span>摘要</button>
+    <button type="button" class="btn btn--primary" onclick="litradarRun('all', this)">{{ icon('play') }}全部运行</button>
+  </div>
+  <pre class="console" id="run-out">还没运行。排序和摘要会调用 DeepSeek,按量计费。</pre>
+</div>
+
+<h2>最近运行</h2>
+<div class="panel">
+  {% set stage_name = {'ingest_mail': '解析邮件', 'ingest_search': '关键词检索', 'enrich': '富化',
+                       'rank': '排序', 'summarize': '摘要'} %}
+  {% for r in s['last_runs'] %}
+    <div class="run">
+      <span class="stage">{{ stage_name.get(r['stage'], r['stage']) }}</span>
+      <span class="status {{ 'status--ok' if r['status'] == 'ok' else 'status--err' }}">{{ '成功' if r['status'] == 'ok' else '失败' }}</span>
+      <time datetime="{{ r['finished_at'] }}">{{ (r['finished_at'] or '')[:16]|replace('T', ' ') }}</time>
+      <span class="kvs">
+        {# 值可能是整段查询列表,截到 60 字,完整内容放 title #}
+        {% for k, v in (r['stats']|fromjsonobj).items() %}{% set vs = v|string %}<span{% if vs|length > 65 %} title="{{ vs }}"{% endif %}>{{ k }} <b>{{ vs|truncate(60, true, '…') }}</b></span>{% endfor %}
+      </span>
+    </div>
+  {% else %}
+    <p class="hint">还没有运行记录。</p>
+  {% endfor %}
+</div>
+{% endblock %}

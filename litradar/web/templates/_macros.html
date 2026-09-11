@@ -1,0 +1,126 @@
+{# 共用宏:图标 / 相关度徽标 / 条目 / 分页。收件箱、本期精选、检索、专利页共用。 #}
+
+{# 图标:内联 SVG(Lucide 风格描边),不依赖图标字体,离线可用 #}
+{% macro icon(name, cls='') -%}
+<svg class="icon{{ ' ' ~ cls if cls }}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+{%- if name == 'radar' -%}
+<path d="M19.07 4.93A10 10 0 0 0 6.99 3.34"/><path d="M4 6h.01"/><path d="M2.29 9.62A10 10 0 1 0 21.31 8.35"/><path d="M16.24 7.76A6 6 0 1 0 8.23 16.67"/><path d="M12 18h.01"/><path d="M17.99 11.66A6 6 0 0 1 15.77 16.67"/><circle cx="12" cy="12" r="2"/><path d="m13.41 10.59 5.66-5.66"/>
+{%- elif name == 'inbox' -%}
+<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>
+{%- elif name == 'sparkles' -%}
+<path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"/><path d="M5 3v4"/><path d="M19 17v4"/><path d="M3 5h4"/><path d="M17 19h4"/>
+{%- elif name == 'award' -%}
+<path d="m15.477 12.89 1.515 8.526a.5.5 0 0 1-.81.47l-3.58-2.687a1 1 0 0 0-1.197 0l-3.586 2.686a.5.5 0 0 1-.81-.469l1.514-8.526"/><circle cx="12" cy="8" r="6"/>
+{%- elif name == 'search' -%}
+<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
+{%- elif name == 'chart' -%}
+<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>
+{%- elif name == 'sliders' -%}
+<line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/>
+{%- elif name == 'star' -%}
+<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+{%- elif name == 'check' -%}
+<path d="M20 6 9 17l-5-5"/>
+{%- elif name == 'x' -%}
+<path d="M18 6 6 18"/><path d="m6 6 12 12"/>
+{%- elif name == 'undo' -%}
+<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11"/>
+{%- elif name == 'sun' -%}
+<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>
+{%- elif name == 'moon' -%}
+<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>
+{%- elif name == 'external' -%}
+<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+{%- elif name == 'arrow-left' -%}
+<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>
+{%- elif name == 'chevron-left' -%}
+<path d="m15 18-6-6 6-6"/>
+{%- elif name == 'chevron-right' -%}
+<path d="m9 18 6-6-6-6"/>
+{%- elif name == 'target' -%}
+<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>
+{%- elif name == 'play' -%}
+<polygon points="6 3 20 12 6 21 6 3"/>
+{%- elif name == 'check-circle' -%}
+<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>
+{%- elif name == 'alert' -%}
+<circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/>
+{%- endif -%}
+</svg>
+{%- endmacro %}
+
+{# 来源标识的展示名 #}
+{% macro source_name(s) -%}
+{{ {'crossref': 'Crossref', 'xmol': 'X-MOL', 'openalex': 'OpenAlex', 'manual': '手动'}.get(s, s) }}
+{%- endmacro %}
+
+{# 相关度分档:加权后满分约 60(LLM 0.85 + BM25 0.10 + 规则 0.05),
+   ≥50 琥珀实底,30–49 琥珀浅底,<30 灰底,未评分虚线框 #}
+{% macro score_band(s) -%}
+{{ 'none' if s is none else ('hot' if s >= 50 else ('warm' if s >= 30 else 'cool')) }}
+{%- endmacro %}
+
+{% macro score_block(it) %}
+  {% set s = it['final_score'] %}
+  <div class="score score--{{ score_band(s) }}"{% if s is not none %} title="相关度 {{ '%.1f'|format(s) }}"{% endif %}>
+    <span class="score__n">{{ '%.0f'|format(s) if s is not none else '–' }}</span>
+    <span class="score__l">{{ '相关度' if s is not none else '未评分' }}</span>
+  </div>
+{% endmacro %}
+
+{% macro actions(it) %}
+  {% include "partials/actions.html" %}
+{% endmacro %}
+
+{% macro card(it) %}
+  <article class="entry" id="card-{{ it['id'] }}">
+    {{ score_block(it) }}
+    <div class="entry__body">
+
+      {# 有中文译名就中文当主标题,英文原题降为衬线副标题 #}
+      {% if it['title_zh'] %}
+        <h3 class="entry__title"><a href="/item/{{ it['id'] }}">{{ it['title_zh'] }}</a></h3>
+        <p class="entry__en">{{ it['title']|richtitle }}</p>
+      {% else %}
+        <h3 class="entry__title entry__title--en"><a href="/item/{{ it['id'] }}">{{ it['title']|richtitle }}</a></h3>
+      {% endif %}
+
+      <div class="meta">
+        {% if it['journal'] %}<span class="meta__journal">{{ it['journal']|unesc }}</span>{% endif %}
+        {% if it['published_at'] %}<time datetime="{{ it['published_at'] }}">{{ it['published_at'] }}</time>{% endif %}
+        {% if it['impact_factor'] %}<span class="tag tag--if">IF {{ it['impact_factor'] }}</span>{% endif %}
+        <span class="tag">{{ source_name(it['source']) }}</span>
+        {% if it['cited_by_count'] %}<span class="tag">被引 {{ it['cited_by_count'] }}</span>{% endif %}
+        {% if it['is_oa'] %}<span class="tag tag--oa">开放获取</span>{% endif %}
+        {% for k in it['matched_keywords']|fromjson %}<span class="tag tag--hit">X-MOL 命中 {{ k }}</span>{% endfor %}
+      </div>
+
+      {% if it['llm_reason'] %}
+        <p class="reason">{{ icon('target') }}<span>{{ it['llm_reason'] }}</span></p>
+      {% endif %}
+
+      {% if it['one_liner'] %}
+        <p class="entry__summary">{{ it['one_liner'] }}</p>
+      {% elif it['abstract'] %}
+        <p class="note">中文摘要还没生成,先看英文原文。<a href="/stats#run">去生成</a></p>
+        <p class="entry__abstract">{{ it['abstract'] }}</p>
+      {% else %}
+        <p class="note">这条还没有摘要,来源也没提供英文摘要。</p>
+      {% endif %}
+
+    </div>
+    {{ actions(it) }}
+  </article>
+{% endmacro %}
+
+{# 分页:只放在列表底部。qs 是已编码的筛选条件(不含 page),可能为空。 #}
+{% macro pager(page_no, pages, qs) %}
+  {% if pages > 1 %}
+    {% set sep = '&' if qs else '' %}
+    <nav class="pager" aria-label="分页">
+      <a class="btn{{ '' if page_no > 1 else ' is-off' }}" href="?{{ qs }}{{ sep }}page={{ page_no - 1 }}"{% if page_no <= 1 %} aria-disabled="true" tabindex="-1"{% endif %}>{{ icon('chevron-left') }}上一页</a>
+      <span class="pager__now">第 {{ page_no }} / {{ pages }} 页</span>
+      <a class="btn{{ '' if page_no < pages else ' is-off' }}" href="?{{ qs }}{{ sep }}page={{ page_no + 1 }}"{% if page_no >= pages %} aria-disabled="true" tabindex="-1"{% endif %}>下一页{{ icon('chevron-right') }}</a>
+    </nav>
+  {% endif %}
+{% endmacro %}

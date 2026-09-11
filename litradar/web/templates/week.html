@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% from "_macros.html" import card with context %}
+{% block title %}本期精选 · LitRadar{% endblock %}
+
+{% block body %}
+<div class="page-head">
+  <div>
+    <h1>本期精选</h1>
+    <p class="page-sub">近 7 天发表的论文,按相关度排序。前 3 篇是重点。</p>
+  </div>
+</div>
+
+{% if heads %}
+  <h2>重点</h2>
+  <section class="list list--featured" aria-label="重点条目">
+    {% for it in heads %}{{ card(it) }}{% endfor %}
+  </section>
+{% endif %}
+
+{% if rest %}
+  <h2>其余 {{ rest|length }} 篇</h2>
+  <section class="list" aria-label="其余条目">
+    {% for it in rest %}{{ card(it) }}{% endfor %}
+  </section>
+{% endif %}
+
+{% if not heads and not rest %}
+  <div class="empty">近 7 天没有新论文。<br>在「统计」页可以手动运行一次采集。</div>
+{% endif %}
+{% endblock %}

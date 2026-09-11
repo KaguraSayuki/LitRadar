@@ -1,0 +1,479 @@
+"""SQLite 数据层:连接、建表、常用读写。单用户场景,不引入 ORM。"""
+from __future__ import annotations
+
+import json
+import sqlite3
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable, Iterator
+
+SCHEMA = """
+PRAGMA journal_mode = WAL;
+PRAGMA foreign_keys = ON;
+
+-- 原始邮件留档:解析器升级后可重跑
+CREATE TABLE IF NOT EXISTS raw_email (
+    id            INTEGER PRIMARY KEY,
+    message_id    TEXT UNIQUE,
+    received_at   TEXT,
+    subject       TEXT,
+    raw           BLOB NOT NULL,
+    parsed_at     TEXT,
+    parse_version INTEGER DEFAULT 0,
+    items_found   INTEGER DEFAULT 0
+);
+
+-- 条目池:文献与专利共表
+CREATE TABLE IF NOT EXISTS item (
+    id               INTEGER PRIMARY KEY,
+    kind             TEXT NOT NULL DEFAULT 'paper' CHECK (kind IN ('paper','patent')),
+    dedup_key        TEXT NOT NULL UNIQUE,
+    doi              TEXT,
+    title            TEXT NOT NULL,
+    title_norm       TEXT NOT NULL,
+    abstract         TEXT,
+    authors          TEXT,          -- JSON array
+    journal          TEXT,
+    issn             TEXT,
+    published_at     TEXT,          -- ISO8601
+    url              TEXT,
+    impact_factor    REAL,          -- X-MOL 邮件自带
+    xmol_url         TEXT,
+    matched_keywords TEXT,          -- JSON array,X-MOL 高亮命中的订阅词
+    source           TEXT NOT NULL, -- 'xmol' | 'openalex' | 'crossref' | 'manual'
+    source_ref       TEXT,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_item_pub     ON item(published_at DESC);
+CREATE INDEX IF NOT EXISTS idx_item_journal ON item(journal);
+CREATE INDEX IF NOT EXISTS idx_item_tnorm   ON item(title_norm);
+
+CREATE TABLE IF NOT EXISTS item_enrichment (
+    item_id        INTEGER PRIMARY KEY REFERENCES item(id) ON DELETE CASCADE,
+    cited_by_count INTEGER,
+    is_oa          INTEGER,
+    oa_url         TEXT,
+    openalex_id    TEXT,
+    openalex_json  TEXT,
+    crossref_json  TEXT,
+    enriched_at    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS score (
+    item_id      INTEGER PRIMARY KEY REFERENCES item(id) ON DELETE CASCADE,
+    rule_score   REAL,
+    coarse_score REAL,
+    llm_score    REAL,
+    llm_reason   TEXT,
+    llm_model    TEXT,
+    final_score  REAL,
+    ranked_at    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS summary (
+    item_id     INTEGER PRIMARY KEY REFERENCES item(id) ON DELETE CASCADE,
+    title_zh    TEXT,               -- 中文标题翻译
+    one_liner   TEXT,
+    problem     TEXT,
+    method      TEXT,
+    key_results TEXT,
+    limitation  TEXT,
+    relevance   TEXT,
+    depth       TEXT,
+    model       TEXT,
+    created_at  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS item_state (
+    item_id     INTEGER PRIMARY KEY REFERENCES item(id) ON DELETE CASCADE,
+    state       TEXT NOT NULL DEFAULT 'new',  -- new | read | archived
+    starred     INTEGER NOT NULL DEFAULT 0,
+    ignored     INTEGER NOT NULL DEFAULT 0,
+    notified_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS feedback (
+    id         INTEGER PRIMARY KEY,
+    item_id    INTEGER NOT NULL REFERENCES item(id) ON DELETE CASCADE,
+    action     TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_item ON feedback(item_id);
+
+CREATE TABLE IF NOT EXISTS run_log (
+    id          INTEGER PRIMARY KEY,
+    stage       TEXT NOT NULL,
+    started_at  TEXT NOT NULL,
+    finished_at TEXT,
+    status      TEXT,
+    stats       TEXT,
+    error       TEXT
+);
+
+-- 全文检索
+CREATE VIRTUAL TABLE IF NOT EXISTS item_fts USING fts5(
+    title, abstract, journal, authors,
+    content='item', content_rowid='id', tokenize='unicode61'
+);
+"""
+
+FTS_TRIGGERS = """
+CREATE TRIGGER IF NOT EXISTS item_ai AFTER INSERT ON item BEGIN
+  INSERT INTO item_fts(rowid,title,abstract,journal,authors)
+  VALUES (new.id,new.title,COALESCE(new.abstract,''),COALESCE(new.journal,''),COALESCE(new.authors,''));
+END;
+CREATE TRIGGER IF NOT EXISTS item_ad AFTER DELETE ON item BEGIN
+  INSERT INTO item_fts(item_fts,rowid,title,abstract,journal,authors)
+  VALUES ('delete',old.id,old.title,COALESCE(old.abstract,''),COALESCE(old.journal,''),COALESCE(old.authors,''));
+END;
+CREATE TRIGGER IF NOT EXISTS item_au AFTER UPDATE ON item BEGIN
+  INSERT INTO item_fts(item_fts,rowid,title,abstract,journal,authors)
+  VALUES ('delete',old.id,old.title,COALESCE(old.abstract,''),COALESCE(old.journal,''),COALESCE(old.authors,''));
+  INSERT INTO item_fts(rowid,title,abstract,journal,authors)
+  VALUES (new.id,new.title,COALESCE(new.abstract,''),COALESCE(new.journal,''),COALESCE(new.authors,''));
+END;
+"""
+
+
+def now() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+class Database:
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
+
+    @contextmanager
+    def cursor(self) -> Iterator[sqlite3.Cursor]:
+        conn = self.connect()
+        try:
+            yield conn.cursor()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def init(self) -> None:
+        conn = self.connect()
+        try:
+            conn.executescript(SCHEMA)
+            conn.executescript(FTS_TRIGGERS)
+            self._migrate(conn)
+            conn.commit()
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """轻量迁移:已存在的库就地升级,不动老数据。"""
+        import contextlib
+
+        # summary.title_zh
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(summary)")}
+        if cols and "title_zh" not in cols:
+            conn.execute("ALTER TABLE summary ADD COLUMN title_zh TEXT")
+
+        # score:去掉 profile 列(单用户,这个维度是过度设计)。
+        # SQLite 改主键要重建表,所以走 建新表 -> 拷数据 -> 换名。
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(score)")}
+        if "profile" in cols:
+            with contextlib.suppress(sqlite3.OperationalError):
+                conn.executescript("""
+                    CREATE TABLE score_migrated (
+                        item_id      INTEGER PRIMARY KEY
+                                     REFERENCES item(id) ON DELETE CASCADE,
+                        rule_score   REAL, coarse_score REAL, llm_score REAL,
+                        llm_reason   TEXT, llm_model    TEXT,
+                        final_score  REAL, ranked_at    TEXT
+                    );
+                    INSERT OR REPLACE INTO score_migrated
+                        SELECT item_id, rule_score, coarse_score, llm_score,
+                               llm_reason, llm_model, final_score, ranked_at
+                        FROM score;
+                    DROP TABLE score;
+                    ALTER TABLE score_migrated RENAME TO score;
+                """)
+
+
+# ---------------------------------------------------------------- item 读写
+ITEM_FIELDS = (
+    "kind", "dedup_key", "doi", "title", "title_norm", "abstract", "authors",
+    "journal", "issn", "published_at", "url", "impact_factor", "xmol_url",
+    "matched_keywords", "source", "source_ref",
+)
+
+
+def upsert_item(conn: sqlite3.Connection, data: dict[str, Any]) -> tuple[int, bool]:
+    """按 dedup_key 插入或补全。返回 (item_id, 是否新建)。
+
+    已存在的条目只补空字段,不覆盖已有内容(避免低质量源盖掉高质量源)。
+    """
+    row = conn.execute(
+        "SELECT * FROM item WHERE dedup_key = ?", (data["dedup_key"],)
+    ).fetchone()
+
+    payload = {k: data.get(k) for k in ITEM_FIELDS}
+    for k in ("authors", "matched_keywords"):
+        if isinstance(payload.get(k), (list, tuple)):
+            payload[k] = json.dumps(list(payload[k]), ensure_ascii=False)
+
+    if row is None:
+        payload["created_at"] = payload["updated_at"] = now()
+        cols = ", ".join(payload)
+        ph = ", ".join("?" for _ in payload)
+        cur = conn.execute(
+            f"INSERT INTO item ({cols}) VALUES ({ph})", list(payload.values())
+        )
+        iid = int(cur.lastrowid)
+        conn.execute("INSERT OR IGNORE INTO item_state (item_id) VALUES (?)", (iid,))
+        return iid, True
+
+    iid = int(row["id"])
+    updates, values = [], []
+    for k, v in payload.items():
+        if v in (None, "", [], "[]"):
+            continue
+        if row[k] in (None, "", "[]"):
+            updates.append(f"{k} = ?")
+            values.append(v)
+
+    # published_at 特例:允许更精确的日期覆盖"只有年份"的占位值
+    # (Crossref 有些条目 issued 只给年份,早先会写成 YYYY-01-01,
+    #  导致这些其实很新的论文被时间窗误伤)
+    new_pub, old_pub = payload.get("published_at"), row["published_at"]
+    if new_pub and old_pub and new_pub != old_pub:
+        if old_pub.endswith("-01-01") and not new_pub.endswith("-01-01"):
+            if "published_at = ?" not in updates:
+                updates.append("published_at = ?")
+                values.append(new_pub)
+
+    if updates:
+        updates.append("updated_at = ?")
+        values.extend([now(), iid])
+        conn.execute(f"UPDATE item SET {', '.join(updates)} WHERE id = ?", values)
+    conn.execute("INSERT OR IGNORE INTO item_state (item_id) VALUES (?)", (iid,))
+    return iid, False
+
+
+def _item_filters(*, kind: str | None, state: str | None,
+                  min_score: float | None, since: str | None) -> tuple[list[str], list]:
+    """get_items 与 count_items 共用同一套筛选条件,防止两处写法漂移
+    (漂移会导致分页总数和实际列表对不上)。"""
+    where, params = ["1=1"], []
+    if kind:
+        where.append("i.kind = ?")
+        params.append(kind)
+    if state == "new":
+        where.append("COALESCE(s.state,'new') = 'new' AND COALESCE(s.ignored,0) = 0")
+    elif state:
+        where.append("s.state = ?")
+        params.append(state)
+    if min_score is not None:
+        where.append("COALESCE(sc.final_score,0) >= ?")
+        params.append(min_score)
+    if since:
+        where.append("i.published_at >= ?")
+        params.append(since)
+    return where, params
+
+
+def count_items(conn: sqlite3.Connection, *, kind: str | None = "paper",
+                state: str | None = None, min_score: float | None = None,
+                since: str | None = None) -> int:
+    """与 get_items 条件一致的计数,供分页算总页数。"""
+    where, params = _item_filters(kind=kind, state=state,
+                                  min_score=min_score, since=since)
+    sql = f"""
+        SELECT COUNT(*) FROM item i
+        LEFT JOIN score      sc ON sc.item_id = i.id
+        LEFT JOIN item_state s  ON s.item_id  = i.id
+        WHERE {' AND '.join(where)}
+    """
+    return int(conn.execute(sql, params).fetchone()[0])
+
+
+def get_items(
+    conn: sqlite3.Connection,
+    *,
+    kind: str | None = "paper",
+    state: str | None = None,
+    min_score: float | None = None,
+    since: str | None = None,
+    limit: int = 200,
+    offset: int = 0,
+    order: str = "score",
+) -> list[sqlite3.Row]:
+    where, params = _item_filters(kind=kind, state=state,
+                                  min_score=min_score, since=since)
+
+    order_sql = {
+        "score": "COALESCE(sc.final_score,-1) DESC, i.published_at DESC",
+        "date": "i.published_at DESC",
+    }.get(order, "COALESCE(sc.final_score,-1) DESC")
+
+    sql = f"""
+        SELECT i.*, sc.final_score, sc.llm_score, sc.llm_reason,
+               su.title_zh, su.one_liner, su.relevance, su.method, su.key_results,
+               su.problem, su.limitation,
+               COALESCE(s.state,'new') AS state,
+               COALESCE(s.starred,0) AS starred,
+               COALESCE(s.ignored,0) AS ignored,
+               e.cited_by_count, e.is_oa, e.oa_url
+        FROM item i
+        LEFT JOIN score        sc ON sc.item_id = i.id
+        LEFT JOIN summary      su ON su.item_id = i.id
+        LEFT JOIN item_state   s  ON s.item_id  = i.id
+        LEFT JOIN item_enrichment e ON e.item_id = i.id
+        WHERE {' AND '.join(where)}
+        ORDER BY {order_sql}
+        LIMIT ? OFFSET ?
+    """
+    return conn.execute(sql, [*params, limit, offset]).fetchall()
+
+
+def search_items(conn: sqlite3.Connection, q: str, limit: int = 100,
+                 offset: int = 0) -> list[sqlite3.Row]:
+    # 必须与 get_items 选出同一组列 —— 卡片宏会用到 cited_by_count / is_oa / oa_url
+    sql = """
+        SELECT i.*, sc.final_score, sc.llm_reason, su.title_zh, su.one_liner,
+               COALESCE(s.state,'new') AS state, COALESCE(s.starred,0) AS starred,
+               COALESCE(s.ignored,0) AS ignored,
+               e.cited_by_count, e.is_oa, e.oa_url
+        FROM item_fts f
+        JOIN item i ON i.id = f.rowid
+        LEFT JOIN score            sc ON sc.item_id = i.id
+        LEFT JOIN summary          su ON su.item_id = i.id
+        LEFT JOIN item_state       s  ON s.item_id  = i.id
+        LEFT JOIN item_enrichment  e  ON e.item_id  = i.id
+        WHERE item_fts MATCH ?
+        ORDER BY rank LIMIT ? OFFSET ?
+    """
+    # FTS5 语法:把裸词包装成前缀查询,避免用户输入特殊字符报错
+    terms = [f'"{t}"*' for t in q.replace('"', " ").split() if t.strip()]
+    if not terms:
+        return []
+    try:
+        return conn.execute(sql, (" ".join(terms), limit, offset)).fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+
+
+
+
+
+
+
+def save_score(conn: sqlite3.Connection, item_id: int, **kw) -> None:
+    conn.execute(
+        """INSERT INTO score (item_id, rule_score, coarse_score, llm_score,
+                              llm_reason, llm_model, final_score, ranked_at)
+           VALUES (?,?,?,?,?,?,?,?)
+           ON CONFLICT(item_id) DO UPDATE SET
+             rule_score=excluded.rule_score, coarse_score=excluded.coarse_score,
+             llm_score=excluded.llm_score, llm_reason=excluded.llm_reason,
+             llm_model=excluded.llm_model, final_score=excluded.final_score,
+             ranked_at=excluded.ranked_at""",
+        (item_id, kw.get("rule_score"), kw.get("coarse_score"),
+         kw.get("llm_score"), kw.get("llm_reason"), kw.get("llm_model"),
+         kw.get("final_score"), now()),
+    )
+
+
+def save_summary(conn: sqlite3.Connection, item_id: int, data: dict, depth: str, model: str) -> None:
+    conn.execute(
+        """INSERT INTO summary (item_id, title_zh, one_liner, problem, method, key_results,
+                                limitation, relevance, depth, model, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(item_id) DO UPDATE SET
+             title_zh=COALESCE(excluded.title_zh, summary.title_zh),
+             one_liner=COALESCE(excluded.one_liner, summary.one_liner),
+             problem=excluded.problem, method=excluded.method,
+             key_results=excluded.key_results, limitation=excluded.limitation,
+             relevance=excluded.relevance, depth=excluded.depth,
+             model=excluded.model, created_at=excluded.created_at""",
+        (item_id, data.get("title_zh"), data.get("one_liner"), data.get("problem"),
+         data.get("method"), data.get("key_results"), data.get("limitation"),
+         data.get("relevance"), depth, model, now()),
+    )
+
+
+def save_enrichment(conn: sqlite3.Connection, item_id: int, data: dict) -> None:
+    conn.execute(
+        """INSERT INTO item_enrichment (item_id, cited_by_count, is_oa, oa_url,
+                                        openalex_id, openalex_json, crossref_json, enriched_at)
+           VALUES (?,?,?,?,?,?,?,?)
+           ON CONFLICT(item_id) DO UPDATE SET
+             cited_by_count=excluded.cited_by_count, is_oa=excluded.is_oa,
+             oa_url=excluded.oa_url, openalex_id=excluded.openalex_id,
+             openalex_json=excluded.openalex_json, crossref_json=excluded.crossref_json,
+             enriched_at=excluded.enriched_at""",
+        (item_id, data.get("cited_by_count"), data.get("is_oa"), data.get("oa_url"),
+         data.get("openalex_id"), data.get("openalex_json"), data.get("crossref_json"), now()),
+    )
+
+
+def set_action(conn: sqlite3.Connection, item_id: int, action: str) -> None:
+    conn.execute("INSERT OR IGNORE INTO item_state (item_id) VALUES (?)", (item_id,))
+    if action in ("star", "unstar"):
+        conn.execute("UPDATE item_state SET starred=? WHERE item_id=?",
+                     (1 if action == "star" else 0, item_id))
+    elif action == "ignore":
+        conn.execute("UPDATE item_state SET ignored=1 WHERE item_id=?", (item_id,))
+    elif action == "unignore":
+        conn.execute("UPDATE item_state SET ignored=0 WHERE item_id=?", (item_id,))
+    elif action in ("read", "unread", "archive"):
+        val = {"read": "read", "unread": "new", "archive": "archived"}[action]
+        conn.execute("UPDATE item_state SET state=? WHERE item_id=?", (val, item_id))
+    conn.execute(
+        "INSERT INTO feedback (item_id, action, created_at) VALUES (?,?,?)",
+        (item_id, action, now()),
+    )
+
+
+def log_run(conn: sqlite3.Connection, stage: str, status: str, stats: Any = None,
+            error: str | None = None, started_at: str | None = None) -> None:
+    conn.execute(
+        """INSERT INTO run_log (stage, started_at, finished_at, status, stats, error)
+           VALUES (?,?,?,?,?,?)""",
+        (stage, started_at or now(), now(), status,
+         json.dumps(stats, ensure_ascii=False) if stats is not None else None, error),
+    )
+
+
+def stats(conn: sqlite3.Connection) -> dict[str, Any]:
+    def one(sql: str, *a):
+        r = conn.execute(sql, a).fetchone()
+        return r[0] if r else 0
+
+    return {
+        "items": one("SELECT COUNT(*) FROM item"),
+        "papers": one("SELECT COUNT(*) FROM item WHERE kind='paper'"),
+        "new": one("SELECT COUNT(*) FROM item_state WHERE state='new' AND ignored=0"),
+        "starred": one("SELECT COUNT(*) FROM item_state WHERE starred=1"),
+        "ignored": one("SELECT COUNT(*) FROM item_state WHERE ignored=1"),
+        "summaries": one("SELECT COUNT(*) FROM summary"),
+        "scored": one("SELECT COUNT(*) FROM score"),
+        "by_source": [dict(r) for r in conn.execute(
+            "SELECT source, COUNT(*) n FROM item GROUP BY source ORDER BY n DESC")],
+        "by_journal": [dict(r) for r in conn.execute(
+            """SELECT journal, COUNT(*) n, ROUND(AVG(sc.final_score),1) avg_score
+               FROM item i LEFT JOIN score sc ON sc.item_id=i.id
+               WHERE journal IS NOT NULL GROUP BY journal ORDER BY n DESC LIMIT 15""")],
+        "feedback": [dict(r) for r in conn.execute(
+            "SELECT action, COUNT(*) n FROM feedback GROUP BY action ORDER BY n DESC")],
+        "last_runs": [dict(r) for r in conn.execute(
+            """SELECT stage, status, finished_at, stats FROM run_log
+               ORDER BY id DESC LIMIT 8""")],
+    }

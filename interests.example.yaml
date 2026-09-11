@@ -1,0 +1,31 @@
+# LitRadar 研究方向与检索偏好模板
+# 仅含占位内容，真实研究偏好请在网页填写，或保存在被忽略的 interests.yaml。
+# 不要将真实方向、检索词、期刊偏好、作者或种子文献写回本示例。
+# 本文件保留单方向格式，对应 default 组；多组说明见 docs/subscription-groups.md。
+direction: "请填写自己的研究方向"
+search_queries: []
+s2_queries: []
+keywords:
+  core: []
+  bonus: []
+  current_challenges: []
+  boost_topics: []
+exclude_title_prefixes:
+  - "review for"
+  - "author response for"
+  - "decision letter for"
+  - "corrigendum"
+  - "correction to"
+  - "author correction"
+  - "erratum"
+  - "frontispiece"
+  - "addendum"
+  - "editorial"
+  - "retraction"
+negative: []
+journals:
+  core: []
+  ok: []
+  issn: {}
+authors_watch: []
+seed_dois: []

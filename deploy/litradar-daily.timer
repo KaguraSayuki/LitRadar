@@ -1,0 +1,11 @@
+[Unit]
+Description=LitRadar 每日定时触发
+
+[Timer]
+# 每天 07:00 跑一次;机器关机错过则开机后补跑
+OnCalendar=*-*-* 07:00:00
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

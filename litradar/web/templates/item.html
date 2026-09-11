@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% from "_macros.html" import icon, source_name, score_band %}
+{% block title %}{{ (it['title_zh'] or it['title']|striptags)[:60] }} · LitRadar{% endblock %}
+
+{% block body %}
+<a class="back" href="javascript:history.back()">{{ icon('arrow-left') }}返回</a>
+
+<article class="detail">
+  <header class="detail__head">
+    {% if it['title_zh'] %}
+      <h1 class="detail__title">{{ it['title_zh'] }}</h1>
+      <p class="detail__en">{{ it['title']|richtitle }}</p>
+    {% else %}
+      <h1 class="detail__title detail__title--en">{{ it['title']|richtitle }}</h1>
+      <p class="note">中文标题和摘要还没生成。<a href="/stats#run">去生成</a></p>
+    {% endif %}
+
+    <div class="meta">
+      {% if it['journal'] %}<span class="meta__journal">{{ it['journal']|unesc }}</span>{% endif %}
+      {% if it['published_at'] %}<time datetime="{{ it['published_at'] }}">{{ it['published_at'] }}</time>{% endif %}
+      {% if it['impact_factor'] %}<span class="tag tag--if">IF {{ it['impact_factor'] }}</span>{% endif %}
+      <span class="tag">{{ source_name(it['source']) }}</span>
+      {% if it['depth'] %}<span class="tag">{{ '深度摘要' if it['depth'] == 'deep' else '一句话摘要' }}</span>{% endif %}
+      {% if it['is_oa'] %}<span class="tag tag--oa">开放获取</span>{% endif %}
+    </div>
+
+    {% include "partials/actions.html" %}
+  </header>
+
+  <aside class="detail__aside">
+    <div class="aside-card">
+      {% set s = it['final_score'] %}
+      <div class="score score--{{ score_band(s) }}">
+        <span class="score__l">{{ '相关度' if s is not none else '未评分' }}</span>
+        <span class="score__n">{{ '%.1f'|format(s) if s is not none else '–' }}</span>
+      </div>
+      {% if s is not none %}
+        <dl class="parts">
+          <dt>DeepSeek 精排</dt><dd>{{ it['llm_score'] if it['llm_score'] is not none else '—' }}</dd>
+          <dt>BM25 粗排</dt><dd>{{ it['coarse_score'] if it['coarse_score'] is not none else '—' }}</dd>
+          <dt>规则加分</dt><dd>{{ it['rule_score'] if it['rule_score'] is not none else '—' }}</dd>
+        </dl>
+      {% endif %}
+    </div>
+
+    <div class="aside-card">
+      <dl class="facts">
+        <div>
+          <dt>作者</dt>
+          <dd>{{ (it['authors']|fromjson)|join(', ') if it['authors'] else '—' }}</dd>
+        </div>
+        <div>
+          <dt>DOI</dt>
+          <dd>{% if it['doi'] %}<a href="https://doi.org/{{ it['doi'] }}" target="_blank" rel="noopener">{{ it['doi'] }}</a>{% else %}—{% endif %}</dd>
+        </div>
+        {% if it['cited_by_count'] %}
+        <div>
+          <dt>被引</dt>
+          <dd>{{ it['cited_by_count'] }}</dd>
+        </div>
+        {% endif %}
+        <div>
+          <dt>打开</dt>
+          <dd class="links">
+            {% if it['url'] and it['url'] != it['xmol_url'] %}<a href="{{ it['url'] }}" target="_blank" rel="noopener">原文{{ icon('external') }}</a>{% endif %}
+            {% if it['xmol_url'] %}<a href="{{ it['xmol_url'] }}" target="_blank" rel="noopener">X-MOL{{ icon('external') }}</a>{% endif %}
+            {% if it['is_oa'] and it['oa_url'] %}<a href="{{ it['oa_url'] }}" target="_blank" rel="noopener">开放获取全文{{ icon('external') }}</a>{% endif %}
+            {% if not it['url'] and not it['xmol_url'] and not it['oa_url'] %}—{% endif %}
+          </dd>
+        </div>
+      </dl>
+    </div>
+  </aside>
+
+  <div class="detail__body">
+    {% if it['llm_reason'] %}
+      <section class="sect">
+        <h2>为什么推给你</h2>
+        <p class="reason">{{ icon('target') }}<span>{{ it['llm_reason'] }}</span></p>
+      </section>
+    {% endif %}
+
+    {% if it['one_liner'] %}
+      <section class="sect">
+        <h2>一句话结论</h2>
+        <p>{{ it['one_liner'] }}</p>
+      </section>
+    {% endif %}
+
+    {% if it['problem'] or it['method'] or it['key_results'] or it['limitation'] or it['relevance'] %}
+      <section class="sect">
+        <h2>AI 摘要</h2>
+        <dl class="ai">
+          {% if it['problem'] %}<dt>解决的问题</dt><dd>{{ it['problem'] }}</dd>{% endif %}
+          {% if it['method'] %}<dt>关键方法</dt><dd>{{ it['method'] }}</dd>{% endif %}
+          {% if it['key_results'] %}<dt>关键结果</dt><dd>{{ it['key_results'] }}</dd>{% endif %}
+          {% if it['limitation'] %}<dt>局限</dt><dd>{{ it['limitation'] }}</dd>{% endif %}
+          {% if it['relevance'] %}<dt>对你的用处</dt><dd>{{ it['relevance'] }}</dd>{% endif %}
+        </dl>
+        <p class="hint">由 DeepSeek 根据 {{ source_name(it['source']) }} 元数据生成。数字已和原文核对过,标注"推断"的是模型推测,请以原文为准。</p>
+      </section>
+    {% endif %}
+
+    <section class="sect">
+      <h2>英文原文摘要</h2>
+      {% if it['abstract'] %}
+        <p class="prose-en">{{ it['abstract'] }}</p>
+      {% else %}
+        <p class="hint">数据库里还没有这篇的摘要。运行「富化」可以再试一次。</p>
+      {% endif %}
+    </section>
+  </div>
+</article>
+{% endblock %}
