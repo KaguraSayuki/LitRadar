@@ -70,8 +70,13 @@ class MailConfig:
 class SourceConfig:
     xmol_enabled: bool = True
 
-    # Crossref:关键词检索主力。免费、稳定、无请求预算限制。
+    # Crossref 分两个用途,开关分开:
+    #   crossref_enabled        -> 富化:元数据最权威(期刊全称/ISSN/作者)
+    #   crossref_search_enabled -> 检索发现
+    # 实测(用户反馈):Crossref 检索打分 41 条,收藏 0 条;S2 打分 7 条,收藏 3 条。
+    # 所以检索默认关闭,只留它做富化。
     crossref_enabled: bool = True
+    crossref_search_enabled: bool = False
     crossref_lookback_days: int = 14
     crossref_rows: int = 100
 
@@ -88,6 +93,8 @@ class SourceConfig:
     s2_search_year: str = ""          # 显式指定则优先,如 "2024-2026"
     s2_search_lookback_days: int = 180     # 与 run --days 保持一致
     s2_search_max_pages: int = 1      # 每页 1000 条,一般 1 页足够
+    # 传给 bulk 的 venue 过滤(逗号分隔)。实测多刊必须用逗号,用 | 会返回 0。
+    s2_venues: list[str] = field(default_factory=list)
 
     # OpenAlex:2026 年起改为 API Key + 额度制,不配 key 会 "Insufficient budget",
     # 因此默认关闭;配上 OPENALEX_API_KEY 才启用。

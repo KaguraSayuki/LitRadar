@@ -219,6 +219,7 @@ BULK_FIELDS = ("title,abstract,venue,year,publicationDate,externalIds,"
 
 
 def search_bulk(query: str, *, year: str | None = None, since: str | None = None,
+                venues: list[str] | None = None,
                 sort: str = "publicationDate:desc",
                 max_pages: int = 1, retries: int = 3, verbose: bool = False,
                 interval: float | None = None) -> list[dict]:
@@ -242,6 +243,9 @@ def search_bulk(query: str, *, year: str | None = None, since: str | None = None
         params: dict[str, Any] = {"query": query, "fields": BULK_FIELDS, "sort": sort}
         if year:
             params["year"] = year
+        if venues:
+            # 实测:多刊必须用**逗号**分隔;用 | 会返回 0 条。
+            params["venue"] = ",".join(venues)
         if token:
             params["token"] = token
         r = None

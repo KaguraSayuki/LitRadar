@@ -67,6 +67,9 @@ class Profile:
     core: list[str]
     bonus: list[str]
     negative: list[str]
+    # 只匹配【标题】的排除词。用于通用领域噪声词 —— 它们常出现在
+    # 正当论文的摘要里(如"compared to hydrogenation"),放 negative 会误杀。
+    negative_titles: list[str]
     current_challenges: list[str]
     boost_topics: list[str]
     journals_core: list[str]
@@ -77,6 +80,8 @@ class Profile:
     # Semantic Scholar bulk 端点的检索词。**必须用查询语法**(+ = AND,| = OR,
     # "..." = 短语),裸词会被当短语匹配而返回 0 条。
     s2_queries: list[str] = field(default_factory=list)
+    # 限定在核心期刊内的宽查询 —— 用来替代 Crossref 的期刊定向覆盖
+    s2_venue_queries: list[str] = field(default_factory=list)
     exclude_title_prefixes: list[str] = field(default_factory=list)
 
     @classmethod
@@ -90,6 +95,7 @@ class Profile:
             core=[k.lower() for k in kw.get("core") or []],
             bonus=[k.lower() for k in kw.get("bonus") or []],
             negative=[k.lower() for k in d.get("negative") or []],
+            negative_titles=[k.lower() for k in d.get("negative_titles") or []],
             current_challenges=kw.get("current_challenges") or [],
             boost_topics=kw.get("boost_topics") or [],
             journals_core=jr.get("core") or [],
@@ -98,6 +104,7 @@ class Profile:
             search_query=(d.get("search_query") or "").strip(),
             search_queries=multi,
             s2_queries=[q for q in (d.get("s2_queries") or []) if q and q.strip()],
+            s2_venue_queries=[q for q in (d.get("s2_venue_queries") or []) if q and q.strip()],
             exclude_title_prefixes=[p.lower() for p in
                                     (d.get("exclude_title_prefixes") or [])],
         )
@@ -159,6 +166,11 @@ def rule_filter(rows: list[sqlite3.Row], prof: Profile) -> tuple[list[tuple[sqli
         # "Cope et al. supplementary material"。按**前缀**判断比子串匹配精确,
         # 不会误伤正当标题里含 "review" 的论文。
         if any(title_l.startswith(p) for p in prof.exclude_title_prefixes):
+            dropped += 1
+            continue
+
+        # 标题专属排除词:只扫标题,不扫摘要
+        if any(t in title_l for t in prof.negative_titles):
             dropped += 1
             continue
 
@@ -273,6 +285,13 @@ RERANK_PROMPT = """根据用户的研究方向与偏好,为每篇候选文献打
 【排除方向】
 {negative}
 
+【用户的历史反馈(用于校准你的判断标准)】
+✅ 这些是他收藏过的,代表"对口"的样子:
+{liked}
+❌ 这些是他点过"不感兴趣"的,代表"不要"的样子:
+{disliked}
+请据此校准:与 ✅ 同类的大胆给高分,与 ❌ 同类的压低分数。
+
 【候选文献】
 {items}
 
@@ -300,10 +319,37 @@ def _format_item(i: int, row: sqlite3.Row) -> str:
             f"    摘要: {abs_ or '(无摘要)'}")
 
 
+def feedback_examples(conn: sqlite3.Connection, limit: int = 6) -> tuple[list[str], list[str]]:
+    """取收藏 / 忽略的标题,供精排 prompt 做少样本校准。
+
+    这是反馈闭环真正被消费的地方 —— 之前反馈只落库,从不影响打分。
+
+    忽略样本只取**有分数的**:那些是 LLM 认为相关、用户却否掉的,才是有信息量的
+    负例。被规则过滤的条目用户根本没看见,拿来做负例会污染判断。
+    """
+    liked = [r[0] for r in conn.execute(
+        """SELECT i.title FROM item_state s
+           JOIN item i ON i.id = s.item_id
+           WHERE s.starred = 1 AND i.kind = 'paper'
+           ORDER BY s.item_id DESC LIMIT ?""", (limit,))]
+
+    disliked = [r[0] for r in conn.execute(
+        """SELECT i.title FROM item_state s
+           JOIN item i ON i.id = s.item_id
+           JOIN score  sc ON sc.item_id = i.id
+           WHERE s.ignored = 1 AND i.kind = 'paper'
+           ORDER BY sc.final_score DESC LIMIT ?""", (limit,))]
+    return liked, disliked
+
+
 def llm_rerank(rows: list[tuple[sqlite3.Row, float, dict]], prof: Profile,
-               cfg: Config, llm: DeepSeek) -> dict[int, tuple[float, str]]:
+               cfg: Config, llm: DeepSeek,
+               liked: list[str] | None = None,
+               disliked: list[str] | None = None) -> dict[int, tuple[float, str]]:
     """返回 {item_id: (llm_score, reason)}。失败时返回空 dict,由调用方降级。"""
     out: dict[int, tuple[float, str]] = {}
+    liked_txt = "\n".join(f"- {t[:90]}" for t in (liked or [])) or "(暂无)"
+    disliked_txt = "\n".join(f"- {t[:90]}" for t in (disliked or [])) or "(暂无)"
     bs = max(5, cfg.llm.rerank_batch_size)
 
     for start in range(0, len(rows), bs):
@@ -317,6 +363,8 @@ def llm_rerank(rows: list[tuple[sqlite3.Row, float, dict]], prof: Profile,
             challenges="\n".join(f"- {c}" for c in prof.current_challenges) or "-",
             boost="\n".join(f"- {b}" for b in prof.boost_topics) or "-",
             negative=", ".join(prof.negative),
+            liked=liked_txt,
+            disliked=disliked_txt,
             items=listing,
         )
         try:
@@ -353,6 +401,15 @@ def run(cfg: Config, *, days: int = 30, verbose: bool = True) -> dict:
         kept, dropped = rule_filter(rows, prof)
         stat["after_rule"] = len(kept)
         stat["dropped_by_rule"] = dropped
+
+        # 被规则丢掉的条目标记为 excluded —— 收件箱据此隐藏它们。
+        # 之前它们只是"没有分数",仍排在列表末尾逼用户手动忽略。
+        kept_ids_now = {int(r["id"]) for r, _, _ in kept}
+        dropped_ids = [int(r["id"]) for r in rows if int(r["id"]) not in kept_ids_now]
+        db.set_excluded(conn, dropped_ids, True)
+        conn.commit()
+
+        db.set_excluded(conn, [int(r["id"]) for r, _, _ in kept], False)
 
         kept = coarse_rank(kept, prof, cfg.llm.rerank_top_k)
         stat["after_coarse"] = len(kept)

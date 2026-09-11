@@ -51,7 +51,10 @@ mail:
 sources:
   xmol_enabled: true              # X-MOL 订阅邮件:高精度精选(通常每次 2 条)
 
-  crossref_enabled: true          # 关键词检索主力:免费、稳定、无请求预算
+  crossref_enabled: true          # 富化用:元数据最权威(期刊全称/ISSN/作者)
+  # 检索发现:实测收藏率 0%(41 条打分里 0 条被收藏),默认关闭。
+  # 想开回来设 true —— 召回高但噪声大,靠 LLM 精排兜底。
+  crossref_search_enabled: false
   crossref_lookback_days: 14
   crossref_rows: 100
 

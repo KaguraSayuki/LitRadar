@@ -91,6 +91,10 @@ CREATE TABLE IF NOT EXISTS item_state (
     state       TEXT NOT NULL DEFAULT 'new',  -- new | read | archived
     starred     INTEGER NOT NULL DEFAULT 0,
     ignored     INTEGER NOT NULL DEFAULT 0,
+    -- 被规则过滤掉的条目标记为 1,收件箱不再展示。
+    -- 实测教训:这些条目原来只是"没有分数",仍会排在列表末尾逼用户手动忽略 ——
+    -- 139 条忽略反馈里有 119 条属于这种,纯属浪费用户时间。
+    excluded    INTEGER NOT NULL DEFAULT 0,
     notified_at TEXT
 );
 
@@ -183,6 +187,11 @@ class Database:
         cols = {r[1] for r in conn.execute("PRAGMA table_info(summary)")}
         if cols and "title_zh" not in cols:
             conn.execute("ALTER TABLE summary ADD COLUMN title_zh TEXT")
+
+        # item_state.excluded:规则过滤标记
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(item_state)")}
+        if cols and "excluded" not in cols:
+            conn.execute("ALTER TABLE item_state ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0")
 
         # score:去掉 profile 列(单用户,这个维度是过度设计)。
         # SQLite 改主键要重建表,所以走 建新表 -> 拷数据 -> 换名。
@@ -279,6 +288,9 @@ def _item_filters(*, kind: str | None, state: str | None,
     elif state:
         where.append("s.state = ?")
         params.append(state)
+    # 所有视图都隐藏被规则过滤的条目 —— 实测 139 条忽略反馈里 119 条属于这种,
+    # 它们本来就不该出现在收件箱里逼用户手动处理。
+    where.append("COALESCE(s.excluded,0) = 0")
     if min_score is not None:
         where.append("COALESCE(sc.final_score,0) >= ?")
         params.append(min_score)
@@ -422,6 +434,16 @@ def save_enrichment(conn: sqlite3.Connection, item_id: int, data: dict) -> None:
         (item_id, data.get("cited_by_count"), data.get("is_oa"), data.get("oa_url"),
          data.get("openalex_id"), data.get("openalex_json"), data.get("crossref_json"), now()),
     )
+
+
+def set_excluded(conn: sqlite3.Connection, item_ids: list[int], excluded: bool = True) -> None:
+    """标记/取消标记被规则过滤的条目。收件箱据此隐藏它们。"""
+    if not item_ids:
+        return
+    for iid in item_ids:
+        conn.execute("INSERT OR IGNORE INTO item_state (item_id) VALUES (?)", (iid,))
+        conn.execute("UPDATE item_state SET excluded=? WHERE item_id=?",
+                     (1 if excluded else 0, iid))
 
 
 def set_action(conn: sqlite3.Connection, item_id: int, action: str) -> None:
