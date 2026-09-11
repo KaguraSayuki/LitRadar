@@ -416,8 +416,12 @@ def item_action(request: Request, item_id: int, action: str = Form(...)):
 
 
 @app.post("/admin/run/{stage}")
-def admin_run(stage: str, days: int = 30):
+def admin_run(stage: str, days: int = 0):
     cfg = get_cfg()
+    # days=0 表示"用配置里的统一窗口"。之前这里默认 30,而抓取窗口是 180+,
+    # 导致网页点"排序"只覆盖最近一个月,更早的条目永远是"未评分"。
+    if days <= 0:
+        days = cfg.app.pipeline_window_days
     if stage == "mail":
         out = pipeline.ingest_mail(cfg)
     elif stage == "search":

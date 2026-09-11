@@ -389,6 +389,9 @@ def cmd_check(cfg, args):
     return 0 if not problems else 1
 
 
+DAYS_HELP = "时间窗(天)。不传则取 config 的 app.pipeline_window_days"
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="litradar", description="个人化学文献雷达")
     p.add_argument("-c", "--config", default=None, help="config.yaml 路径")
@@ -408,18 +411,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_enrich)
 
     sp = sub.add_parser("rank", help="排序")
-    sp.add_argument("--days", type=int, default=30)
+    sp.add_argument("--days", type=int, default=None, help=DAYS_HELP)
     sp.set_defaults(func=cmd_rank)
 
     sp = sub.add_parser("summarize", help="生成中文摘要")
-    sp.add_argument("--days", type=int, default=30)
+    sp.add_argument("--days", type=int, default=None, help=DAYS_HELP)
     sp.add_argument("--limit", type=int, default=200)
     sp.add_argument("--force", action="store_true",
                     help="重做已有摘要(默认只补缺失的)")
     sp.set_defaults(func=cmd_summarize)
 
     sp = sub.add_parser("run", help="跑完整流水线")
-    sp.add_argument("--days", type=int, default=30)
+    sp.add_argument("--days", type=int, default=None, help=DAYS_HELP)
     sp.set_defaults(func=cmd_run)
 
     sub.add_parser("stats", help="查看统计").set_defaults(func=cmd_stats)
@@ -431,6 +434,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     cfg = load_config(args.config)
+    # --days 缺省时统一取配置,避免"定时任务 200 天、手工跑 30 天"这种不一致
+    if getattr(args, "days", None) is None:
+        args.days = cfg.app.pipeline_window_days
     # 会打 API 的阶段加互斥锁,避免定时任务重叠导致限流互抢
     guarded = args.cmd in ("run", "ingest", "enrich", "rank", "summarize")
     try:

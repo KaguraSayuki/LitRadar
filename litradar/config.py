@@ -148,6 +148,12 @@ class AppConfig:
     token_env: str = "LITRADAR_TOKEN"
     interests: str = "./interests.yaml"   # 我的检索词与偏好(不是"账号")
 
+    # 流水线时间窗(天)。**必须 ≥ 抓取窗口** —— 否则抓回来的文献进了库,
+    # 却因为落在排序窗口之外而永远拿不到分数,在收件箱里长成一片"未评分"。
+    # 网页上的"排序/摘要"按钮也读这个值:之前按钮写死 30 天而抓取是 180 天,
+    # 实测收件箱 51 条里有 26 条因此从来没进过排序器。
+    pipeline_window_days: int = 200
+
     @property
     def token(self) -> str | None:
         return os.environ.get(self.token_env)
