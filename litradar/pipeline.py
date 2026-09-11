@@ -154,10 +154,17 @@ def ingest_keyword_search(cfg: Config, *, verbose: bool = True) -> dict:
             if not os.environ.get("S2_API_KEY"):
                 stat["s2_skipped"] = "未设 S2_API_KEY"
             else:
+                # bulk 只有 year 粒度,没有日期;由 lookback 反推年份区间
+                from datetime import date, timedelta
+                cutoff = date.today() - timedelta(days=cfg.sources.s2_search_lookback_days)
+                yr = cfg.sources.s2_search_year or f"{cutoff.year}-{date.today().year}"
+                stat["s2_year"] = yr
+                stat["s2_since"] = cutoff.isoformat()
                 for q in prof.s2_queries:
                     got = semanticscholar.search_bulk(
                         q,
-                        year=cfg.sources.s2_search_year or None,
+                        year=yr,
+                        since=cutoff.isoformat(),
                         max_pages=cfg.sources.s2_search_max_pages,
                         interval=cfg.sources.s2_min_interval,
                         verbose=verbose,
@@ -216,7 +223,7 @@ def ingest_keyword_search(cfg: Config, *, verbose: bool = True) -> dict:
 
 
 # --------------------------------------------------------------- 编排入口
-def run_all(cfg: Config, *, days: int = 30, verbose: bool = True) -> dict:
+def run_all(cfg: Config, *, days: int = 200, verbose: bool = True) -> dict:
     out: dict[str, Any] = {}
     if verbose:
         print("[1/4] 解析 X-MOL 订阅邮件")

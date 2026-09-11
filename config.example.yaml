@@ -60,6 +60,13 @@ sources:
   #    不是更高速率**。这里默认 5s/请求更稳;batch 端点一次吃 100 个 DOI,
   #    169 篇文献总共只需 2 次请求,放慢几乎不增加耗时。
   s2_min_interval: 5.0
+  # S2 bulk 检索:精确 AND 查询,与 Crossref 模糊匹配互补
+  s2_search_enabled: true
+  s2_search_year: ""              # 显式指定则优先于 lookback,如 "2024-2026"
+  # bulk 端点只有 year 粒度,没有日期。留空则按下面这个 lookback 自动推算年份区间。
+  # ⚠️ 不设的话会拉回 1981 年至今的全部文献 —— 实测 121 篇里只有 1 篇在 60 天
+  #    窗口内,其余永远不参与排序,纯属死重量。
+  s2_search_lookback_days: 180
 
   openalex_enabled: false         # ⚠️ 2026 年起 API Key + 额度制,未配 key 会
                                   #    返回 "Insufficient budget"。配上再开。
