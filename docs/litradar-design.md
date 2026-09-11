@@ -582,7 +582,7 @@ llm:
   model: "deepseek-chat"
   api_key_env: "DEEPSEEK_API_KEY"     # 只读环境变量,不写进 yaml
   rerank_batch_size: 20
-  rerank_top_k: 40
+  rerank_top_k: 0     # 0 = 不截断,窗口内每条都过 LLM;>0 才按粗排名次截断
   deep_summary_top_n: 8
   temperature: 0.2
 

@@ -231,19 +231,33 @@ def _tokenize(text: str) -> list[str]:
 
 
 def coarse_rank(kept: list[tuple[sqlite3.Row, float, dict]], prof: Profile,
-                top_k: int) -> list[tuple[sqlite3.Row, float, dict]]:
-    """BM25 粗排。期刊白名单命中项保送,不参与裁剪。"""
+                top_k: int = 0) -> list[tuple[sqlite3.Row, float, dict]]:
+    """BM25 粗排。只负责给出**顺序**,不再做硬截断。
+
+    ``top_k <= 0``(默认)表示全部保留。历史上这里卡 50 条,理由是省 LLM 调用;
+    但候选池只有 ~200 条,省下的调用微不足道,代价却是 BM25 误杀 ——
+    实测粗排名次 53 / 96 / 108 的三篇被直接丢掉,永远拿不到 LLM 判断,
+    在收件箱里长成一片"未评分"。粗排的信号强度本来就远低于 LLM,
+    让它有"一票否决权"是本末倒置。
+
+    现在粗排只做两件事:给 LLM 一个先后顺序;在核心期刊条目上做保送。
+    进不进视野由 LLM 分数和界面阈值决定。
+    """
+
+    def _cap(rows: list) -> list:
+        return rows[:max(1, top_k)] if top_k and top_k > 0 else rows
+
     if not kept:
         return []
     try:
         from rank_bm25 import BM25Okapi
     except ImportError:
-        return sorted(kept, key=lambda x: -x[1])[:top_k]
+        return _cap(sorted(kept, key=lambda x: -x[1]))
 
     corpus = [_tokenize(haystack(r)) for r, _, _ in kept]
     query = _tokenize(prof.query)
     if not query:
-        return sorted(kept, key=lambda x: -x[1])[:top_k]
+        return _cap(sorted(kept, key=lambda x: -x[1]))
 
     bm25 = BM25Okapi(corpus)
     scores = bm25.get_scores(query)
@@ -261,11 +275,11 @@ def coarse_rank(kept: list[tuple[sqlite3.Row, float, dict]], prof: Profile,
     must.sort(key=lambda x: -(x[3] * 0.7 + x[1] * 0.3))
     rest.sort(key=lambda x: -(x[3] * 0.7 + x[1] * 0.3))
 
-    # 核心期刊条目优先进入,但 top_k 是**硬上限** —— 否则 24 本期刊里有大半是
-    # "核心" 时,保送逻辑会让几乎所有条目都进 LLM,rerank_top_k 形同虚设
-    # (实测配置 40 却送进去 66 条)。
-    picked = (must + rest)[:max(1, top_k)]
-    return [(r, rule, d) for r, rule, d, _ in picked]
+    # 核心期刊条目优先,但不设硬上限 —— 上限会把"核心期刊占了 24 本里一大半"
+    # 这种配置下的保送放大成事实上的全部放行,反而掩盖问题。顺序由这里决定,
+    # 是否值得看由 LLM 分数决定。
+    picked = must + rest
+    return _cap([(r, rule, d) for r, rule, d, _ in picked])
 
 
 # ------------------------------------------------------------------- Stage 3
@@ -394,8 +408,8 @@ def run(cfg: Config, *, days: int = 30, verbose: bool = True) -> dict:
 
     try:
         rows = list(conn.execute(
-            """SELECT i.* FROM item i
-               WHERE i.kind='paper' AND COALESCE(i.published_at,'') >= date('now', ?)
+            f"""SELECT i.* FROM item i
+               WHERE i.kind='paper' AND {db.in_window('i')}
                ORDER BY i.published_at DESC""",
             (f"-{days} days",),
         ).fetchall())
@@ -406,18 +420,18 @@ def run(cfg: Config, *, days: int = 30, verbose: bool = True) -> dict:
         stat["dropped_by_rule"] = dropped
 
         # 被规则丢掉的条目标记为 excluded —— 收件箱据此隐藏它们。
-        # 之前它们只是"没有分数",仍排在列表末尾逼用户手动忽略。
+        # 之前它们只是"没有分数",仍排在列表末尾逼用户手动忽略 ——
+        # 实测 139 条忽略反馈里 119 条属于这种。
         #
-        # 例外:用户已经手动表过态的条目(收藏/已读/不感兴趣)不参与自动排除。
-        # 手动决定必须压过规则 —— 否则收藏一篇之后某次收紧了检索词,
-        # 它会静悄悄被标成 excluded 从收藏夹里消失。
-        touched = db.user_touched_ids(conn)
+        # 例外只有一个:被**收藏**的不参与自动排除。收藏是用户明确说过的
+        # "我要留着",不能被后续收紧的检索词悄悄吃掉。
+        starred = db.starred_ids(conn)
         kept_ids_now = {int(r["id"]) for r, _, _ in kept}
         auto_dropped = [int(r["id"]) for r in rows if int(r["id"]) not in kept_ids_now]
-        dropped_ids = [i for i in auto_dropped if i not in touched]
-        # 反过来说,历史上被旧逻辑误伤的已反馈条目要恢复出来
-        db.set_excluded(conn, [i for i in auto_dropped if i in touched], False)
-        stat["protected_by_feedback"] = len(auto_dropped) - len(dropped_ids)
+        dropped_ids = [i for i in auto_dropped if i not in starred]
+        # 反过来说,历史上被旧逻辑误伤的收藏条目要恢复出来
+        db.set_excluded(conn, [i for i in auto_dropped if i in starred], False)
+        stat["protected_by_star"] = len(auto_dropped) - len(dropped_ids)
         db.set_excluded(conn, dropped_ids, True)
         conn.commit()
 
@@ -428,11 +442,11 @@ def run(cfg: Config, *, days: int = 30, verbose: bool = True) -> dict:
 
         # 清掉本轮【最终未被保留】条目的旧分数。
         # 必须在 coarse_rank 之后做:放在之前只会按中间集合清理,
-        # 那些"过了规则但没进 LLM"的条目会带着上一轮的分数残留下来
-        # (实测:本轮只评 50 条,库里却有 66 条分数)。
+        # 那些"过了规则但没进 LLM"的条目会带着上一轮的分数残留下来。粗排截断
+        # 还是硬上限时踩过:本轮只评 50 条,库里却有 66 条分数。
         kept_ids = [int(r["id"]) for r, _, _ in kept]
         window = ("item_id IN (SELECT id FROM item WHERE kind='paper' "
-                  "AND COALESCE(published_at,'') >= date('now', ?))")
+                  f"AND {db.in_window('')})")
         if kept_ids:
             ph = ",".join("?" for _ in kept_ids)
             conn.execute(

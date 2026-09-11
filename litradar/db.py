@@ -275,6 +275,21 @@ def upsert_item(conn: sqlite3.Connection, data: dict[str, Any]) -> tuple[int, bo
     return iid, False
 
 
+def in_window(alias: str = "i") -> str:
+    """时间窗条件,占用**一个** ``?`` 参数(形如 ``"-200 days"``),自带括号。
+
+    除了按字面日期比较,还要捞回"只知道年份"的条目:这类记录入库时写成
+    ``YYYY-01-01`` 占位(见 `upsert_item` 里对 published_at 的特例处理),
+    按字面比会被窗口起点切掉 —— 明明是今年的论文,却永远拿不到分数,
+    在收件箱里显示成"未评分"。实测有 2 条卡在这里。
+
+    宁可多捞这一点,也不要让条目静默地永远不被评价。
+    """
+    p = f"{alias}.published_at" if alias else "published_at"
+    return (f"(COALESCE({p},'') >= date('now', ?) "
+            f"OR ({p} LIKE '____-01-01' AND substr({p},1,4) = strftime('%Y','now')))")
+
+
 def _item_filters(*, kind: str | None, state: str | None,
                   min_score: float | None, since: str | None) -> tuple[list[str], list]:
     """get_items 与 count_items 共用同一套筛选条件,防止两处写法漂移
@@ -446,14 +461,19 @@ def save_enrichment(conn: sqlite3.Connection, item_id: int, data: dict) -> None:
     )
 
 
-def user_touched_ids(conn: sqlite3.Connection) -> set[int]:
-    """用户手动反馈过的条目 id(收藏 / 已读 / 不感兴趣等)。
+def starred_ids(conn: sqlite3.Connection) -> set[int]:
+    """被收藏的条目 id。
 
-    规则过滤必须给这些 id 让路:用户的手动决定优先于自动规则。
-    否则"收藏一篇 → 某天收紧了检索词 → 它被标成 excluded"这种无声的
-    数据丢失就会发生,而用户完全不知道自己去哪了。
+    这些 id 的"收藏"是用户明确说过的"我要留着",规则过滤必须给它让路:
+    "收藏一篇 → 某天收紧了检索词 → 它被标成 excluded"这种无声的数据丢失
+    是收藏功能最不该有的行为。
+
+    范围刻意**只限收藏**,不扩大到"所有有过反馈的条目":
+    已读/不感兴趣的条目本来就不在未读视图里,保护它们只会让被规则丢掉的
+    噪音滞留在"已读/全部"里,而且它们没有分数 —— 正是"未评分"观感的来源。
     """
-    return {int(r[0]) for r in conn.execute("SELECT DISTINCT item_id FROM feedback")}
+    return {int(r[0]) for r in
+            conn.execute("SELECT item_id FROM item_state WHERE starred=1")}
 
 
 def set_excluded(conn: sqlite3.Connection, item_ids: list[int], excluded: bool = True) -> None:

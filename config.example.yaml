@@ -25,7 +25,7 @@ llm:
   api_key_env: "DEEPSEEK_API_KEY"
   temperature: 0.2                # 打分要稳定,低温
   rerank_batch_size: 20           # listwise 每批条数
-  rerank_top_k: 50                # 粗排后进入 LLM 的条数上限(硬上限)
+  rerank_top_k: 0                 # 0 = 窗口内每条都过 LLM(推荐);>0 才截断
   deep_summary_top_n: 8           # 前 N 名做深度摘要,其余一句话
   timeout: 120
   enabled: true
