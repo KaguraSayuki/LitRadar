@@ -82,7 +82,11 @@ class SourceConfig:
     s2_min_interval: float = 5.0
     # S2 bulk 检索:精确 AND,召回低于 Crossref 但准确率高,作为互补的第三条腿
     s2_search_enabled: bool = True
-    s2_search_year: str = ""          # 如 "2024-2026";留空不加年份过滤
+    # bulk 端点**没有日期粒度**,只有 year。留空则按 s2_search_lookback_days
+    # 自动推算出年份区间。不设的话会拉回 1981 年至今的全部文献 ——
+    # 实测 121 篇里只有 1 篇在 60 天窗口内,其余永远不参与排序,纯属死重量。
+    s2_search_year: str = ""          # 显式指定则优先,如 "2024-2026"
+    s2_search_lookback_days: int = 180     # 与 run --days 保持一致
     s2_search_max_pages: int = 1      # 每页 1000 条,一般 1 页足够
 
     # OpenAlex:2026 年起改为 API Key + 额度制,不配 key 会 "Insufficient budget",

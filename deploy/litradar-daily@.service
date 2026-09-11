@@ -10,8 +10,10 @@ Type=oneshot
 User=%i
 WorkingDirectory=/srv/Work/LitRadar
 EnvironmentFile=/srv/Work/LitRadar/.env
-ExecStart=/srv/Work/LitRadar/.venv/bin/python -m litradar.cli run --days 30
+ExecStart=/srv/Work/LitRadar/.venv/bin/python -m litradar.cli run --days 200
 
+# --days 200 与 config.yaml 的 sources.s2_search_lookback_days(180)对齐 ——
+# 排序窗口必须 ≥ 抓取窗口,否则抓回来的文献进了库却永远不评分。
 # 单次运行超时保护(富化要逐条请求,给足时间)
 TimeoutStartSec=3600
 NoNewPrivileges=true

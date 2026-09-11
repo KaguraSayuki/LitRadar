@@ -218,7 +218,8 @@ BULK_FIELDS = ("title,abstract,venue,year,publicationDate,externalIds,"
                "citationCount,openAccessPdf,authors,publicationTypes,url")
 
 
-def search_bulk(query: str, *, year: str | None = None, sort: str = "publicationDate:desc",
+def search_bulk(query: str, *, year: str | None = None, since: str | None = None,
+                sort: str = "publicationDate:desc",
                 max_pages: int = 1, retries: int = 3, verbose: bool = False,
                 interval: float | None = None) -> list[dict]:
     """批量检索(/paper/search/bulk)。单页最多 1000 条,支持查询语法与排序。
@@ -274,7 +275,14 @@ def search_bulk(query: str, *, year: str | None = None, sort: str = "publication
         if verbose:
             print(f"    [S2] {query[:44]!r} 第 {page + 1} 页:命中 {j.get('total')},"
                   f"本页 {len(data)}")
-        out += [_to_dict(p) for p in data]
+        for p in data:
+            # year 只有年粒度(传 "2025-2026" 会把 2025 年 1 月的也拉回来,
+            # 那可能是一年半以前)。这里按精确日期再过一道,和排序窗口对齐。
+            if since:
+                d = p.get("publicationDate") or ""
+                if d and d < since:
+                    continue
+            out.append(_to_dict(p))
         token = j.get("token")
         if not token or not data:
             break
