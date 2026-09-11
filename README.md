@@ -239,10 +239,10 @@ query.title         精确短句 标题含 ≥2 个核心概念: 4–18/60
 ```bash
 cd /srv/Work/LitRadar
 
-# 注意结尾的 @ —— 模板单元,不能省
+# ⚠️ 三个单元都必须是模板名(带 @),少一个 @ 就会让 %i 为空而启动失败
 sudo cp deploy/litradar-web.service        /etc/systemd/system/litradar@.service
 sudo cp deploy/litradar-daily@.service     /etc/systemd/system/
-sudo cp deploy/litradar-daily.timer        /etc/systemd/system/
+sudo cp deploy/litradar-daily@.timer       /etc/systemd/system/
 
 sudo systemctl daemon-reload
 
