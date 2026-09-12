@@ -24,7 +24,7 @@ def get_json(url: str, *, params: dict | None = None, min_interval: float = 0.2,
              retries: int = 3, timeout: int = 30) -> Any | None:
     """GET 并解析 JSON。失败返回 None 而不是抛异常,避免单条坏数据中断整批。"""
     host = url.split("/")[2] if "//" in url else url
-    last_err: Exception | None = None
+    last = ""                      # 最后一次失败的状态码或异常类型
     for attempt in range(retries):
         _throttle(host, min_interval)
         try:
@@ -32,13 +32,15 @@ def get_json(url: str, *, params: dict | None = None, min_interval: float = 0.2,
             if r.status_code == 404:
                 return None
             if r.status_code == 429 or r.status_code >= 500:
+                last = f"HTTP {r.status_code}"
                 time.sleep(1.5 * (attempt + 1))
                 continue
             r.raise_for_status()
             return r.json()
         except Exception as e:  # noqa: BLE001
-            last_err = e
+            last = f"{type(e).__name__}: {str(e)[:70]}"
             time.sleep(0.8 * (attempt + 1))
-    if last_err:
-        return None
+    # 重试耗尽:留一行痕迹。以前这里静默返回 None,Crossref 路径上
+    # "网络挂了"和"命中 0 条"在日志里长得一模一样(S2 模块自己有告警,这条通用路径没有)。
+    print(f"    [warn] {host} 放弃({last or '未知'}): {url}")
     return None
