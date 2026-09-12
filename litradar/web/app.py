@@ -17,6 +17,7 @@ from markupsafe import Markup
 
 from .. import db, journal_rank, pipeline, rank, summarize
 from ..config import Config, load_config
+from ..lock import AlreadyRunning, single_instance
 from ..normalize import days_ago
 from ..rank import load_interests
 
@@ -495,19 +496,27 @@ def admin_run(request: Request, stage: str, days: int = 0):
     # 导致网页点"排序"只覆盖最近一个月,更早的条目永远是"未评分"。
     if days <= 0:
         days = cfg.app.pipeline_window_days
-    if stage == "mail":
-        out = pipeline.ingest_mail(cfg)
-    elif stage == "search":
-        out = pipeline.ingest_keyword_search(cfg)
-    elif stage == "enrich":
-        from .. import enrich
-        out = enrich.run(cfg)
-    elif stage == "rank":
-        out = rank.run(cfg, days=days)
-    elif stage == "summarize":
-        out = summarize.run(cfg, days=days)
-    elif stage == "all":
-        out = pipeline.run_all(cfg, days=days)
-    else:
-        raise HTTPException(400, f"未知阶段: {stage}")
+    # 和 CLI 用同一把锁(同一个文件),否则网页按钮会绕过它:定时任务正在
+    # enrich 时点一下,两边互抢 Semantic Scholar 的 1 req/s 限流,表现为
+    # "批量全部返回空"。双击按钮同理,会并发跑两份。
+    try:
+        with single_instance(cfg.db_file.parent / "litradar.lock"):
+            if stage == "mail":
+                out = pipeline.ingest_mail(cfg)
+            elif stage == "search":
+                out = pipeline.ingest_keyword_search(cfg)
+            elif stage == "enrich":
+                from .. import enrich
+                out = enrich.run(cfg)
+            elif stage == "rank":
+                out = rank.run(cfg, days=days)
+            elif stage == "summarize":
+                out = summarize.run(cfg, days=days)
+            elif stage == "all":
+                out = pipeline.run_all(cfg, days=days)
+            else:
+                raise HTTPException(400, f"未知阶段: {stage}")
+    except AlreadyRunning:
+        # CLI 那边跳过就完了;网页上必须把"没跑"说清楚,否则用户会一直点
+        raise HTTPException(409, "另一个任务正在运行,请稍后再试")
     return JSONResponse(out)
