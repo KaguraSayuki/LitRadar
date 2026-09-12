@@ -230,21 +230,24 @@ def _rank_renderer(cfg: Config):
 
 
 def _decorate(rows, conn):
-    """给条目挂上期刊等级标签。
+    """给条目挂上展示层才算得出来的东西:期刊等级标签、兜底分标记。
 
-    渲染规则(哪些字段、怎么缩写)属于展示层,不该塞进 db.get_items ——
-    否则 CLI / 测试也会被拖上 web 的配置。所以在这里统一补一列。
-    缓存表一次读全(几十行),不逐条查库。
+    这些都依赖 web 的配置,不该塞进 db.get_items —— 否则 CLI / 测试也会被
+    拖上 web 的配置。缓存表一次读全(几十行),不逐条查库。
     """
     cfg = get_cfg()
-    if not cfg.journal_rank.enabled:
-        return rows
-    ranks = db.journal_ranks(conn)
-    # 刊名查不到时用 ISSN 兜底(短刊名 / 只给缩写的来源)
-    by_issn = db.journal_ranks_by_issn(conn)
-    aliases = {db.norm_journal(k): v
-               for k, v in (cfg.journal_rank.aliases or {}).items()}
-    renderer = _rank_renderer(cfg)
+    llm_ready = bool(cfg.llm.enabled and cfg.llm.api_key)
+
+    if cfg.journal_rank.enabled:
+        ranks = db.journal_ranks(conn)
+        # 刊名查不到时用 ISSN 兜底(短刊名 / 只给缩写的来源)
+        by_issn = db.journal_ranks_by_issn(conn)
+        aliases = {db.norm_journal(k): v
+                   for k, v in (cfg.journal_rank.aliases or {}).items()}
+        renderer = _rank_renderer(cfg)
+    else:
+        ranks, by_issn, aliases, renderer = {}, {}, {}, None
+
     out = []
     for r in rows:
         d = dict(r)
@@ -252,7 +255,21 @@ def _decorate(rows, conn):
         j = aliases.get(db.norm_journal(j), j)      # 短名 → 全名
         got = (ranks.get(db.norm_journal(j))
                or by_issn.get((d.get("issn") or "").strip()))
-        d["rank_tags"] = renderer.tags(got)
+        d["rank_tags"] = renderer.tags(got) if renderer else []
+
+        # 有分数、但这一篇没有 LLM 分:说明它的精排批次失败了,分数不是
+        # LLM 判断的结果,和其他条目不可比。必须显式标出来,否则它和
+        # "真的低分"在列表上长得一模一样。
+        # (具体量级取决于本轮有没有别的批次成功:有成功则兜底分封顶 15,
+        #  全部失败则整体归一化到 0-100 —— 所以标签只说"不是 LLM 打的",
+        #  不去断言具体封顶值。)
+        #
+        # 只在 LLM 可用时才标:没配 key 时全场都没有 LLM 分,逐条标注是噪音
+        # (页面顶部已经有一句全局说明)。
+        d["score_partial"] = bool(
+            llm_ready
+            and d.get("final_score") is not None
+            and d.get("llm_score") is None)
         out.append(d)
     return out
 
