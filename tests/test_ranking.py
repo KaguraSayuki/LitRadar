@@ -11,7 +11,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from litradar import db  # noqa: E402
-from litradar.rank import Profile, coarse_rank, rule_filter  # noqa: E402
+from litradar.rank import (Profile, coarse_rank, feedback_examples,  # noqa: E402
+                          rule_filter)
 
 
 def _row(**kw) -> sqlite3.Row:
@@ -205,3 +206,77 @@ def test_全文检索(tmp_path):
     assert len(db.search_items(conn, "nanoparticle")) == 1
     assert len(db.search_items(conn, "polymer")) == 1
     assert db.search_items(conn, "不存在的词xyz") == []
+
+
+# ------------------------------------------------------------- 反馈闭环
+def _seed(conn, title: str) -> int:
+    """插一条落在时间窗内的论文。"""
+    import datetime
+
+    iid, _ = db.upsert_item(conn, {
+        "kind": "paper", "dedup_key": f"doi:10.1/{title}", "doi": f"10.1/{title}",
+        "title": title, "title_norm": title.lower(), "source": "test",
+        "published_at": datetime.date.today().isoformat(),
+    })
+    return iid
+
+
+def test_反馈样本只把有分数的否决当负例(tmp_path):
+    """被规则挡掉的条目用户根本没看见,拿它当负例会污染判断 ——
+    所以负例必须 JOIN score,只留"LLM 说相关、用户却否掉"的那些。"""
+    conn = db.Database(tmp_path / "t.db").connect()
+    liked_id = _seed(conn, "Sensor insertion A")
+    scored_id = _seed(conn, "Sensor insertion B")
+    bare_id = _seed(conn, "Sensor insertion C")
+    db.set_action(conn, liked_id, "star")
+    db.set_action(conn, scored_id, "ignore")
+    db.set_action(conn, bare_id, "ignore")
+    db.save_score(conn, scored_id, final_score=80.0)
+
+    liked, disliked = feedback_examples(conn)
+    assert liked == ["Sensor insertion A"]
+    assert disliked == ["Sensor insertion B"], "没分数的否决不该进负例"
+
+
+def test_精排拿到反馈样本(tmp_path, monkeypatch):
+    """回归:feedback_examples 写好了却没有任何调用点,精排 prompt 里的
+    正负例永远是"(暂无)"—— 收藏/否决只落库,从不影响下一轮打分。"""
+    from litradar import rank
+    from litradar.config import Config
+
+    cfg = Config()
+    cfg.app.db_path = str(tmp_path / "t.db")
+    cfg.interests_data = {"direction": "optical sensor",
+                          "keywords": {"core": ["optical sensor"]}}
+
+    conn = db.Database(cfg.db_file).connect()
+    _seed(conn, "Optical sensor Sample detection")
+    star_id = _seed(conn, "Optical sensor sensing methods")
+    drop_id = _seed(conn, "Optical sensor polymer coating")
+    db.set_action(conn, star_id, "star")
+    db.set_action(conn, drop_id, "ignore")
+    db.save_score(conn, drop_id, final_score=70.0)
+    conn.commit()
+    conn.close()
+
+    seen = {}
+
+    def fake_rerank(rows, prof, cfg_, llm, liked=None, disliked=None):
+        seen["liked"], seen["disliked"] = liked, disliked
+        return {}
+
+    class FakeLLM:
+        available = True
+
+        def __init__(self, *a, **kw):
+            pass
+
+    monkeypatch.setattr(rank, "llm_rerank", fake_rerank)
+    monkeypatch.setattr(rank, "DeepSeek", FakeLLM)
+
+    stat = rank.run(cfg, days=30, verbose=False)
+    assert seen["liked"] == ["Optical sensor sensing methods"]
+    assert seen["disliked"] == ["Optical sensor polymer coating"]
+    # 统计页据此判断闭环有没有在工作
+    assert stat["feedback_liked"] == 1
+    assert stat["feedback_disliked"] == 1

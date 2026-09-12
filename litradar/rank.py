@@ -460,9 +460,17 @@ def run(cfg: Config, *, days: int = 30, verbose: bool = True) -> dict:
         llm = DeepSeek(cfg.llm)
         llm_scores: dict[int, tuple[float, str]] = {}
         if llm.available and kept:
+            # 反馈闭环的消费端:收藏 / 否决过的标题当少样本塞进精排 prompt。
+            # 之前这里没传,prompt 里的正负例永远是"(暂无)"——
+            # 用户点的每一次收藏都只是落库,从不影响下一轮打分。
+            liked, disliked = feedback_examples(conn)
+            stat["feedback_liked"] = len(liked)
+            stat["feedback_disliked"] = len(disliked)
             if verbose:
-                print(f"  LLM 精排 {len(kept)} 篇…")
-            llm_scores = llm_rerank(kept, prof, cfg, llm)
+                print(f"  LLM 精排 {len(kept)} 篇…"
+                      f"(参考 {len(liked)} 正例 / {len(disliked)} 负例)")
+            llm_scores = llm_rerank(kept, prof, cfg, llm,
+                                    liked=liked, disliked=disliked)
             stat["llm_scored"] = len(llm_scores)
         else:
             stat["llm_skipped"] = "未配置 API key 或已禁用"
