@@ -152,7 +152,11 @@ def search(
     issns: list[str] | None = None,
     mailto: str = "",
 ) -> list[dict]:
-    filters = [f"from-created-date:{days_ago(lookback_days)}"]
+    # 只要期刊论文。不限 type 的话,同行评审记录("Review for …")、决定信
+    # ("Decision letter for …")、更正、补充材料会一起混进来,以前全靠下游
+    # interests.yaml 的 exclude_title_prefixes 按标题挡;现在在源头就挡掉,
+    # 标题前缀过滤降级为兜底。(fetch_many_by_doi 按 DOI 精确取,不加。)
+    filters = [f"from-created-date:{days_ago(lookback_days)}", "type:journal-article"]
     # 注意:Crossref 多值过滤必须**重复写过滤器名**(issn:A,issn:B),
     # 写成 issn:A,B 会被解析成单个非法 ISSN 而报错。
     for i in issns or []:
