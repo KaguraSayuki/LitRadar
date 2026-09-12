@@ -179,8 +179,27 @@ def run(cfg: Config, *, limit: int = 200, days: int = 30, verbose: bool = True,
         ).fetchall())
         stat["pending"] = len(rows)
 
+        # 深度摘要跟着**排名**走,而不是跟着"这一轮 pending 的前 N"走。
+        # 老写法有两个后果:条目排名后来上升时,它已经有 brief 摘要、不再是
+        # pending,于是永远升不成深度摘要;而且每跑一轮,深度摘要都落在剩下的
+        # pending 上,沿排名一路下漂 —— "前 N 篇深度摘要"名不副实。
         deep_n = cfg.llm.deep_summary_top_n
-        heads, rest = rows[:deep_n], rows[deep_n:]
+        top_rows = list(conn.execute(
+            f"""SELECT i.*, COALESCE(sc.final_score,-1) AS fs, su.depth AS depth
+                FROM item i
+                LEFT JOIN score   sc ON sc.item_id = i.id
+                LEFT JOIN summary su ON su.item_id = i.id
+                WHERE i.kind='paper' AND {db.in_window('i')}
+                ORDER BY fs DESC, i.published_at DESC
+                LIMIT ?""",
+            (f"-{days} days", f"-{days} days", deep_n),
+        ).fetchall()) if deep_n > 0 else []
+        # 前 N 名里**还没有**深度摘要的(没摘要或只有 brief)才需要做;
+        # force 时照旧全部重做。
+        heads = top_rows if force else [r for r in top_rows if r["depth"] != "deep"]
+        head_ids = {int(r["id"]) for r in heads}
+        # 其余 pending 走 brief,但要去掉已经进 heads 的,别同一轮做两遍
+        rest = [r for r in rows if int(r["id"]) not in head_ids]
 
         # 前 N 名:逐篇深度摘要
         for r in heads:
