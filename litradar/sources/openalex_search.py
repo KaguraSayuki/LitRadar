@@ -68,10 +68,18 @@ def _work_to_item(w: dict, source: str = "openalex") -> dict | None:
     }
 
 
-def fetch_by_doi(doi: str, mailto: str = "") -> dict | None:
-    """单篇富化:拿摘要 / 引用数 / OA 链接。"""
-    params = {"mailto": mailto} if mailto else None
-    w = get_json(f"{BASE}/works/doi:{doi}", params=params)
+def fetch_by_doi(doi: str, mailto: str = "", api_key: str = "") -> dict | None:
+    """单篇富化:拿摘要 / 引用数 / OA 链接。
+
+    2026 年起 OpenAlex 改成 API Key + 额度制,不带 key 直接被拒
+    ("Insufficient budget"),所以 key 必须真的发出去。
+    """
+    params: dict[str, Any] = {}
+    if mailto:
+        params["mailto"] = mailto
+    if api_key:
+        params["api_key"] = api_key
+    w = get_json(f"{BASE}/works/doi:{doi}", params=params or None)
     if not w:
         return None
     return _work_to_item(w)
@@ -84,6 +92,7 @@ def search(
     limit: int = 60,
     issns: list[str] | None = None,
     mailto: str = "",
+    api_key: str = "",
 ) -> list[dict]:
     """按关键词检索。查询词来自 interests.yaml,不是固定检索式。"""
     filters = [f"from_publication_date:{days_ago(lookback_days)}"]
@@ -98,6 +107,8 @@ def search(
     }
     if mailto:
         params["mailto"] = mailto
+    if api_key:
+        params["api_key"] = api_key
 
     data = get_json(f"{BASE}/works", params=params)
     if not data:
