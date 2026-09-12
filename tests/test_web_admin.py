@@ -191,3 +191,50 @@ def test_写坏的内容不覆盖原文件(client):
     assert _save(client, "direction: [unclosed\n").status_code == 400
     assert target.read_text(encoding="utf-8") == "direction: old\n"
     assert _backups(target) == []
+
+
+# ─────────────────────────────── 兜底分的红色警告标签
+
+def test_兜底分只在_LLM_可用时才标(client, monkeypatch):
+    """有分数、却没有 LLM 分 = 精排批次失败,分数不是 LLM 判断的结果,
+    必须显式标出来,否则和"真的低分"在列表上长得一模一样。
+
+    但没配 key 时全场都没有 LLM 分,逐条标注只是噪音(顶部已有全局说明)。
+    """
+    from litradar import db
+    from litradar.web import app as webapp
+
+    database = db.Database(webapp.get_cfg().db_file)
+    conn = database.connect()
+    iid, _ = db.upsert_item(conn, {
+        "kind": "paper", "dedup_key": "test:no-llm", "doi": "10.9999/nollm",
+        "title": "No LLM score", "title_norm": "no llm score",
+        "published_at": "2026-09-01", "source": "test"})
+    db.save_score(conn, iid, rule_score=133.0, coarse_score=100.0,
+                  final_score=12.4)          # llm_score 刻意留空
+    conn.commit()
+
+    def _flag(rows, _conn):
+        return [dict(r) for r in rows]
+
+    try:
+        # LLM 可用 → 标
+        monkeypatch.setattr(webapp, "_rank_renderer", lambda cfg: None)
+        cfg = webapp.get_cfg()
+        monkeypatch.setattr(type(cfg.llm), "api_key",
+                            property(lambda self: "sk-test"), raising=False)
+        got = webapp._decorate(db.get_items(conn, state=None, limit=999), conn)
+        row = [d for d in got if d["id"] == iid][0]
+        assert row["score_partial"] is True
+
+        # LLM 不可用 → 不标
+        monkeypatch.setattr(type(cfg.llm), "api_key",
+                            property(lambda self: None), raising=False)
+        got = webapp._decorate(db.get_items(conn, state=None, limit=999), conn)
+        row = [d for d in got if d["id"] == iid][0]
+        assert row["score_partial"] is False
+    finally:
+        conn.execute("DELETE FROM score WHERE item_id=?", (iid,))
+        conn.execute("DELETE FROM item WHERE id=?", (iid,))
+        conn.commit()
+        conn.close()

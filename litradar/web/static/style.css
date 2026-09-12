@@ -222,6 +222,10 @@ h2 small { font-weight: 400; color: var(--ink-3); font-size: 13px; margin-left: 
 .score--hot .score__n { background: var(--amber); color: #1B201D; }
 .score--warm .score__n { background: var(--amber-tint); color: var(--amber-ink); }
 .score--none .score__n { background: transparent; border: 1px dashed var(--line-strong); color: var(--ink-3); font-weight: 500; }
+/* 精排批次失败时的兜底分。它是个普通数字,却和其他条目的分数不可比 ——
+   虚线框 + 灰底,和"未评分"的虚线框同一种视觉语言:"这个数不是打分结果"。 */
+.score--partial .score__n { background: transparent; border: 1px dashed var(--line-strong); color: var(--ink-2); }
+.score--partial .score__l { color: var(--red-ink); }
 
 .entry__body { min-width: 0; }
 .entry__title { margin: 0; font-size: 16.5px; line-height: 1.45; font-weight: 600; letter-spacing: -.005em; }
@@ -250,6 +254,13 @@ h2 small { font-weight: 400; color: var(--ink-3); font-size: 13px; margin-left: 
    放在 meta 最前面,让人一眼看出"这条为什么在这儿"。 */
 .tag--starred { background: var(--amber-tint); color: var(--amber-ink); font-weight: 600; }
 .tag--ignored { background: var(--red-tint); color: var(--red-ink); font-weight: 600; }
+/* 数据/流程出问题的警告标签,和"已否决"(用户主动决定)共用红色系但要能分辨:
+   警告带图标、并且加了描边 */
+.tag--warn {
+  background: var(--red-tint); color: var(--red-ink); font-weight: 600;
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+.tag--warn .icon { width: 12px; height: 12px; }
 /* 期刊等级(影响因子 / 分区 / 北核…)。给它一档更实的样式:
    它和"来源:crossref""被引 3"这类元信息不是一回事,是判断要不要读的信号。 */
 .tag--rank {
