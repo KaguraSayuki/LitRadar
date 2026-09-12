@@ -27,6 +27,21 @@ def clean_journal(name: str | None) -> str | None:
     s = re.sub(r"\s+", " ", s).strip()
     return s or None
 
+
+def _clean_url(url: Any) -> str | None:
+    """外链只放行 http(s)。
+
+    item.url / xmol_url / oa_url 直接进模板的 href,来源元数据里一条
+    ``javascript:`` URL 就会变成可点的 XSS。在入库口统一挡掉,模板不用逐处防。
+    """
+    if not url:
+        return None
+    s = str(url).strip()
+    if s.lower().startswith(("http://", "https://")):
+        return s
+    return None
+
+
 SCHEMA = """
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -358,6 +373,8 @@ def upsert_item(conn: sqlite3.Connection, data: dict[str, Any]) -> tuple[int, bo
     payload = {k: data.get(k) for k in ITEM_FIELDS}
     # 刊名在入库这个唯一入口统一洗干净(HTML 实体 / 换行),见 clean_journal
     payload["journal"] = clean_journal(payload.get("journal"))
+    for k in ("url", "xmol_url"):
+        payload[k] = _clean_url(payload.get(k))
     for k in ("authors", "matched_keywords"):
         if isinstance(payload.get(k), (list, tuple)):
             payload[k] = json.dumps(list(payload[k]), ensure_ascii=False)
@@ -603,7 +620,7 @@ def save_enrichment(conn: sqlite3.Connection, item_id: int, data: dict) -> None:
              oa_url=excluded.oa_url, openalex_id=excluded.openalex_id,
              openalex_json=excluded.openalex_json, crossref_json=excluded.crossref_json,
              enriched_at=excluded.enriched_at""",
-        (item_id, data.get("cited_by_count"), data.get("is_oa"), data.get("oa_url"),
+        (item_id, data.get("cited_by_count"), data.get("is_oa"), _clean_url(data.get("oa_url")),
          data.get("openalex_id"), data.get("openalex_json"), data.get("crossref_json"), now()),
     )
 
