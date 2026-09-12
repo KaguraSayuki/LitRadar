@@ -157,3 +157,21 @@ def test_ignored_view_ignores_score_threshold_only_when_asked(conn):
     db.save_score(conn, b, final_score=10.0)
     assert db.count_items(conn, state="ignored") == 2
     assert db.count_items(conn, state="ignored", min_score=50) == 1
+
+
+# ------------------------------------------------------- 反馈 action 白名单
+
+def test_unknown_action_is_rejected_and_not_logged(conn):
+    """回归:未知 action 以前不改状态,却照样原样写进 feedback 表。"""
+    a = _add(conn, "a")
+    with pytest.raises(ValueError):
+        db.set_action(conn, a, "drop table")
+    assert conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0] == 0
+    assert db.count_items(conn, state="new") == 1
+
+
+def test_every_whitelisted_action_still_works(conn):
+    a = _add(conn, "a")
+    for action in sorted(db.ACTIONS):
+        db.set_action(conn, a, action)
+    assert conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0] == len(db.ACTIONS)

@@ -471,7 +471,10 @@ def item_action(request: Request, item_id: int, action: str = Form(...)):
     require_token(request)
     conn = _conn()
     try:
-        db.set_action(conn, item_id, action)
+        try:
+            db.set_action(conn, item_id, action)
+        except ValueError as e:          # 白名单之外的 action
+            raise HTTPException(400, str(e))
         conn.commit()
         row = conn.execute(
             """SELECT i.*, COALESCE(s.state,'new') state,
