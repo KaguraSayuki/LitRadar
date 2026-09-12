@@ -404,11 +404,35 @@ def interests_page(request: Request, saved: int = 0):
         request, raw=raw, prof=prof, saved=bool(saved), page="interests"))
 
 
+# interests.yaml 的大小上限。正常配置约 12KB,512KB 已经宽出几十倍 ——
+# 再大就不是配置了,别让一次误贴把 YAML 解析器和备份目录一起撑爆。
+MAX_INTERESTS_BYTES = 512 * 1024
+# 带时间戳的备份留几份
+INTERESTS_BACKUPS = 5
+
+
+def _backup_stamp() -> str:
+    from datetime import datetime
+
+    return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def _backup_interests(target: Path) -> None:
+    """写前备份到同目录的 ``interests.yaml.20260912-153000.bak``,只留最近几份。
+
+    以前只有一层 ``.bak``:连续两次坏保存,第二次会把好配置的备份也盖掉。
+    """
+    import shutil
+
+    shutil.copy2(target, target.with_name(f"{target.name}.{_backup_stamp()}.bak"))
+    # 文件名里的时间戳按字典序就是时间序,排完序删最早的
+    for old in sorted(target.parent.glob(f"{target.name}.*.bak"))[:-INTERESTS_BACKUPS]:
+        old.unlink(missing_ok=True)
+
+
 @app.post("/interests")
 def interests_save(request: Request, raw: str = Form(...)):
     require_token(request)
-    import shutil
-
     import yaml
 
     cfg = get_cfg()
@@ -417,6 +441,10 @@ def interests_save(request: Request, raw: str = Form(...)):
         return templates.TemplateResponse(request, "interests.html", ctx(
             request, raw=raw, prof=load_interests(cfg), saved=False,
             error=msg, page="interests"), status_code=400)
+
+    # 0) 大小上限,先于一切解析
+    if len(raw.encode("utf-8")) > MAX_INTERESTS_BYTES:
+        return fail(f"文件过大:超过 {MAX_INTERESTS_BYTES // 1024}KB,正常配置只有十几 KB")
 
     # 1) YAML 语法
     try:
@@ -438,9 +466,16 @@ def interests_save(request: Request, raw: str = Form(...)):
     # 3) 写前备份 —— 覆盖配置不可逆,必须留后路
     target = cfg.interests_file
     if target.exists():
-        shutil.copy2(target, target.with_suffix(target.suffix + ".bak"))
+        _backup_interests(target)
 
-    target.write_text(raw, encoding="utf-8")
+    # 4) 原子写入:先写同目录的临时文件,再 rename 换掉正式文件。
+    #    直接 write_text 写到一半崩溃会留下半个文件 —— 整份配置就没了。
+    tmp = target.with_name(target.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(raw)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, target)
     _cfg_cache.clear()               # 让下次请求重新加载
     return RedirectResponse("/interests?saved=1", status_code=303)
 

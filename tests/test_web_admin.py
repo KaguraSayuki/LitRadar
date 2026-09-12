@@ -1,7 +1,8 @@
-"""网页写入口的准入测试:``/admin/run/*`` 与 ``/item/{id}/action``。
+"""网页写入口的测试:``/admin/run/*``、``/item/{id}/action`` 与 ``/interests``。
 
-前者是整个应用里唯一会真的花钱的地方(DeepSeek 额度),所以它的闸门
-要单独测:口令、跨源。后者的输入来自表单,得把白名单之外的值挡在库外。
+第一个是整个应用里唯一会真的花钱的地方(DeepSeek 额度),所以它的闸门
+要单独测:口令、跨源。第二个的输入来自表单,得把白名单之外的值挡在库外。
+第三个会覆盖用户的配置文件,备份与原子写入不能出错。
 其余页面只读,漏了最多是泄露标题。
 """
 from __future__ import annotations
@@ -29,6 +30,7 @@ def client(tmp_path, monkeypatch):
     """
     cfg = Config()
     cfg.app.db_path = str(tmp_path / "t.db")
+    cfg.app.interests = str(tmp_path / "interests.yaml")   # 别碰仓库里的真实文件
     monkeypatch.setattr(webapp, "get_cfg", lambda: cfg)
     monkeypatch.setattr(webapp.rank, "run", lambda *a, **kw: {"scored": 0})
     monkeypatch.setenv("LITRADAR_TOKEN", TOKEN)
@@ -129,3 +131,63 @@ def test_合法action照常放行(client):
     r = client.post(f"/item/{iid}/action", data={"action": "star"},
                     headers={"X-Token": TOKEN})
     assert r.status_code == 200
+
+
+# ------------------------------------------------------------- interests 保存
+GOOD = "direction: x\nsearch_queries: [a]\nkeywords: {core: [k]}\njournals: {core: []}\n"
+
+
+def _save(client, raw: str):
+    return client.post("/interests", data={"raw": raw}, headers={"X-Token": TOKEN},
+                       follow_redirects=False)
+
+
+def _backups(target):
+    return sorted(target.parent.glob(f"{target.name}.*.bak"))
+
+
+def test_保存成功并留下带时间戳的备份(client):
+    target = webapp.get_cfg().interests_file
+    target.write_text("direction: old\n", encoding="utf-8")
+
+    assert _save(client, GOOD).status_code == 303
+    assert target.read_text(encoding="utf-8") == GOOD
+    baks = _backups(target)
+    assert len(baks) == 1 and baks[0].read_text(encoding="utf-8") == "direction: old\n"
+    assert not target.with_name(target.name + ".tmp").exists(), "临时文件必须被 rename 掉"
+
+
+def test_备份只留最近五份(client, monkeypatch):
+    """回归:只有一层 .bak 时,连续两次坏保存会把好配置的备份也盖掉。"""
+    target = webapp.get_cfg().interests_file
+    target.write_text("direction: v0\n", encoding="utf-8")
+    stamps = iter(f"20260912-1500{n:02d}" for n in range(1, 20))
+    monkeypatch.setattr(webapp, "_backup_stamp", lambda: next(stamps))
+
+    for n in range(1, 8):
+        assert _save(client, GOOD.replace("x", f"v{n}")).status_code == 303
+    baks = _backups(target)
+    assert len(baks) == webapp.INTERESTS_BACKUPS
+    assert [b.name for b in baks] == [f"interests.yaml.20260912-1500{n:02d}.bak"
+                                      for n in range(3, 8)]
+    # 最新那份备份是保存前的内容
+    assert "v6" in baks[-1].read_text(encoding="utf-8")
+
+
+def test_文件过大直接拒绝(client):
+    target = webapp.get_cfg().interests_file
+    target.write_text("direction: old\n", encoding="utf-8")
+    huge = GOOD + "# " + "x" * webapp.MAX_INTERESTS_BYTES + "\n"
+    r = _save(client, huge)
+    assert r.status_code == 400 and "文件过大" in r.text
+    assert target.read_text(encoding="utf-8") == "direction: old\n"
+    assert _backups(target) == []
+
+
+def test_写坏的内容不覆盖原文件(client):
+    target = webapp.get_cfg().interests_file
+    target.write_text("direction: old\n", encoding="utf-8")
+    assert _save(client, "search_queries:\n  - a\n").status_code == 400
+    assert _save(client, "direction: [unclosed\n").status_code == 400
+    assert target.read_text(encoding="utf-8") == "direction: old\n"
+    assert _backups(target) == []

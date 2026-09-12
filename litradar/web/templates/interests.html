@@ -47,7 +47,7 @@
   <textarea class="textarea" id="raw" name="raw" spellcheck="false" autocapitalize="off" autocorrect="off">{{ raw }}</textarea>
   <div class="formbar">
     <button class="btn btn--primary" type="submit">保存</button>
-    <span class="hint">保存前会检查 YAML 语法,写坏了不会覆盖原文件。</span>
+    <span class="hint">保存前会检查 YAML 语法与必要字段,写坏了不会覆盖原文件;每次保存都会在同目录留一份带时间戳的备份(保留最近 5 份)。</span>
   </div>
 </form>
 {% endblock %}
