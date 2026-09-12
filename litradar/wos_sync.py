@@ -55,15 +55,18 @@ def enqueue(conn: sqlite3.Connection, alert: wos_email.WosAlert,
 
 
 def _error_text(error: Exception) -> str:
-    # Playwright 异常可能带页面 URL/会话参数。日志只保留可操作的错误信息。
-    return re.sub(r"https?://\S+", "[URL]", str(error))[:800]
+    # Playwright 异常可能带页面 URL/会话参数。日志只保留可操作的错误信息,
+    # 并去掉控制字符:last_error 会被 CLI 与日志原样打印,不该能注入终端序列。
+    text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", " ", str(error))
+    return re.sub(r"https?://\S+", "[URL]", text)[:800]
 
 
 def run(cfg: Config, *, verbose: bool = True, force: bool = False,
         limit: int | None = None) -> dict:
     """运行到期任务，失败时退避，已校验的下载可在入库重试时复用。"""
     stat = {"alerts": 0, "completed": 0, "records": 0, "new": 0,
-            "updated": 0, "errors": 0, "needs_login": 0, "remaining": 0}
+            "updated": 0, "errors": 0, "needs_login": 0, "failed": 0,
+            "remaining": 0}
     if not cfg.wos.enabled:
         return {**stat, "disabled": True}
     from .pipeline import _store
@@ -72,14 +75,19 @@ def run(cfg: Config, *, verbose: bool = True, force: bool = False,
     maximum = cfg.wos.max_alerts_per_run if limit is None else limit
     if isinstance(maximum, bool) or not isinstance(maximum, int) or maximum < 1:
         raise ValueError("WoS 单轮任务数量必须是正整数")
+    max_attempts = cfg.wos.max_attempts
     conn = db.Database(cfg.db_file).connect()
     started = db.now()
     try:
+        # status='failed' 是终态:不再自动重试,但仍计入 wos-status/统计页,
+        # 需要时用 force(--retry-now)手工重跑,避免配置或页面结构错误
+        # 让一个提醒永远每天重试并一直把 run 的退出码拖成 1。
         jobs = conn.execute(
-            """SELECT * FROM wos_alert WHERE status <> 'complete'
+            """SELECT * FROM wos_alert
+               WHERE status <> 'complete' AND (? OR status <> 'failed')
                AND (? OR next_attempt_at IS NULL OR julianday(next_attempt_at)<=julianday(?))
                ORDER BY COALESCE(next_attempt_at, created_at), created_at LIMIT ?""",
-            (int(force), started, maximum),
+            (int(force), int(force), started, maximum),
         ).fetchall()
         for job in jobs:
             aid = job["alert_id"]
@@ -157,10 +165,17 @@ def run(cfg: Config, *, verbose: bool = True, force: bool = False,
             except Exception as error:  # 单个提醒失败不影响其它队列任务
                 conn.rollback()
                 needs_login = isinstance(error, wos_browser.WosAccessError)
-                status = "needs_login" if needs_login else "retry"
-                minutes = min(cfg.wos.retry_minutes * 2 ** min(attempts - 1, 10), 1440)
-                retry_at = (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
                 message = _error_text(error)
+                exhausted = attempts >= max_attempts
+                if exhausted:
+                    # 试满次数即认定不会自愈:停留在此状态等人工处理,不再排期。
+                    status = "failed"
+                    retry_at = None
+                else:
+                    status = "needs_login" if needs_login else "retry"
+                    minutes = min(cfg.wos.retry_minutes * 2 ** min(attempts - 1, 10), 1440)
+                    retry_at = (datetime.now(timezone.utc)
+                                + timedelta(minutes=minutes)).isoformat()
                 conn.execute(
                     """UPDATE wos_alert SET status=?, next_attempt_at=?, last_error=?,
                        updated_at=? WHERE alert_id=?""",
@@ -169,10 +184,12 @@ def run(cfg: Config, *, verbose: bool = True, force: bool = False,
                 conn.commit()
                 stat["errors"] += 1
                 stat["needs_login"] += int(needs_login)
+                stat["failed"] += int(exhausted)
                 if verbose:
-                    print(f"  [warn] WoS {job['query'][:60]}: {message}")
+                    suffix = f";已试满 {max_attempts} 次,不再自动重试" if exhausted else ""
+                    print(f"  [warn] WoS {job['query'][:60]}: {message}{suffix}")
         stat["remaining"] = conn.execute(
-            "SELECT COUNT(*) FROM wos_alert WHERE status <> 'complete'",
+            "SELECT COUNT(*) FROM wos_alert WHERE status NOT IN ('complete','failed')",
         ).fetchone()[0]
         db.log_run(conn, "ingest_wos", "partial" if stat["errors"] else "ok",
                    stat, started_at=started)

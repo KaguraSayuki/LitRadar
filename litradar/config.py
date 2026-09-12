@@ -88,6 +88,8 @@ class WosConfig:
     min_interval_seconds: float = 2.0
     max_alerts_per_run: int = 10
     retry_minutes: int = 15
+    # 试满这么多次仍失败就停在 failed,不再每天自动重试(可用 --retry-now 手工重跑)。
+    max_attempts: int = 8
 
 
 @dataclass
@@ -308,7 +310,7 @@ def _wos_config(data: dict | None) -> WosConfig:
         if not isinstance(getattr(cfg, name), bool):
             raise ValueError(f"wos.{name} 必须是布尔值")
     for name in ("timeout_seconds", "batch_size", "max_records_per_alert",
-                 "max_alerts_per_run", "retry_minutes"):
+                 "max_alerts_per_run", "retry_minutes", "max_attempts"):
         value = getattr(cfg, name)
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ValueError(f"wos.{name} 必须是正整数")

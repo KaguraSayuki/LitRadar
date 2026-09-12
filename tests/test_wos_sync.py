@@ -1,4 +1,5 @@
 """邮件确认、全量验证、崩溃恢复与跨来源去重的整条 WoS 流程。"""
+import sqlite3
 from email.message import EmailMessage
 from unittest.mock import Mock
 
@@ -210,3 +211,67 @@ def test_v4_database_acquires_queue_without_losing_existing_data(tmp_path):
     assert conn.execute("SELECT count(*) FROM wos_alert").fetchone()[0] == 0
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     conn.close()
+
+
+def test_permanent_failure_stops_retrying_after_max_attempts(setup, monkeypatch):
+    """试满 max_attempts 就停在 failed,不再每天自动重试。"""
+    cfg, fetch = setup
+    cfg.wos.max_attempts = 2
+    fetch.side_effect = wos_browser.WosFetchError("页面结构变了")
+    monkeypatch.setattr(mail, "iter_messages", lambda *_: iter([message()]))
+
+    pipeline.ingest_mail(cfg, verbose=False)
+    assert wos_sync.status(cfg)[0]["status"] == "retry"
+
+    conn = db.Database(cfg.db_file).connect()
+    conn.execute("UPDATE wos_alert SET next_attempt_at=NULL")
+    conn.commit()
+    conn.close()
+
+    out = wos_sync.run(cfg, verbose=False)
+    assert out["failed"] == 1 and out["remaining"] == 0
+    assert wos_sync.status(cfg)[0]["status"] == "failed"
+
+    # 终态不再被自动重试,退出码也不会永远停在 1……
+    quiet = wos_sync.run(cfg, verbose=False)
+    assert quiet["alerts"] == 0 and quiet["errors"] == 0
+    # ……但仍可用 --retry-now 手工重跑。
+    assert wos_sync.run(cfg, force=True, verbose=False)["alerts"] == 1
+
+
+def test_queue_level_failure_does_not_abort_the_rest_of_the_pipeline(setup, monkeypatch):
+    """框架级异常(建库失败/sqlite 锁/log_run)只记错,不能让后面的阶段全不跑。"""
+    cfg, _ = setup
+
+    def boom(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(wos_sync, "run", boom)
+
+    out = pipeline.ingest_mail(cfg, verbose=False)
+
+    assert out["errors"] == 1
+    assert out["wos"]["error"] == "OperationalError"
+
+
+def test_doi_less_record_merges_with_existing_title_keyed_item(setup, monkeypatch):
+    """WoS 无 DOI 记录要按标题键撞上其它来源已入库的同一篇。"""
+    cfg, fetch = setup
+    conn = db.Database(cfg.db_file).connect()
+    pipeline._store(conn, {"kind": "paper", "source": "xmol",
+                           "title": "Chemistry article 1"})
+    conn.commit()
+    conn.close()
+    fetch.return_value = (
+        "TY  - JOUR\n"
+        "TI  - Chemistry article 1\n"
+        "AN  - WOS:000000000000001\n"
+        "PY  - 2003\n"
+        "AB  - No DOI on this export.\n"
+        "ER  -\n"
+    ).encode()
+    monkeypatch.setattr(mail, "iter_messages", lambda *_: iter([message(total=1)]))
+
+    out = pipeline.ingest_mail(cfg, verbose=False)
+
+    assert out["new"] == 0 and out["updated"] == 1
+    assert len(rows(cfg, "SELECT * FROM item")) == 1

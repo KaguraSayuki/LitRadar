@@ -101,7 +101,20 @@ def cache_path(cfg: Any) -> Path:
     if not raw:
         raise OAuthConfigurationError("mail.oauth_token_cache 不能为空")
     path = Path(raw).expanduser()
-    return path if path.is_absolute() else ROOT / path
+    resolved = path if path.is_absolute() else ROOT / path
+    # 缓存里是明文的 access/refresh token。放在仓库内就必须落在 data/ 下:
+    # .gitignore 只忽略 data/,若配成 ./outlook-token-cache.json 这种项目根
+    # 路径,文件会被 git 追踪并随 push 推到远端。仓库外的绝对路径不受影响。
+    try:
+        path_resolved = resolved.resolve()
+        root_resolved = Path(ROOT).resolve()
+    except OSError as exc:
+        raise OAuthConfigurationError("mail.oauth_token_cache 路径无法解析") from exc
+    if root_resolved in path_resolved.parents \
+            and (root_resolved / "data") not in path_resolved.parents:
+        raise OAuthConfigurationError(
+            "mail.oauth_token_cache 在项目内必须放在 data/ 下,否则会被 git 追踪")
+    return resolved
 
 
 def validate_imap_host(host: Any) -> None:

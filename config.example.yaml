@@ -73,6 +73,7 @@ wos:
   max_alerts_per_run: 10         # 历史提醒分轮补齐
   min_interval_seconds: 2
   retry_minutes: 15             # 指数退避，最大一天；下次定时运行处理到期任务
+  max_attempts: 8               # 试满仍失败则停在 failed（不再自动重试，可用 wos-sync --retry-now 重跑）
 
 # ── 数据源 ──────────────────────────────────────────────────────────────────
 # 分工是实测得出的:Crossref 负责检索,Semantic Scholar 负责补摘要,

@@ -51,7 +51,7 @@ WOS_TABLES = (
         query TEXT NOT NULL DEFAULT '',
         expected_count INTEGER NOT NULL CHECK(expected_count >= 0),
         status TEXT NOT NULL DEFAULT 'pending'
-            CHECK(status IN ('pending','retry','needs_login','complete')),
+            CHECK(status IN ('pending','retry','needs_login','complete','failed')),
         attempts INTEGER NOT NULL DEFAULT 0,
         records_imported INTEGER NOT NULL DEFAULT 0,
         next_attempt_at TEXT,

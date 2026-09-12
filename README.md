@@ -173,14 +173,21 @@ OAuth 缓存文件权限为 `0600`，浏览器会话和下载缓存都属于私�
 在同一事务持久化后才确认收信；只有该提醒的**全部题录**成功入库才标记处理完成。
 最多每批导出 1000 条；邮件总数、页面总数、下载记录数必须一致，少导或重复标识都会失败。
 原文、下载缓存和提醒成员关系保存在 SQLite 中；失败按退避时间重试，重启或邮件归档不丢任务。
-退避时间表示最早重试时间，实际重试随下一轮定时采集执行。
+退避时间表示最早重试时间，实际重试随下一轮定时采集执行。试满 `max_attempts`（默认 8）仍失败
+的提醒会停在 `failed`，不再每天自动重试 —— 统计页和 `wos-status` 都会标出，修正原因后用
+`wos-sync --retry-now` 手工重跑，避免一个坏任务无限重试并一直把 `litradar run` 的退出码拖成 1。
 
 ```bash
 litradar ingest mail             # 收信并自动处理 WoS 完整结果
 litradar wos-status              # 查看数量、完成状态、重试时间及错误
 litradar wos-sync                # 只处理已入队的到期任务，邮箱离线也可执行
-litradar wos-sync --retry-now     # 访问恢复后立即重试
+litradar wos-sync --retry-now     # 访问恢复后立即重试（含已失败的提醒）
 ```
+
+> 在 systemd 下运行时，`deploy/` 的单元带 `NoNewPrivileges` / `PrivateDevices` /
+> `ProtectSystem=strict`。Chromium 自带沙箱在这些限制下可能无法启动，表现为反复
+> `无法启动 WoS Chromium`。首次启用后请用 `litradar wos-sync` 实测一次；若确认是加固
+> 所致，可为该单元单独放宽（或改用带机构会话的桌面环境运行 `wos-login` 后再采集）。
 
 网页统计页也会显示采集进度和需要重新登录的任务。`max_alerts_per_run` 控制每轮补采量；
 超过 `max_records_per_alert` 的大提醒会明确报错，调大上限后可重试，绝不静默截断。

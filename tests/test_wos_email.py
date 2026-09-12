@@ -199,3 +199,18 @@ def test_malformed_alert_subject_is_rejected() -> None:
 
     with pytest.raises(ValueError, match="主题"):
         wos_email.parse_bytes(raw)
+
+
+def test_control_characters_in_the_subject_never_reach_the_stored_query() -> None:
+    """query 会被 CLI/日志原样打印,主题里的控制字符不该能注入终端。"""
+    target = f"https://www.webofscience.com/wos/alldb/alert-execution-summary/{ALERT_ID}"
+    raw = _mail(
+        "Web of Science Alert - che\x1b[31nmistry\x07 - 2 results",
+        f'<p><a href="{escape(target, quote=True)}">View all 2 records</a></p>',
+    )
+
+    alert, _ = wos_email.parse_bytes(raw)
+
+    assert alert is not None
+    assert not any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in alert.query)
+    assert "mistry" in alert.query

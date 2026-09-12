@@ -10,7 +10,11 @@ from urllib.parse import quote
 from ..normalize import normalize_doi
 
 
-_TAG_RE = re.compile(r"^\s*(?P<tag>[A-Za-z0-9]{2})\s*-\s?(?P<value>.*)$")
+# 字段标签只认列 0 的大写双字符。按 RIS 规范,续行一律缩进;若允许行首
+# 空白,摘要里 "Co-doped" / "In-situ" / "Py-based" / "Do-doped" 这类
+# 句子会被当成 CO/IN/PY/DO 字段:该行从摘要中消失,且后续真正的续行
+# 也挂到伪标签下,整段摘要被截成第一行,PY 甚至会被伪值顶掉而丢掉年份。
+_TAG_RE = re.compile(r"^(?P<tag>[A-Z0-9]{2})[ \t]*-[ \t]?(?P<value>.*)$")
 _YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
 _HTML_ERROR_RE = re.compile(r"^\s*(?:<!doctype\s+html|<html\b|<head\b|<body\b)", re.I)
 _MONTHS = {
@@ -247,7 +251,10 @@ def _record_to_item(record: dict[str, list[str]]) -> dict[str, Any]:
     kind = "patent" if ris_type in {"PAT", "PATENT"} else "paper"
     return {
         "kind": kind,
-        "dedup_key": f"doi:{doi}" if doi else f"wos:{accession}",
+        # 无 DOI 时留空,交给 pipeline._prepare 退化成 title: 键 —— 与
+        # Crossref / OpenAlex / X-MOL 一致。用 wos:<AN> 永远撞不上同一篇
+        # 文献的 title: 键,同一篇会被入库两次。
+        "dedup_key": f"doi:{doi}" if doi else None,
         "doi": doi,
         "title": title,
         "title_norm": None,

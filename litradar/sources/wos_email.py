@@ -30,6 +30,8 @@ _SUBJECT_RE = re.compile(
     re.IGNORECASE,
 )
 _SUBJECT_HINT_RE = re.compile(r"\bweb\s+of\s+science\s+alert\b", re.IGNORECASE)
+# 主题里的控制字符会随 query 落库,并在 CLI/日志里被原样打印(终端注入)。
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 _ANCHOR_RE = re.compile(
     r"\bview\s+all\s+(?P<count>[\d,]+)\s+records?\b", re.IGNORECASE
 )
@@ -345,7 +347,7 @@ def _alert_from_subject(subject: str, parts: list[tuple[str, str]]) -> WosAlert 
         if _SUBJECT_HINT_RE.search(core_subject):
             raise ValueError("Web of Science alert 主题格式无效")
         return None
-    query = subject_match.group("query").strip()
+    query = _CONTROL_RE.sub(" ", subject_match.group("query")).strip()
     if not query:
         raise ValueError("Web of Science alert 查询为空")
     total = int(subject_match.group("total").replace(",", ""))

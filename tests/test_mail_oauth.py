@@ -296,3 +296,21 @@ def test_oauth_connect_rejects_bad_select_and_closes(monkeypatch, tmp_path):
     with pytest.raises(ConnectionError, match="SELECT"):
         mail._connect(cfg)
     assert events == ["unselect", "logout"]
+
+
+def test_token_cache_must_stay_under_data_inside_the_project(tmp_path, monkeypatch):
+    """缓存是明文 refresh token:放在仓库内就必须落 data/,否则会被 git 推到远端。"""
+    monkeypatch.setattr(mail_oauth, "ROOT", tmp_path)
+    (tmp_path / "data").mkdir()
+
+    allowed = MailConfig(oauth_token_cache="./data/outlook-token-cache.json")
+    assert mail_oauth.cache_path(allowed) == tmp_path / "data" / "outlook-token-cache.json"
+
+    stray = MailConfig(oauth_token_cache="./outlook-token-cache.json")
+    with pytest.raises(mail_oauth.OAuthConfigurationError, match="data/"):
+        mail_oauth.cache_path(stray)
+
+    # 仓库之外的绝对路径不受限制
+    outside = tmp_path.parent / "elsewhere-token-cache.json"
+    assert mail_oauth.cache_path(
+        MailConfig(oauth_token_cache=str(outside))) == outside

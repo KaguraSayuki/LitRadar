@@ -48,3 +48,22 @@ def test_empty_ranking_and_partial_weights_keep_defaults(tmp_path):
     assert _load(tmp_path, None).w_llm == 0.85
     cfg = _load(tmp_path, {"weights": {"llm": 0.7}})
     assert (cfg.w_llm, cfg.w_coarse, cfg.w_rule) == (0.7, 0.10, 0.05)
+
+
+def _load_wos(tmp_path, wos):
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"wos": wos}), encoding="utf-8")
+    return load_config(path).wos
+
+
+def test_wos_max_attempts_parsed_and_validated(tmp_path):
+    assert _load_wos(tmp_path, {"max_attempts": 3}).max_attempts == 3
+
+    for bad in (0, -1, True, "many"):
+        with pytest.raises(ValueError, match="max_attempts"):
+            _load_wos(tmp_path, {"max_attempts": bad})
+
+
+def test_unknown_wos_key_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="未知 wos 配置项"):
+        _load_wos(tmp_path, {"max_attemptz": 3})

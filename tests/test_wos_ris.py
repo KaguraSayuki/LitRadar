@@ -47,7 +47,7 @@ def test_parse_records_into_pipeline_item_dicts() -> None:
     assert first["published_at"] == "2003-04-05"
     assert first["url"] == "https://doi.org/10.5555/abc."
     assert second["doi"] is None
-    assert second["dedup_key"] == "wos:WOS:0000002"
+    assert second["dedup_key"] is None
     assert second["abstract"] is None
     assert second["published_at"] == "2024-01-01"
     assert second["url"] == (
@@ -135,3 +135,82 @@ def test_missing_title_is_rejected() -> None:
 def test_html_error_page_is_rejected() -> None:
     with pytest.raises(ValueError, match="HTML"):
         wos_ris.parse_bytes(b"<!doctype html><html><body>download failed</body></html>")
+
+
+# ------------------------------------------------ 缩进续行不能被当成字段标签
+# 摘要里以"元素/词根 + 连字符"开头的句子极常见(Co-doped、In-situ、Py-based)。
+# 旧正则允许行首空白,会把它们读成 CO/IN/PY/DO/ER 字段:那一行从摘要里消失,
+# 后续真正的续行也挂到伪标签下,整段摘要被截成第一行。
+def test_indented_continuation_lines_stay_in_the_abstract() -> None:
+    ris = (
+        "TY  - JOUR\n"
+        "AN  - WOS:0000009\n"
+        "TI  - Oxygen evolution on doped oxides\n"
+        "AB  - We studied a series of transition-metal oxides.\n"
+        "  Co-doped and Fe-doped samples were prepared.\n"
+        "  In-situ XRD confirmed the phase purity.\n"
+        "  Py-based ligands were used as precursors.\n"
+        "PY  - 2024\n"
+        "ER  -\n"
+    ).encode()
+
+    record = wos_ris.parse_bytes(ris)[0]
+
+    assert record["abstract"] == (
+        "We studied a series of transition-metal oxides. "
+        "Co-doped and Fe-doped samples were prepared. "
+        "In-situ XRD confirmed the phase purity. "
+        "Py-based ligands were used as precursors."
+    )
+    # PY 曾被 "Py-based…" 伪值顶掉,年份整段丢失(文献会掉出排序时间窗)。
+    assert record["published_at"] == "2024-01-01"
+    assert record["doi"] is None
+
+
+def test_do_prefixed_continuation_does_not_fabricate_a_doi() -> None:
+    ris = (
+        "TY  - JOUR\n"
+        "AN  - WOS:0000010\n"
+        "TI  - A title\n"
+        "AB  - First line.\n"
+        "  Do-doped samples were prepared by impregnation.\n"
+        "PY  - 2024\n"
+        "ER  -\n"
+    ).encode()
+
+    record = wos_ris.parse_bytes(ris)[0]
+
+    assert record["doi"] is None
+    assert record["dedup_key"] is None
+    assert record["abstract"] == (
+        "First line. Do-doped samples were prepared by impregnation.")
+
+
+def test_er_prefixed_continuation_does_not_end_the_record() -> None:
+    ris = (
+        "TY  - JOUR\n"
+        "AN  - WOS:0000011\n"
+        "TI  - A title\n"
+        "AB  - First line.\n"
+        "  Er-doped fibre amplifiers were used.\n"
+        "PY  - 2024\n"
+        "ER  -\n"
+    ).encode()
+
+    record = wos_ris.parse_bytes(ris)[0]
+
+    assert record["source_ref"] == "WOS:0000011"
+    assert record["published_at"] == "2024-01-01"
+    assert record["abstract"] == (
+        "First line. Er-doped fibre amplifiers were used.")
+
+
+def test_doi_less_records_get_a_title_key_from_the_pipeline() -> None:
+    """缺 DOI 的记录必须退化成 title: 键,否则同一篇文献会被入库两次。"""
+    from litradar.pipeline import _prepare
+
+    ris = b"TY  - JOUR\nTI  - A record without a DOI\nAN  - WOS:0000002\nPY  - 2024\nER  -\n"
+
+    prepared = _prepare(wos_ris.parse_bytes(ris)[0])
+
+    assert prepared["dedup_key"] == "title:a record without a doi"

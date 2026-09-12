@@ -153,6 +153,38 @@ def _cfg_int(cfg: Any, name: str, default: int) -> int:
     return value
 
 
+def _looks_like_browser_profile(path: Path) -> bool:
+    """目录里已有 Chromium/Firefox 的 profile 特征文件即为日常浏览器目录。"""
+    if (path / "Local State").exists() or (path / "prefs.js").exists():
+        return True
+    for child in ("Default", "Profile 1"):
+        sub = path / child
+        if (sub / "Cookies").exists() or (sub / "History").exists():
+            return True
+    return False
+
+
+# 本工具自己创建的专用 profile 会留下这个标记。Playwright 首次启动后,专用
+# 目录里同样会出现 Local State 等特征文件,所以只能靠标记区分"我们自己建的
+# 专用 profile"和"用户的日常浏览器 profile"。
+_PROFILE_MARKER = ".litradar-wos-profile"
+
+
+def _is_foreign_browser_profile(path: Path) -> bool:
+    return _looks_like_browser_profile(path) and not (path / _PROFILE_MARKER).exists()
+
+
+def _forbidden_profile_roots(home: Path) -> tuple[Path, ...]:
+    """日常浏览器的配置根目录 —— 自动化绝不能借用其中的会话。"""
+    roots = [home / ".mozilla", home / "snap", home / ".var" / "app"]
+    config = home / ".config"
+    roots += [config / name for name in (
+        "google-chrome", "chromium", "chromium-browser", "microsoft-edge",
+        "BraveSoftware", "vivaldi",
+    )]
+    return tuple(roots)
+
+
 def _settings(cfg: Any) -> tuple[Path, int, int, int, float]:
     profile_value = getattr(cfg, "browser_profile_dir", "./data/wos-browser")
     if not isinstance(profile_value, (str, Path)) or not str(profile_value).strip():
@@ -165,6 +197,16 @@ def _settings(cfg: Any) -> tuple[Path, int, int, int, float]:
         raise WosFetchError("WoS browser_profile_dir 路径无法解析") from exc
     if profile_resolved == home_resolved:
         raise WosFetchError("WoS 浏览器必须使用专用 profile,不能使用用户主目录")
+    # 只挡住主目录本身是不够的:~/.config/google-chrome/Default 这类路径
+    # 会直接把日常浏览器 profile 交给自动化,既可能外泄已登录会话,也可能
+    # 被 Chromium 改写而损坏。因此再挡配置根目录和已有 profile 特征。
+    for root in _forbidden_profile_roots(home_resolved):
+        if profile_resolved == root or root in profile_resolved.parents:
+            raise WosFetchError(
+                "WoS browser_profile_dir 不能指向日常浏览器目录;请使用独立目录")
+    if _is_foreign_browser_profile(profile_resolved):
+        raise WosFetchError(
+            "WoS browser_profile_dir 已是一个浏览器 profile;请改用独立空目录")
 
     timeout = _cfg_int(cfg, "timeout_seconds", 60)
     batch = _cfg_int(cfg, "batch_size", 1000)
@@ -203,7 +245,15 @@ def _launch_context(
     if channel:
         kwargs["channel"] = channel
     try:
+        # profile 里是机构访问会话的 cookie,必须是私有目录(mkdir 的
+        # mode 会被 umask 削掉,所以再 chmod 一次)。
         profile.mkdir(parents=True, exist_ok=True)
+        with suppress(OSError):
+            profile.chmod(0o700)
+        try:
+            (profile / _PROFILE_MARKER).touch(exist_ok=True)
+        except OSError:
+            pass
         return playwright.chromium.launch_persistent_context(str(profile), **kwargs)
     except Exception as exc:  # noqa: BLE001  启动失败需转成可操作提示
         raise WosFetchError(

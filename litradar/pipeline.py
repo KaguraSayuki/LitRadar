@@ -56,19 +56,33 @@ def _store(conn: sqlite3.Connection, data: dict) -> tuple[int, bool]:
     return iid, created
 
 
+def _run_wos_queue(cfg: Config, *, verbose: bool) -> dict:
+    """运行 WoS 队列;框架级异常不得拖垮其它采集环节。
+
+    单个提醒的失败本来就在 wos_sync 内部被兜住(退避重试)。这里防的是
+    更外层的事故 —— 建库/迁移失败、sqlite 锁、run_log 写不进去。那些
+    一旦抛出去,run_all 后面的检索、富化、排序、摘要全都不会跑。
+    """
+    empty = {"alerts": 0, "completed": 0, "records": 0, "new": 0,
+             "updated": 0, "errors": 0, "needs_login": 0, "failed": 0,
+             "remaining": 0}
+    try:
+        return wos_sync.run(cfg, verbose=verbose)
+    except Exception as error:  # noqa: BLE001
+        if verbose:
+            print(f"  [warn] WoS 队列运行失败: {type(error).__name__}: {error}")
+        return {**empty, "errors": 1, "error": type(error).__name__}
+
+
 def ingest_mail(cfg: Config, *, verbose: bool = True) -> dict:
     """接收订阅邮件，并处理已持久化的 WoS 完整结果任务。"""
     try:
         stat = _ingest_mail(cfg, verbose=verbose)
     except Exception:
         # 邮箱暂时离线不应挡住此前已确认的 WoS 任务。
-        try:
-            wos_sync.run(cfg, verbose=verbose)
-        except Exception as error:
-            if verbose:
-                print(f"  [warn] WoS 队列运行失败: {type(error).__name__}")
+        _run_wos_queue(cfg, verbose=verbose)
         raise
-    wos = wos_sync.run(cfg, verbose=verbose)
+    wos = _run_wos_queue(cfg, verbose=verbose)
     stat["wos"] = wos
     for key in ("records", "new", "updated", "errors"):
         stat[key] += wos[key]

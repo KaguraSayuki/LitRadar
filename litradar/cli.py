@@ -27,7 +27,12 @@ def cmd_parse(cfg, args):
     n = 0
     alerts = 0
     for msg in mail.iter_messages(cfg.mail):
-        alert, meta = wos_email.parse_bytes(msg.raw)
+        try:
+            alert, meta = wos_email.parse_bytes(msg.raw)
+        except ValueError as e:
+            # 单封模板不符的 WoS 邮件不该打断整个解析校准。
+            print(f"--- {msg.source_ref} | WoS 邮件无法解析: {e}", file=sys.stderr)
+            continue
         if alert is not None:
             print(f"WoS: {alert.query} | 待获取完整结果 {alert.total} 条")
             alerts += 1
@@ -75,6 +80,8 @@ def cmd_run(cfg, args):
 
 
 def cmd_wos_sync(cfg, args):
+    if args.limit is not None and args.limit < 1:
+        raise ValueError("--limit 必须是正整数")
     out = wos_sync.run(cfg, force=args.retry_now, limit=args.limit)
     print(json.dumps(out, ensure_ascii=False, indent=2))
     return 1 if out["errors"] else 0
@@ -190,7 +197,11 @@ def cmd_mail_test(cfg, args):
             typ, fetched = conn.fetch(uid, "(BODY.PEEK[])")   # PEEK:不标已读
             if typ != "OK" or not fetched or not isinstance(fetched[0], tuple):
                 continue
-            alert, meta = wos_email.parse_bytes(fetched[0][1])
+            try:
+                alert, meta = wos_email.parse_bytes(fetched[0][1])
+            except ValueError as e:
+                print(f"      WoS 邮件无法解析: {e}")
+                continue
             if alert is not None:
                 print(f"      WoS {alert.query[:60]} → 完整结果 {alert.total} 条(由后台获取)")
                 alerts += 1
@@ -493,7 +504,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("wos-login", help="打开 WoS 专用浏览器进行机构登录").set_defaults(func=cmd_wos_login)
     sub.add_parser("wos-status", help="查看 WoS 完整结果采集进度").set_defaults(func=cmd_wos_status)
     sp = sub.add_parser("wos-sync", help="处理待完成 WoS 提醒(无需重新读取邮件)")
-    sp.add_argument("--retry-now", action="store_true", help="立即重试，忽略退避时间")
+    sp.add_argument("--retry-now", action="store_true",
+                    help="立即重试，忽略退避时间，并重跑已失败的提醒")
     sp.add_argument("--limit", type=int, default=None, help="本轮最多处理多少个提醒")
     sp.set_defaults(func=cmd_wos_sync)
     sub.add_parser("check", help="体检:配置/密钥/数据库/网络/LLM 连通性").set_defaults(func=cmd_check)

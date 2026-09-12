@@ -423,3 +423,76 @@ def test_validate_alert_url_canonicalises_safe_link_and_rejects_target_query():
 def test_alert_url_is_restricted(url):
     with pytest.raises(wos_browser.WosAccessError):
         wos_browser.validate_alert_url(url)
+
+
+# ------------------------------------------------------------- profile 目录边界
+def test_browser_profile_directory_is_private(tmp_path):
+    """profile 里是机构会话 cookie,必须是 0700(mkdir 的 mode 会被 umask 削掉)。"""
+    import stat as stat_module
+
+    profile = tmp_path / "wos-browser"
+
+    class Chromium:
+        def launch_persistent_context(self, path, **kwargs):
+            return SimpleNamespace(path=path)
+
+    wos_browser._launch_context(
+        SimpleNamespace(chromium=Chromium()), _cfg(tmp_path), profile, 1000)
+
+    assert stat_module.S_IMODE(profile.stat().st_mode) == 0o700
+
+
+def test_profile_dir_pointing_at_a_daily_browser_is_rejected(tmp_path, monkeypatch):
+    """只挡住主目录本身不够:~/.config/google-chrome/Default 曾照样放行。"""
+    home = tmp_path / "home"
+    (home / ".config" / "google-chrome" / "Default").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+
+    candidates = [
+        home / ".config" / "google-chrome",
+        home / ".config" / "google-chrome" / "Default",
+        home / ".config" / "chromium",
+        home / ".mozilla",
+    ]
+    for bad in candidates:
+        bad.mkdir(parents=True, exist_ok=True)
+        with pytest.raises(wos_browser.WosFetchError, match="日常浏览器"):
+            wos_browser._settings(_cfg(tmp_path, browser_profile_dir=str(bad)))
+
+
+def test_existing_browser_profile_directory_is_rejected(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
+    existing = tmp_path / "daily"
+    existing.mkdir()
+    (existing / "Local State").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(wos_browser.WosFetchError, match="浏览器 profile"):
+        wos_browser._settings(_cfg(tmp_path, browser_profile_dir=str(existing)))
+
+    # 专用空目录照常可用
+    dedicated = tmp_path / "dedicated"
+    assert wos_browser._settings(
+        _cfg(tmp_path, browser_profile_dir=str(dedicated)))[0] == dedicated
+
+
+def test_dedicated_profile_is_reused_across_runs(tmp_path):
+    """专用 profile 用过一次后也会有 Local State 等特征,不能被自己挡在门外。"""
+    profile = tmp_path / "wos-browser"
+
+    class Chromium:
+        def launch_persistent_context(self, path, **kwargs):
+            return SimpleNamespace()
+
+    playwright = SimpleNamespace(chromium=Chromium())
+    cfg = _cfg(tmp_path)
+
+    wos_browser._launch_context(playwright, cfg, profile, 1000)
+    # 模拟 Playwright 首次启动后在 profile 里留下的特征文件
+    (profile / "Local State").write_text("{}", encoding="utf-8")
+    (profile / "Default").mkdir()
+    (profile / "Default" / "Cookies").write_text("x", encoding="utf-8")
+
+    assert wos_browser._settings(cfg)[0] == profile
+    wos_browser._launch_context(playwright, cfg, profile, 1000)
