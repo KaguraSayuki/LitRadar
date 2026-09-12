@@ -48,6 +48,10 @@ mail:
   imap_password_env: "IMAP_PASSWORD"   # 应用专用密码,写进 .env
   imap_folder: "INBOX"
   imap_search: 'FROM "newsletter.x-mol.com"'
+  # true:每封处理成功的邮件会被标成已读,之后每轮只拉 UNSEEN 的
+  #       —— 流量不再随邮箱里积攒的历史邮件增长(推荐)。
+  # false:不动已读标记,于是每轮都得按 imap_search 全量拉一遍正文,
+  #        再靠 message_id 去重丢掉 —— 邮箱越大越慢。
   imap_mark_seen: true
 
 # ── 数据源 ──────────────────────────────────────────────────────────────────
