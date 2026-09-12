@@ -78,7 +78,10 @@ CREATE TABLE IF NOT EXISTS item_enrichment (
     openalex_id    TEXT,
     openalex_json  TEXT,
     crossref_json  TEXT,
-    enriched_at    TEXT
+    enriched_at    TEXT,
+    -- 富化过但没拿到摘要的次数。攒够上限就不再进"缺摘要重试"队列(见 enrich._pending),
+    -- 否则来源里真没有摘要的条目会每轮都陪跑 S2 + Crossref 批量,永远烧请求。
+    abstract_attempts INTEGER NOT NULL DEFAULT 0
 );
 
 -- 期刊等级缓存(easyScholar)。按刊名缓存,同一本刊只查一次 ——
@@ -242,10 +245,18 @@ def _migrate_v1(conn: sqlite3.Connection) -> None:
             """)
 
 
+def _migrate_v2(conn: sqlite3.Connection) -> None:
+    """item_enrichment.abstract_attempts:缺摘要重试的计数。"""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(item_enrichment)")}
+    if cols and "abstract_attempts" not in cols:
+        conn.execute("ALTER TABLE item_enrichment "
+                     "ADD COLUMN abstract_attempts INTEGER NOT NULL DEFAULT 0")
+
+
 # 迁移步骤按版本排列:下标 + 1 = 跑完这步之后的 user_version。
 # 加新迁移就在末尾追加一个函数,**同时把 SCHEMA 改成最新结构** ——
 # 新库只建 SCHEMA、不走这里。
-_MIGRATIONS = [_migrate_v1]
+_MIGRATIONS = [_migrate_v1, _migrate_v2]
 SCHEMA_VERSION = len(_MIGRATIONS)
 
 # 已经跑过建表 + 迁移的库路径(进程级)。见 connect()
@@ -581,6 +592,8 @@ def save_summary(conn: sqlite3.Connection, item_id: int, data: dict, depth: str,
 
 
 def save_enrichment(conn: sqlite3.Connection, item_id: int, data: dict) -> None:
+    # abstract_attempts 刻意不在这里:UPSERT 只动列出的列,重新富化不会把
+    # 已经攒下的"没拿到摘要"计数归零。
     conn.execute(
         """INSERT INTO item_enrichment (item_id, cited_by_count, is_oa, oa_url,
                                         openalex_id, openalex_json, crossref_json, enriched_at)
