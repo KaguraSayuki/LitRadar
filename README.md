@@ -1,451 +1,239 @@
-# LitRadar 📡
+# LitRadar
 
-个人化学文献雷达 —— 把 **X-MOL 关键词订阅邮件** + **Crossref 关键词检索** 汇到一起,
-用 **DeepSeek** 做个性化精排和中文结构化摘要,在**局域网网页**上看。
+个人文献雷达 —— 面向化学研究者的自托管文献追踪工具。聚合订阅邮件与开放学术 API，
+使用 LLM 完成个性化排序与中文结构化摘要，在局域网 Web 界面中阅读与反馈。
 
-单用户自用,不对外分发。
+> A self-hosted, single-user literature radar for chemists: multi-source ingestion,
+> LLM re-ranking with explanations, and structured Chinese summaries.
 
----
+## 功能特性
 
-## 数据从哪来
+- **多源采集**：X-MOL 订阅邮件解析、Semantic Scholar 布尔检索、引用滚雪球、Crossref 检索（可选），所有来源按 DOI 去重合并
+- **元数据富化**：Crossref 权威元数据、Semantic Scholar 摘要与引用数、easyScholar 期刊等级（影响因子 / 中科院分区 / 北核等）
+- **三阶段排序**：规则过滤 → BM25 粗排 → DeepSeek listwise 精排，每篇输出分数与"为什么推荐"的中文理由
+- **中文结构化摘要**：问题 / 方法 / 关键结果 / 局限 / 对研究的用处；关键数字与英文原文逐字核验，推断内容显式标注
+- **反馈闭环**：收藏 / 已读 / 不感兴趣三态反馈分别落库，手动决定与自动规则解耦，并参与后续精排
+- **轻量自托管**：FastAPI + SQLite + 原生前端（零构建），systemd 定时任务 + nginx 反向代理
 
-| 层 | 源 | 负责 | 成本 |
+## 工作原理
+
+```
+X-MOL 订阅邮件 (.eml / IMAP) ─┐
+Semantic Scholar 布尔检索 ────┤                ┌─ 富化：摘要 / 引用数 / 期刊等级
+引用滚雪球（种子文献被引）────┼→ DOI 去重入库 ─┤
+Crossref 关键词检索（可选）───┘    (SQLite)    └─ 排序：规则 → BM25 → LLM 精排
+                                                        ↓
+                                          中文结构化摘要 → Web 界面 / 反馈
+```
+
+### 数据源
+
+| 环节 | 数据源 | 说明 | 成本 |
 |---|---|---|---|
-| 精选 | **X-MOL 订阅邮件** | 它替你按订阅词筛过的高精度结果(通常每次 2 条) | 免费 |
-| 召回 A | **Crossref 关键词检索** | 模糊匹配,召回高、噪声大;覆盖白名单里的 24 本期刊 | 免费、无预算限制 |
-| 召回 B | **Semantic Scholar `/paper/search/bulk`** | 精确 AND 查询,召回低但准确率高 | 免费(需 key) |
-| 召回 C | **引用滚雪球**(`/paper/{id}/citations`) | 顺着基础文献的引用关系往下滚,捞关键词找不到的 | 免费(每种子 1 次请求) |
-| 摘要 | **Semantic Scholar `/paper/batch`** | 按 DOI 补摘要 —— 实测 ACS 系期刊 4/4 都能补到 | 免费 |
-| 精排 | **DeepSeek `deepseek-chat`** | 打分 + 给"为什么推给你"的理由 | 极低 |
-| 期刊等级 | **easyScholar 开放接口** | 影响因子、中科院分区、北核、CSCD 等 | 按次计额,结果本地缓存 |
-
-### 两条召回腿为什么互补
-
-```
-Crossref  模糊相关度匹配       单查询约 60-100 篇   噪声大
-S2 bulk   精确 AND 查询        单查询约 3-100 篇    准确率高
-```
-
-两者结果用 **DOI 合并**,所以同一条文献不会重复,而两条腿各自的盲区能被对方补上。
-
-> ⚠️ **S2 bulk 必须用查询语法**,否则**静默返回 0 条**:
-> ```
-> "N-H insertion" + diazo + aniline      -> 命中 3      ✅
-> diazo carbene N-H insertion aniline    -> 命中 0      ❌ 裸词被当短语
-> ```
-> 语法:`+` = AND,`|` = OR,双引号 = 短语,`-` = 排除。
-> 所以画像里 Crossref 用 `search_queries`(自然语言),S2 用 `s2_queries`(查询语法),
-> 两者分开配置 —— **不能共用一份检索词**。
-
-> ⚠️ **关于 OpenAlex**:2026 年起已改为 API Key + 额度制,未配 key 会直接返回
-> `Insufficient budget`。因此默认关闭;若你有 key,在 `.env` 里配 `OPENALEX_API_KEY`
-> 并把 `sources.openalex_enabled` 设为 `true` 即可启用。
->
-> 摘要之所以不依赖 OpenAlex,是因为 **Semantic Scholar 免费且 ACS 覆盖完整**——
-> 这是实测结论,不是假设。
-
-### 为什么不抓 X-MOL 网站
-
-X-MOL 的 `robots.txt` 明确禁止爬取检索页:
-
-```
-Disallow: /paper/search
-Disallow: /paper/journal
-```
-
-且全站部署了阿里云人机验证。所以本项目**只解析你自己收到的订阅邮件**,
-不碰它的网站。X-MOL 自带的「私人定制」订阅请照常使用,它负责广度。
-
-### 专利:不在范围内
-
-全部数据源(X-MOL 订阅、Crossref、Semantic Scholar)都**不含专利**,
-所以这一版直接不做 —— 与其留一个空页面,不如把入口去掉。
-
-将来要接的话,免费源有 EPO OPS(专利族、法律状态)、PatentsView(USPTO)、
-Lens.org。两个前提得先想清楚:专利去重必须按**专利族**而不是公开号,
-否则同一发明会在 CN / US / EP / WO 各推一遍;专利有 **18 个月公开延迟**,
-"新公开"不等于"新发明"。数据库的 `item.kind` 维度留着,接的时候不用改表。
-
----
+| 精选 | X-MOL 订阅邮件 | 仅解析用户自己收到的订阅邮件，不抓取网站 | 免费 |
+| 检索 | Semantic Scholar `/paper/search/bulk` | 精确布尔查询，召回主力 | 免费（建议申请 Key） |
+| 检索 | 引用滚雪球 `/paper/{id}/citations` | 沿种子文献的被引关系，发现关键词覆盖不到的工作 | 免费 |
+| 检索 | Crossref 关键词检索 | 模糊匹配，召回高、噪声大，默认关闭 | 免费 |
+| 富化 | Crossref | 期刊全称 / ISSN / 作者等权威元数据 | 免费 |
+| 富化 | Semantic Scholar `/paper/batch` | 按 DOI 批量补摘要与引用数 | 免费 |
+| 富化 | easyScholar 开放接口 | 影响因子、中科院分区、北核、CSCD 等期刊等级 | 按次计额，结果本地缓存 |
+| 排序 / 摘要 | DeepSeek `deepseek-chat` | listwise 精排与结构化摘要 | 低 |
+| 可选 | OpenAlex | 2026 年起为 API Key + 额度制，默认关闭 | 额度制 |
 
 ## 快速开始
 
-```bash
-cd /srv/Work/LitRadar
+环境要求：Python ≥ 3.11。
 
-# 1. 依赖(已装好,重装用这个)
+```bash
+git clone https://github.com/KaguraSayuki/LitRadar.git
+cd LitRadar
+
+# 1. 安装
 python3 -m venv .venv
 .venv/bin/pip install -e .
 
-# 2. 配置
-cp config.example.yaml config.yaml
-cp .env.example .env && chmod 600 .env
-#   -> 填 DEEPSEEK_API_KEY / IMAP_PASSWORD(可选 LITRADAR_TOKEN)
+# 2. 配置（三个文件均不入库，仅提交对应的 .example）
+cp config.example.yaml   config.yaml
+cp interests.example.yaml interests.yaml
+cp .env.example          .env && chmod 600 .env
+#    编辑 .env：至少填写 DEEPSEEK_API_KEY；邮件接入需 IMAP_PASSWORD
 
-# 3. 初始化
-.venv/bin/python -m litradar.cli init-db
+# 3. 初始化数据库
+.venv/bin/litradar init-db
 
-# 4. 把 X-MOL 订阅邮件导出为 .eml 放进 data/inbox/
+# 4. 运行完整流水线（采集 → 富化 → 排序 → 摘要）
+.venv/bin/litradar run
 
-# 5. 跑一次完整流水线
-.venv/bin/python -m litradar.cli run
-
-# 6. 起服务
-.venv/bin/uvicorn litradar.web.app:app   # 默认只绑 127.0.0.1
+# 5. 启动 Web 服务
+.venv/bin/uvicorn litradar.web.app:app --host 127.0.0.1 --port 8090
 ```
 
-浏览器打开 `http://<局域网IP>:8080`。
+浏览器访问 `http://127.0.0.1:8090`。首次使用建议先运行 `litradar check`
+体检配置、密钥、数据库与各 API 连通性。
 
----
+## 配置说明
 
-## 邮件怎么接进来
-
-### 现状:Outlook 个人账号不能用密码登 IMAP
-
-实测 `outlook.office365.com:993` 的能力声明是:
-
-```
-* CAPABILITY IMAP4 IMAP4rev1 AUTH=XOAUTH2 LOGINDISABLED ...
-```
-
-`LOGINDISABLED` 表示密码登录已被明确禁用,只能用 OAuth2。
-
-### 推荐做法:Outlook 转发到 QQ 邮箱
-
-> ⚠️ **不要用 Gmail。** 实测这台机器上 `imap.gmail.com` 的 DNS 被透明代理拦到
-> `198.18.x.x`,SSL 握手直接 EOF,连不上。
-> 实测**可用**的:`imap.qq.com` / `imap.163.com` / `imap.126.com` /
-> `imap.feishu.cn` / `imap.exmail.qq.com`,都支持密码/授权码登录。
-
-**① 拿 QQ 邮箱授权码**
-
-QQ 邮箱网页版 → 设置 → 账户 → 「POP3/IMAP/SMTP服务」→ 开启 IMAP/SMTP
-→ 按提示发短信 → **生成授权码**(16 位,只显示一次)
-
-**② 在 Outlook 建转发规则**
-
-设置 → 邮件 → 规则 → 新建:条件「发件人地址包含 `newsletter.x-mol.com`」
-→ 操作「转发到 `你的QQ号@qq.com`」
-
-**③ 填进配置**
-
-```yaml
-# config.yaml
-mail:
-  mode: "imap"
-  imap_host: "imap.qq.com"
-  imap_user: "你的QQ号@qq.com"
-  imap_password_env: "IMAP_PASSWORD"
-```
-
-```bash
-# .env(填授权码,不是 QQ 密码)
-IMAP_PASSWORD=你生成的16位授权码
-```
-
-**④ 验证(只读,不标记已读、不改动邮件)**
-
-```bash
-.venv/bin/python -m litradar.cli mail-test
-```
-
-它会连上去、报告找到几封 X-MOL 邮件,并**实际解析一封**给你看提取出的标题与
-DOI。连不上或解析不出会分别给出对应排查方向。
-
-### 备选:本地文件夹模式(零配置)
-
-`mail.mode: "folder"`(默认)。把邮件导出成 `.eml` 丢进 `data/inbox/`,
-跑一次流水线,处理完会自动移到 `data/inbox/processed/`。
-
----
-
-## 中文输出
-
-界面是中文优先的:
-
-- **中文标题** —— 由 LLM 翻译,专业术语保留英文(`aza-Claisen`、`NHC`、`P(V)` 等不硬译)。
-  卡片上中文当主标题,**英文原名以小字副标题保留**,方便你去搜原文
-- **中文摘要** —— 前 `deep_summary_top_n`(默认 8)篇是深度摘要
-  (问题/方法/关键结果/局限/对你的用处),其余是「中文标题 + 一句话结论」
-- **防幻觉** —— `key_results` 里出现的每个数字都会与英文原文逐字比对,
-  对不上会标注 `⚠️(数字 X 未在原文中找到,请核对)`
-- **允许标注推断** —— 摘要通常不直说"解决了什么问题",这类字段允许合理推断
-  但会标 `(推断)`,与原文事实区分开
-
-重新生成:
-
-```bash
-.venv/bin/python -m litradar.cli summarize --force     # 重做全部
-.venv/bin/python -m litradar.cli summarize             # 只补缺失的(默认)
-```
-
----
-
-## 常用命令
-
-```bash
-.venv/bin/python -m litradar.cli init-db        # 建库
-.venv/bin/python -m litradar.cli parse          # 只解析邮件,校准解析器用
-.venv/bin/python -m litradar.cli ingest all     # 采集(邮件 + 关键词检索)
-.venv/bin/python -m litradar.cli enrich         # 富化:补摘要/引用数
-.venv/bin/python -m litradar.cli rank           # 排序
-.venv/bin/python -m litradar.cli summarize      # 生成摘要
-.venv/bin/python -m litradar.cli run            # 上面全部
-.venv/bin/python -m litradar.cli stats          # 统计
-.venv/bin/python -m pytest tests/ -q            # 跑测试
-```
-
-网页的「统计」页也能一键手动触发各阶段。
-
----
-
-## 引用滚雪球
-
-前两条召回腿都靠**词表**。滚雪球靠**引用关系** —— 它的价值恰恰在于发现
-"换了说法"的新工作,那正是关键词召回天然的盲区。实测它捞回一篇 ACS Catalysis
-的工作,关键词一条查询都没命中,精排直接排到全库第 6。
-
-种子写在 `interests.yaml` 的 `seed_dois`(已从开题报告的参考文献里挑了 15 篇)。
-**种子年份很关键**:近一两年的新论文被引 0–1 次,滚不出东西;要选 2014–2023
-这种每年还有十几次被引的。
-
-做法上有两个不显然的决定:
-
-**一、每轮只刷新 5 个种子,关系落表累积。**
-S2 免费 key 名义 1 req/s,实测连打十几个种子有一半会 429。而共被引计数一旦
-丢种子就会静默漏判(只被那失败种子引用的论文永远凑不够票)。所以引用关系写进
-`seed_cite` 表,轮着刷新最久没查的种子,共被引在**全部种子、全部历史轮次**上统计。
-
-**二、共被引当质量标注,不当闸门。**
-一开始我把它当精度闸门(≥2 个种子引用才收),实测太狠:严格按日期过滤后,
-15 个种子全查一遍总共才 ~40 条候选,而门槛 2 挡掉的 29 条里有 18 条标题明显对口。
-所以默认 `snowball_min_cocitations: 1`(全收),共被引数写进 `source_ref`,
-卡片上显示成 `滚雪球 ×2` —— 数字越大越可能是同一条脉络里的工作。
-
-三个来源实测的精度对比(LLM 精排≥60 分占比):
-
-| 来源 | 条数 | ≥60 | 中位分 | 最高 |
-|---|---|---|---|---|
-| Crossref 关键词 | 156 | 2 (1.3%) | 17 | 72 |
-| S2 关键词 | 36 | 14 (39%) | 56 | 90 |
-| 滚雪球 | 27 | 2 (7.4%) | 31 | 77 |
-| 滚雪球(×2 那 4 条) | 4 | 2 (50%) | — | 77 |
-
----
-
-## 排序原理
-
-三阶段漏斗,`最终分 = 0.85×LLM + 0.10×BM25 + 0.05×规则`:
-
-1. **规则过滤** —— 命中 `negative` 直接丢弃;命中核心关键词 / 期刊白名单 /
-   X-MOL 红色高亮词 / 关注作者则加分
-2. **BM25 粗排** —— **只给顺序,不截断**。粗排的信号强度远低于 LLM,
-   让它有"一票否决权"是本末倒置:实测被卡在 53 / 96 / 108 名的三篇
-   从此永远是"未评分"。候选池只有 ~200 条,全部送进 LLM 也才 10 次调用。
-   (需要限量试跑时把 `llm.rerank_top_k` 设成正数即可恢复截断。)
-   **不用向量检索**,因为 DeepSeek 不提供 embedding API,
-   而引入本地 torch 模型对自用工具太重
-3. **LLM 精排** —— 分批独立打分,每批 20 篇,输出分数 + 中文理由。
-   批次之间用同一套评分标准,所以扩大覆盖不会互相干扰
-
-**时间窗只有一个来源**:`app.pipeline_window_days`(默认 200)。
-定时任务、命令行 `--days`、网页上的"排序/摘要"按钮都读它。
-它必须 ≥ 抓取窗口(`sources.s2_search_lookback_days`),否则抓回来的文献
-进了库却落在排序窗口之外,永远拿不到分数,在收件箱里长成一片"未评分"。
-
-期刊匹配做了缩写归一:`Org. Lett.` ↔ `Organic Letters`、
-`Angew. Chem. Int. Ed.` ↔ `Angewandte Chemie International Edition` 都能对上
-(用首字母串比对,有测试覆盖)。
-
----
-
-## 期刊等级(影响因子 / 分区)
-
-影响因子和分区是**付费专有数据**(Clarivate JCR / 中科院文献情报中心),
-Crossref 和 Semantic Scholar 都不提供 —— 这也是为什么早先的 IF 标签
-只出现在 X-MOL 来的那两条上,看着像随机出现。
-
-现在走 [easyScholar 开放接口](https://www.easyscholar.cc),按**刊名**查,
-结果缓存进 `journal_rank` 表:全库几十本刊查一遍就够,之后不再消耗额度。
-
-```bash
-# 密钥写进 .env(不写进 config.yaml)
-echo 'EASYSCHOLAR_SECRET_KEY=你的密钥' >> .env
-.venv/bin/python -m litradar.cli enrich --limit 0   # 只补期刊等级,不动条目
-```
-
-卡片上是压缩过的短标签,**规则在 `config.yaml` 的 `journal_rank` 下**:
-
-```yaml
-journal_rank:
-  fields: [sciwarn, sci, sciUp, sciif, pku, cssci]   # 只展示这些
-  map:
-    北大中文核心: 北核        # 字段名 → 标签名;留空 = 只显示值
-    SCI: ""
-    "/化学(\\d+)区/": "化$1"   # /正则/ 作用于值,把"化学1区"压成"化1"
-  aliases:                   # 来源给的短名/罗马字名 → easyScholar 认的全名
-    "Youji huaxue": "Chinese Journal of Organic Chemistry"
-```
-
-三类规则各管各的,不会互相打架:
-
-| 写法 | 作用对象 | 例子 |
-|---|---|---|
-| `字段显示名: 短标签` | 标签名 | `北大中文核心` → `北核` |
-| `字段显示名: ""` | 去掉标签名,**只留值** | `SCI: ""` 把 `SCI Q1` 变成 `Q1` |
-| `"/正则/": "替换"` | **值**,`$1` 是捕获组 | `化学1区` → `化1` |
-
-> ⚠️ 空标签**不等于**隐藏字段 —— 把字段整个去掉要从 `fields` 里删。
-> 否则用户列出的 6 个字段里有一半在 map 里是空的,一"隐藏"就全没了。
-
-刊名在入库时统一清洗(`&amp;` → `&`、换行 → 空格)。这不只是显示问题:
-统计页按刊名分组时,带换行的 JACS 会裂成两行,按刊名查等级也直接查不到。
-
----
-
-## 检索词与偏好
-
-`interests.yaml`,网页 `/interests` 也能直接编辑(保存前校验 YAML)。
-**这不是账号,就是个配置文件** —— 单用户,只有一份。
-
-关键字段:
-
-| 字段 | 作用 |
+| 文件 | 用途 |
 |---|---|
-| `search_queries` | **检索关键词列表,必须英文**。多条查询取并集 |
-| `exclude_title_prefixes` | 按标题前缀过滤非论文记录(同行评审、更正声明) |
-| `keywords.core` / `bonus` | 规则打分 |
-| `keywords.current_challenges` | 你当前的实验卡点 —— 能对症的论文会被 LLM 显著加权 |
-| `keywords.boost_topics` | 希望优先命中的主题 |
-| `negative` | 排除词,命中直接丢弃 |
-| `journals.core` / `ok` + `issn` | 期刊白名单(ISSN 已通过 Crossref 逐本核验) |
-| `authors_watch` | 重点关注作者 |
+| `.env` | 密钥：DeepSeek / Semantic Scholar / easyScholar / IMAP / 接口口令 |
+| `config.yaml` | 运行参数：端口、时间窗、数据源开关、排序权重、期刊等级展示规则 |
+| `interests.yaml` | 研究画像：检索式、关键词、期刊白名单、关注作者、滚雪球种子 |
 
-### 为什么要用「多条查询取并集」
+各字段在示例文件中均有详细注释，以下仅列关键约定：
 
-实测(45 天窗口、按 DOI 去重):
+- **时间窗只有一个来源**：`app.pipeline_window_days`（默认 200 天），命令行、定时任务与
+  Web 界面按钮共用。它必须 ≥ 抓取窗口 `sources.s2_search_lookback_days`，否则新抓取的
+  文献会落在排序窗口之外，始终处于"未评分"状态
+- **两套检索词分开配置**：Crossref 使用自然语言（`search_queries`），Semantic Scholar
+  必须使用其查询语法（`s2_queries`：`+` 与、`|` 或、双引号短语、`-` 排除）。裸词会被
+  当作整句短语匹配，可能静默返回 0 条结果，因此两者不能共用
+- **多条查询取并集**：扩大召回优先增加查询条数而非放宽单条精度，精确率交给 LLM 精排兜底
+- 检索词与偏好可在 Web 界面 `/interests` 直接编辑，保存前做 YAML 结构校验并自动备份原文件
 
-```
-单条宽查询        → 100 篇
-4 条查询并集      → 186 篇   (+86%)
-```
+## 邮件接入
 
-收益在**召回**,不在精确率 —— 拆开后单条的精确率反而略降。所以策略是
-**宁可多拉,精确交给 LLM 精排**。
+X-MOL 的「私人定制」订阅由其网站开通，本项目只解析投递到你邮箱的订阅邮件。
+支持三种模式（`mail.mode`）：
 
-顺带实测的另一个结论:换检索字段没用,反而更差。
+- **`folder`（默认）**：将邮件导出为 `.eml` 放入 `data/inbox/`，处理后自动移至 `data/inbox/processed/`
+- **`maildir`**：读取标准 Maildir 目录
+- **`imap`**：直连收件箱，仅读取匹配 `imap_search` 的邮件
 
-```
-query.bibliographic 宽查询   标题含 ≥2 个核心概念: 21/60   ← 现用
-query.title         宽查询   标题含 ≥2 个核心概念: 15/60   ← 更差
-query.title         精确短句 标题含 ≥2 个核心概念: 4–18/60
-```
+注意事项：
 
-所以继续用 `query.bibliographic`,通过**增加查询条数**而不是改动单条精度来扩召回。
+- Outlook 个人账号已禁用 IMAP 密码登录（能力声明含 `LOGINDISABLED`，仅支持 OAuth2）。
+  推荐在 Outlook 中设置转发规则，把发件人含 `newsletter.x-mol.com` 的邮件转发至支持
+  授权码登录的邮箱（QQ / 163 / 126 / 飞书 / 腾讯企业邮箱均实测可用），再以该邮箱接入
+- 配置完成后用 `litradar mail-test` 做只读连通性测试：报告匹配邮件数并实际解析一封
+  展示提取结果，不标记已读、不改动任何邮件
 
----
-
-## 部署(systemd)
-
-三个单元都是**模板单元**,`%i` 是运行用户,所以仓库里不出现任何用户名。
+## 命令行
 
 ```bash
-cd /srv/Work/LitRadar
+litradar init-db        # 初始化数据库
+litradar ingest all     # 采集：邮件 + 检索 + 滚雪球
+litradar enrich         # 富化：补摘要、引用数、期刊等级
+litradar rank           # 三阶段排序
+litradar summarize      # 生成中文摘要（--force 全量重做，默认只补缺失）
+litradar run            # 完整流水线（以上全部）
+litradar stats          # 数据统计
+litradar mail-test      # IMAP 连通性测试（只读）
+litradar check          # 体检:配置 / 密钥 / 数据库 / 网络 / LLM 连通性
+litradar parse          # 仅解析邮件（调试解析器用）
 
-# ⚠️ 三个单元都必须是模板名(带 @),少一个 @ 就会让 %i 为空而启动失败
-sudo cp deploy/litradar-web.service        /etc/systemd/system/litradar@.service
-sudo cp deploy/litradar-daily@.service     /etc/systemd/system/
-sudo cp deploy/litradar-daily@.timer       /etc/systemd/system/
+python -m pytest tests/ -q   # 运行测试
+```
 
+Web 界面的「统计」页也可手动触发各阶段。
+
+## 设计要点
+
+**排序：LLM 主导的三阶段漏斗。** 最终分 = 0.85 × LLM + 0.10 × BM25 + 0.05 × 规则。
+规则层负责硬性过滤（排除词）与加分（核心词 / 期刊白名单 / 关注作者）；BM25 粗排仅
+提供送入 LLM 的批次顺序，默认不截断候选（`llm.rerank_top_k: 0`），避免弱信号对强信号
+行使否决权；DeepSeek 分批 listwise 打分，各批共用同一评分标准。期刊匹配做了缩写归一
+（`Org. Lett.` ↔ `Organic Letters` 等，有测试覆盖）。
+
+**引用滚雪球：增量累积 + 共被引标注。** 以 `interests.yaml` 中 `seed_dois` 为种子，
+沿"引用了种子的论文"方向发现换了说法、关键词覆盖不到的新工作。每轮只刷新最久未查的
+少量种子以规避限流，引用关系持久化于 `seed_cite` 表，共被引数跨全部种子与历史轮次累积；
+共被引作为质量标注展示（`滚雪球 ×2`），默认不作为准入门槛。种子宜选被引仍活跃的文献，
+过新的论文被引数不足，滚不出结果。
+
+**摘要防幻觉。** 摘要中 `key_results` 出现的每个数字与英文原文逐字比对，未命中者标注
+⚠️ 提示核对；允许模型合理推断（如原文未明说的研究动机），但推断内容显式标注"（推断）"，
+与原文事实区分。
+
+**反馈三态分流。** 收藏免疫后续规则过滤——之后收紧检索词也不会移除明确的手动决定；
+不感兴趣移入独立页签、可逐条恢复；被规则否决的条目以"已否决"状态可见而非静默消失。
+任何条目都能追溯"为什么在 / 不在这个列表里"。
+
+**期刊等级本地缓存。** easyScholar 按刊名查询且按次计额，结果缓存于 `journal_rank` 表，
+全库期刊查询一遍后不再消耗额度。展示字段与标签压缩规则（`化学1区` → `化1`）在
+`config.yaml` 的 `journal_rank` 段配置；刊名在入库时统一清洗（HTML 实体、换行符）。
+
+完整设计记录与实测数据见 [docs/litradar-design.md](docs/litradar-design.md)。
+
+## 部署（systemd + nginx）
+
+`deploy/` 提供 systemd 模板单元（`%i` 为运行用户，单元文件不含具体用户名）与 nginx
+反代示例：
+
+```bash
+sudo cp deploy/litradar-web.service    /etc/systemd/system/litradar@.service
+sudo cp deploy/litradar-daily@.service /etc/systemd/system/
+sudo cp deploy/litradar-daily@.timer   /etc/systemd/system/
 sudo systemctl daemon-reload
 
-# 把 <你的用户名> 换成 whoami 的结果
-sudo systemctl enable --now litradar@<你的用户名>.service
-sudo systemctl enable --now litradar-daily@<你的用户名>.timer
+sudo systemctl enable --now litradar@$(whoami).service      # Web 服务
+sudo systemctl enable --now litradar-daily@$(whoami).timer  # 每日流水线
 
-# 查看
-systemctl status litradar@<你的用户名>.service
 systemctl list-timers 'litradar*'
-journalctl -u litradar@<你的用户名>.service -f
+journalctl -u litradar@$(whoami).service -f
 ```
 
-> ⚠️ `litradar-daily@.service` 用了 `User=%i`,**必须**以模板实例名安装。
-> 直接拷成 `litradar-daily.service` 会让 `%i` 为空,systemd 拒绝启动。
+> 三个单元必须以模板名（带 `@`）安装。`litradar-daily@.service` 使用 `User=%i`，
+> 以非模板名安装会使 `%i` 为空，systemd 拒绝启动。
 
-对外访问由 nginx 反代,见 `deploy/litradar-nginx.conf`(应用只绑 `127.0.0.1:8090`)。
+应用默认仅绑定 `127.0.0.1:8090`；局域网访问建议经 nginx 反向代理
+（见 `deploy/litradar-nginx.conf`）。
 
----
+## 安全与合规
 
-## 合规与安全
-
-- **不要做公网端口转发。** 只绑局域网。X-MOL 邮件内容属于你自己,但公网暴露会
-  把它变成对非授权用户的再分发。
-- **没有账号体系。** 默认只绑 `127.0.0.1`。要绑 `0.0.0.0` 就给接口加个口令:
-  在 `.env` 设 `LITRADAR_TOKEN=xxx`,访问时带 `?k=xxx`。
-  不设的话同网段任何人都能调 `/admin/run/*` **花掉你的 DeepSeek 额度**。
-- 本工具**不抓取 X-MOL 网站**,只解析你自己邮箱里的订阅邮件。
-- `.env` 权限设为 `600`,已在 `.gitignore` 中排除。
-
----
+- 本项目**不抓取 X-MOL 网站**（其 `robots.txt` 禁止爬取检索页），仅解析用户自己
+  收到的订阅邮件；X-MOL 站内订阅照常使用
+- 定位为单用户自托管，无账号体系，默认仅绑定回环地址。如需绑定非回环地址，
+  应设置 `LITRADAR_TOKEN` 接口口令（访问时带 `?k=<token>`），否则同网段任何人
+  都能触发 `/admin/run/*` 消耗你的 LLM 额度
+- 不建议将服务暴露于公网：订阅邮件内容面向订阅者本人，公网暴露构成对非授权用户的再分发
+- 密钥仅通过环境变量传入（`.env`，建议权限 600），不写入配置文件；
+  `.env`、`config.yaml`、`interests.yaml`、`data/` 均已被 `.gitignore` 排除
 
 ## 已知限制
 
 | 限制 | 说明 |
 |---|---|
-| X-MOL 邮件只有 2 条 | 它是 teaser,"还有更多…请移步 x-mol.com"。全量靠 Crossref 补 |
-| Semantic Scholar 限流 | 无 API Key 时约 1 req/s 且可能 429。免费申请 key 可显著提高额度 |
-| Crossref 摘要不全 | ACS 系期刊常缺摘要 —— 这正是引入 S2 的原因 |
-| 专利 | **不做**。所有数据源都不含专利,见上文 |
-| 阿拉伯数字核验 | 摘要里 `key_results` 的数字会在原文中比对,对不上会标 ⚠️,但不保证覆盖全部幻觉 |
-
----
+| X-MOL 邮件仅含少量精选 | 订阅邮件为 teaser（通常每封 2 条），全量召回依赖检索与滚雪球 |
+| Semantic Scholar 限流 | 约 1 req/s 且偶发 429；免费申请 API Key 可获独立配额（申请材料见 `docs/`） |
+| Crossref 摘要覆盖不全 | ACS 系期刊常缺摘要，故以 Semantic Scholar 为摘要主力 |
+| 数字核验非完备 | 可标记多数数字不一致，但不保证捕获全部幻觉 |
+| 不含专利与预印本 | 现有数据源均不提供；数据模型已预留 `item.kind` 维度供将来扩展 |
 
 ## 目录结构
 
 ```
 litradar/
 ├── litradar/
-│   ├── config.py         配置加载(密钥只走环境变量)
-│   ├── db.py             SQLite schema 与读写
-│   ├── normalize.py      DOI/标题/日期/作者归一化
-│   ├── http.py           统一 UA、限流、重试
+│   ├── cli.py                  命令行入口
+│   ├── config.py               配置加载（密钥仅走环境变量）
+│   ├── db.py                   SQLite schema 与读写
+│   ├── http.py                 统一 UA、限流、重试
+│   ├── lock.py                 流水线互斥锁
+│   ├── normalize.py            DOI / 标题 / 日期 / 作者归一化
 │   ├── sources/
-│   │   ├── xmol_email.py       ★ X-MOL 邮件解析(有回归测试)
-│   │   ├── mail.py             邮件接入:folder / maildir / imap
-│   │   ├── crossref_search.py  关键词检索主力
-│   │   ├── semanticscholar.py  摘要主力
-│   │   └── openalex_search.py  可选(需 key)
-│   ├── enrich.py         富化编排
-│   ├── rank.py           三阶段排序
-│   ├── summarize.py      结构化中文摘要 + 数字核验
-│   ├── llm.py            DeepSeek 客户端
-│   ├── pipeline.py       流水线编排
-│   ├── cli.py            命令行
-│   └── web/              FastAPI + Jinja2(零前端构建)
-├── interests.yaml        检索词与偏好(唯一配置文件)
-├── fixtures/             解析器回归基准(真实 .eml)
-├── tests/                36 个测试
-├── deploy/               systemd units
-└── docs/litradar-design.md   完整技术方案文档
+│   │   ├── xmol_email.py       X-MOL 邮件解析（含回归测试）
+│   │   ├── mail.py             邮件接入：folder / maildir / imap
+│   │   ├── crossref_search.py  Crossref 检索与富化
+│   │   ├── semanticscholar.py  S2 检索 / 摘要 / 滚雪球
+│   │   ├── easyscholar.py      easyScholar 期刊等级客户端
+│   │   └── openalex_search.py  OpenAlex 检索（可选）
+│   ├── enrich.py               富化编排
+│   ├── journal_rank.py         期刊等级缓存与标签压缩
+│   ├── rank.py                 三阶段排序
+│   ├── summarize.py            结构化中文摘要与数字核验
+│   ├── llm.py                  DeepSeek 客户端
+│   ├── pipeline.py             流水线编排
+│   └── web/                    FastAPI + Jinja2（无前端构建）
+├── config.example.yaml         运行配置示例
+├── interests.example.yaml      研究画像示例
+├── deploy/                     systemd 单元与 nginx 配置
+├── docs/                       设计文档与 API Key 申请材料
+├── fixtures/                   邮件解析回归样本（真实 .eml）
+└── tests/                      单元测试（pytest，80 个）
 ```
 
----
+## 致谢
 
-## 反馈闭环
-
-雷达页每条都有 `⭐收藏` / `✅已读` / `✕不感兴趣`,全部落 `feedback` 表。
-
-三个动作的去向是**分开**的,不是笼统地"隐藏":
-
-| 动作 | 去哪 | 说明 |
-|---|---|---|
-| 已读 | 未读 → 已读 | "已读"里只留你还没否决的 |
-| 收藏 | 收藏页签 | **免疫规则过滤** —— 之后收紧检索词也不会把它吃掉 |
-| 不感兴趣 | 不感兴趣页签 | 从 未读 / 已读 / 全部 三个视图同时消失,可在页签里逐条恢复 |
-
-被否决的条目标着红色 `已否决`,卡片整体压暗;详情页再补一段说明
-"它为什么不在正常列表里"。这样任何时候都不会出现"东西怎么不见了"。
-
-**这是整个系统里唯一会随时间变好的部分。** 攒够几十条后,可以把"已收藏"的
-条目作为精排 prompt 的 few-shot 示例,或者用它们调 `negative` 词表。
-建议早用早攒。
+- [Crossref](https://www.crossref.org/)、[Semantic Scholar](https://www.semanticscholar.org/)、[OpenAlex](https://openalex.org/) 提供开放学术元数据
+- [easyScholar](https://www.easyscholar.cc/) 提供期刊等级数据
+- 排序与摘要由 [DeepSeek](https://www.deepseek.com/) 模型驱动
