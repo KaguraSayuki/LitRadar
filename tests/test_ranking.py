@@ -307,3 +307,82 @@ def test_精排拿到反馈样本(tmp_path, monkeypatch):
     # 统计页据此判断闭环有没有在工作
     assert stat["feedback_liked"] == 1
     assert stat["feedback_disliked"] == 1
+
+
+# ------------------------------------------------------- LLM 部分失败的兜底
+class _FakeLLM:
+    available = True
+
+    def __init__(self, *a, **kw):
+        pass
+
+
+def _rank_cfg(tmp_path):
+    from litradar.config import Config
+
+    cfg = Config()
+    cfg.app.db_path = str(tmp_path / "t.db")
+    cfg.interests_data = {"direction": "optical sensor",
+                          "keywords": {"core": ["optical sensor"]}}
+    return cfg
+
+
+def test_精排部分失败的条目不反超(tmp_path, monkeypatch):
+    """回归:某个精排批次失败时,该批条目的 final 被 /0.15 归一化回满量程,
+    一个只有粗排分的条目能冲到 100 反超真被 LLM 评过的 —— 而界面上看不出
+    它压根没被评过。LLM 跑过的那轮里,缺分的条目必须封顶在 w_coarse+w_rule。"""
+    from litradar import rank
+
+    cfg = _rank_cfg(tmp_path)
+    conn = db.Database(cfg.db_file).connect()
+    # 让**没拿到 LLM 分**的那条恰好是粗排第一(coarse=100):归一化的老写法
+    # 会把它抬到 80 分以上,反超真被 LLM 评过的条目。
+    failed_id = _seed(conn, "Optical sensor chemistry optical sensor insertion")
+    ok_id = _seed(conn, "Optical sensor overview")
+    for filler in ("Polymer coating survey", "Total synthesis of a terpene",
+                   "Surface analysis of thin films"):
+        _seed(conn, filler)
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(rank, "DeepSeek", _FakeLLM)
+    monkeypatch.setattr(rank, "llm_rerank",
+                        lambda *a, **kw: {ok_id: (60.0, "相关")})
+
+    rank.run(cfg, days=30, verbose=False)
+
+    conn = db.Database(cfg.db_file).connect()
+    got = {r["item_id"]: r for r in conn.execute(
+        "SELECT item_id, coarse_score, final_score FROM score")}
+    assert got[failed_id]["coarse_score"] == 100.0, "前提:它粗排第一"
+    cap = (cfg.ranking.w_coarse + cfg.ranking.w_rule) * 100
+    assert got[failed_id]["final_score"] <= cap, "缺 LLM 分的条目不该被归一化放大"
+    assert got[failed_id]["final_score"] < got[ok_id]["final_score"], \
+        "它绝不能反超真被 LLM 评过的条目"
+    conn.close()
+
+
+def test_完全没有LLM分时仍然归一化(tmp_path, monkeypatch):
+    """纯 BM25+规则模式(没配 key)下谁也不会反超谁,分数要铺满 0-100,
+    否则界面按分数阈值筛选就没有意义了。"""
+    from litradar import rank
+
+    cfg = _rank_cfg(tmp_path)
+    conn = db.Database(cfg.db_file).connect()
+    _seed(conn, "Optical sensor Sample detection study")
+    for filler in ("Polymer coating survey", "Total synthesis of a terpene",
+                   "Surface analysis of thin films"):
+        _seed(conn, filler)
+    conn.commit()
+    conn.close()
+
+    class _NoLLM(_FakeLLM):
+        available = False
+
+    monkeypatch.setattr(rank, "DeepSeek", _NoLLM)
+    rank.run(cfg, days=30, verbose=False)
+
+    conn = db.Database(cfg.db_file).connect()
+    top = conn.execute("SELECT MAX(final_score) FROM score").fetchone()[0]
+    assert top > (cfg.ranking.w_coarse + cfg.ranking.w_rule) * 100
+    conn.close()

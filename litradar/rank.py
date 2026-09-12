@@ -478,6 +478,14 @@ def run(cfg: Config, *, days: int = 30, verbose: bool = True) -> dict:
             stat["llm_skipped"] = "未配置 API key 或已禁用"
 
         w = cfg.ranking
+        # 没拿到 LLM 分的条目怎么合成 final,取决于这一轮 LLM 到底跑没跑:
+        #   * 跑了、只是个别批次失败(llm_scores 非空)—— **不归一化**,分数
+        #     封顶在 w_coarse+w_rule(=15)。以前这里除以 0.15 补回满量程,
+        #     一个只有粗排分的条目能冲到 100,反超真被 LLM 评过的,而界面上
+        #     根本看不出它没被评过。宁可让它明显偏低,也不要假装它很相关。
+        #   * 压根没跑(没配 key / 全部批次失败)—— 保持归一化。此时全场都没有
+        #     LLM 分,谁也不会反超谁;分数铺满 0-100,界面的阈值筛选才有意义。
+        normalize_missing = not llm_scores
         for row, rule, detail in kept:
             iid = int(row["id"])
             coarse = float(detail.get("coarse", 0.0))
@@ -488,9 +496,9 @@ def run(cfg: Config, *, days: int = 30, verbose: bool = True) -> dict:
                 final = (w.w_llm * ls + w.w_coarse * coarse_norm + w.w_rule * rule_norm)
             else:
                 ls, reason = None, None
+                base = w.w_coarse * coarse_norm + w.w_rule * rule_norm
                 total_w = w.w_coarse + w.w_rule
-                final = ((w.w_coarse * coarse_norm + w.w_rule * rule_norm) / total_w
-                         if total_w else 0.0)
+                final = (base / total_w if total_w else 0.0) if normalize_missing else base
             db.save_score(
                 conn, iid,
                 rule_score=round(rule, 2), coarse_score=round(coarse, 2),
