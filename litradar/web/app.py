@@ -209,12 +209,18 @@ def _conn():
 
 
 # --------------------------------------------------------------- 期刊等级标签
-_renderer_cache: dict[int, Any] = {}
+_renderer_cache: dict[tuple, Any] = {}
 
 
 def _rank_renderer(cfg: Config):
-    """按 config 缓存渲染器。规则解析有点开销,而每个请求都要用。"""
-    key = id(cfg)
+    """按配置**内容**缓存渲染器。规则解析有点开销,而每个请求都要用。
+
+    键不能用 id(cfg):_cfg_cache.clear() 之后旧 cfg 被回收,新 cfg 很可能
+    分到同一个地址,于是命中的是过期的渲染规则。
+    """
+    jr = cfg.journal_rank
+    key = (tuple(jr.fields or ()),
+           tuple(sorted((str(k), str(v)) for k, v in (jr.map or {}).items())))
     r = _renderer_cache.get(key)
     if r is None:
         r = journal_rank.Renderer(cfg.journal_rank.fields, cfg.journal_rank.map)
