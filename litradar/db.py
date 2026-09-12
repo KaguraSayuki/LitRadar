@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS raw_email (
     items_found   INTEGER DEFAULT 0
 );
 
--- 条目池:文献与专利共表
+-- 条目池。kind 目前只有 'paper' 一种取值 —— 专利源没有接,
+-- 留着这个维度是为了将来真要接时不用改表结构。
 CREATE TABLE IF NOT EXISTS item (
     id               INTEGER PRIMARY KEY,
     kind             TEXT NOT NULL DEFAULT 'paper' CHECK (kind IN ('paper','patent')),

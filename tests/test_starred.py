@@ -91,7 +91,10 @@ def test_starred_ids_only_covers_starred(conn):
 
 
 def test_starred_count_respects_kind(conn):
-    """收藏夹按 kind 分开数 —— 专利页和文献页各有各的收藏。"""
+    """收藏夹按 kind 分开数。
+
+    专利页已经砍了,但 item.kind 这个维度还在(count_items / get_items 都收它),
+    所以这条测试验的是参数作用域本身,不是那个已删的页面。"""
     p = _add(conn, "p", kind="paper")
     q = _add(conn, "q", kind="patent")
     db.set_action(conn, p, "star")

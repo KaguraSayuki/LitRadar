@@ -20,7 +20,7 @@
 | 5 | 固定检索式(saved search) | 用户要**关键词查询** | 画像新增 `search_query` 字段,直接驱动 Crossref 检索 |
 | 6 | 推送邮件周报 | 用户要局域网网页 | 全部改为 Web 界面,无邮件推送 |
 | 7 | HTMX | 为减少依赖 | 改为**原生 fetch**,零前端依赖 |
-| 8 | 专利监控(SciFinder) | SciFinder 移除后无专利源 | **暂缺**。需另接 EPO OPS / PatentsView |
+| 8 | 专利监控(SciFinder) | SciFinder 移除后无专利源 | **已砍掉**。所有现有数据源都不含专利,`/patents` 页面与导航已移除;要接需先解决专利族去重与 18 个月公开延迟 |
 
 保留不变的核心设计:三阶段排序漏斗(规则 → BM25 → LLM)、SQLite 数据模型、
 期刊缩写归一匹配、数字核验防幻觉、systemd 调度、单用户 LAN 部署。
