@@ -89,8 +89,15 @@ def _sql_value(key: str, value):
     return value
 
 
+# 缺摘要的条目最多重试几轮。取舍:S2 共享池不稳定,批量偶尔整体失败
+# (返回空),要给足重试机会;但 Crossref 和 S2 都真没有摘要的条目(不少 ACS
+# 论文、会议摘要)以前会每轮都陪跑批量请求,永远烧配额。5 轮 = 日报场景下
+# 差不多一周,足够熬过一次限流风波。
+MAX_ABSTRACT_ATTEMPTS = 5
+
+
 def _pending(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
-    """需要富化的条目:从未富化的 + 已富化但缺摘要的。"""
+    """需要富化的条目:从未富化的 + 已富化但缺摘要(且还没试够次数)的。"""
     rows = conn.execute(
         """SELECT i.id, i.doi FROM item i
            LEFT JOIN item_enrichment e ON e.item_id = i.id
@@ -103,8 +110,9 @@ def _pending(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
            JOIN item_enrichment e ON e.item_id = i.id
            WHERE (i.abstract IS NULL OR i.abstract = '')
              AND i.doi IS NOT NULL AND i.doi <> ''
+             AND e.abstract_attempts < ?
            ORDER BY i.published_at DESC LIMIT ?""",
-        (limit,),
+        (MAX_ABSTRACT_ATTEMPTS, limit),
     ).fetchall()
     seen: set[int] = set()
     out = []
@@ -231,11 +239,20 @@ def run(cfg: Config, *, limit: int = 300, verbose: bool = True) -> dict:
             stat["enriched"] += 1
             if res["patch"].get("abstract"):
                 stat["with_abstract"] += 1
+            # 这一轮过后仍然没有摘要:记一次。攒到 MAX_ABSTRACT_ATTEMPTS 就
+            # 退出 _pending 的重试队列;一旦拿到摘要,条目自然不再缺摘要,计数作废。
+            conn.execute(
+                """UPDATE item_enrichment SET abstract_attempts = abstract_attempts + 1
+                   WHERE item_id = ? AND EXISTS (
+                       SELECT 1 FROM item WHERE id = ?
+                         AND (abstract IS NULL OR abstract = ''))""",
+                (iid, iid))
         conn.commit()
 
         # 跑完再统计一次:还有多少条目缺摘要。
         # S2 共享池不稳定,批量可能整体失败 —— 这些条目会被"缺摘要"路径
-        # 在下次 enrich 时自动重试,但必须让用户看见这个数字。
+        # 在下次 enrich 时自动重试(最多 MAX_ABSTRACT_ATTEMPTS 轮),
+        # 但必须让用户看见这个数字。
         stat["pending_abstract"] = conn.execute(
             """SELECT COUNT(*) FROM item
                WHERE kind='paper' AND (abstract IS NULL OR abstract='')"""

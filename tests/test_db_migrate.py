@@ -17,8 +17,8 @@ from litradar import db  # noqa: E402
 
 
 def _old_db(path: Path) -> None:
-    """造一个版本化之前的老库:user_version=0,缺 excluded / title_zh 列,
-    score 还带 profile 列,刊名里留着 HTML 实体。"""
+    """造一个版本化之前的老库:user_version=0,缺 excluded / title_zh /
+    abstract_attempts 列,score 还带 profile 列,刊名里留着 HTML 实体。"""
     conn = sqlite3.connect(path)
     conn.executescript(db.SCHEMA)          # item 等表结构没变过,直接借用
     conn.executescript(db.FTS_TRIGGERS)    # 老库也有 FTS 触发器,少了它 UPDATE item 会炸
@@ -36,6 +36,12 @@ def _old_db(path: Path) -> None:
             item_id INTEGER PRIMARY KEY REFERENCES item(id) ON DELETE CASCADE,
             one_liner TEXT, problem TEXT, method TEXT, key_results TEXT,
             limitation TEXT, relevance TEXT, depth TEXT, model TEXT, created_at TEXT
+        );
+        DROP TABLE item_enrichment;
+        CREATE TABLE item_enrichment (
+            item_id INTEGER PRIMARY KEY REFERENCES item(id) ON DELETE CASCADE,
+            cited_by_count INTEGER, is_oa INTEGER, oa_url TEXT, openalex_id TEXT,
+            openalex_json TEXT, crossref_json TEXT, enriched_at TEXT
         );
         DROP TABLE score;
         CREATE TABLE score (
@@ -72,6 +78,7 @@ def test_老库升级到最新版(tmp_path):
     assert "excluded" in _cols(conn, "item_state")
     assert "title_zh" in _cols(conn, "summary")
     assert "profile" not in _cols(conn, "score")
+    assert "abstract_attempts" in _cols(conn, "item_enrichment")
     assert conn.execute("SELECT final_score FROM score WHERE item_id=1").fetchone()[0] == 77.5
     assert conn.execute("SELECT journal FROM item").fetchone()[0] == \
         "Organic & Biomolecular Chemistry"
