@@ -44,6 +44,37 @@ def _clean_url(url: Any) -> str | None:
     return None
 
 
+WOS_TABLES = (
+    """CREATE TABLE IF NOT EXISTS wos_alert (
+        alert_id TEXT PRIMARY KEY,
+        url TEXT NOT NULL,
+        query TEXT NOT NULL DEFAULT '',
+        expected_count INTEGER NOT NULL CHECK(expected_count >= 0),
+        status TEXT NOT NULL DEFAULT 'pending'
+            CHECK(status IN ('pending','retry','needs_login','complete')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        records_imported INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at TEXT,
+        last_error TEXT,
+        ris BLOB,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS wos_alert_email (
+        message_id TEXT PRIMARY KEY REFERENCES raw_email(message_id) ON DELETE CASCADE,
+        alert_id TEXT NOT NULL REFERENCES wos_alert(alert_id) ON DELETE CASCADE
+    )""",
+    """CREATE TABLE IF NOT EXISTS wos_alert_item (
+        alert_id TEXT NOT NULL REFERENCES wos_alert(alert_id) ON DELETE CASCADE,
+        wos_id TEXT NOT NULL,
+        item_id INTEGER NOT NULL REFERENCES item(id) ON DELETE CASCADE,
+        PRIMARY KEY(alert_id, wos_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_wos_alert_status ON wos_alert(status, next_attempt_at)",
+    "CREATE INDEX IF NOT EXISTS idx_wos_alert_email ON wos_alert_email(alert_id)",
+)
+
+
 SCHEMA = """
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -195,7 +226,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS item_fts USING fts5(
     title, abstract, journal, authors,
     content='item', content_rowid='id', tokenize='unicode61'
 );
-"""
+""" + ";\n".join(WOS_TABLES) + ";\n"
 
 FTS_TRIGGERS = """
 CREATE TRIGGER IF NOT EXISTS item_ai AFTER INSERT ON item BEGIN
@@ -538,10 +569,16 @@ def _migrate_v4(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM journal_rank WHERE hit=0")
 
 
+def _migrate_v5(conn: sqlite3.Connection) -> None:
+    """WoS 提醒队列、原始邮件关联和完整结果成员关系。"""
+    for statement in WOS_TABLES:
+        conn.execute(statement)
+
+
 # 迁移步骤按版本排列:下标 + 1 = 跑完这步之后的 user_version。
 # 加新迁移就在末尾追加一个函数,**同时把 SCHEMA 改成最新结构** ——
 # 新库只建 SCHEMA、不走这里。
-_MIGRATIONS = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4]
+_MIGRATIONS = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5]
 SCHEMA_VERSION = len(_MIGRATIONS)
 
 # 已经跑过建表 + 迁移的库路径(进程级)。见 connect()
@@ -1141,4 +1178,10 @@ def stats(conn: sqlite3.Connection) -> dict[str, Any]:
         "last_runs": [dict(r) for r in conn.execute(
             """SELECT stage, status, finished_at, stats FROM run_log
                ORDER BY id DESC LIMIT 8""")],
+        "wos_counts": {r["status"]: r["n"] for r in conn.execute(
+            "SELECT status, COUNT(*) n FROM wos_alert GROUP BY status")},
+        "wos_alerts": [dict(r) for r in conn.execute(
+            """SELECT query, expected_count, records_imported, status, attempts,
+                      next_attempt_at, last_error, updated_at FROM wos_alert
+               ORDER BY status='complete', updated_at DESC LIMIT 20""")],
     }

@@ -8,7 +8,7 @@
 
 ## 功能特性
 
-- **多源采集**：X-MOL 订阅邮件解析、Semantic Scholar 布尔检索、引用滚雪球、Crossref 检索（可选），所有来源按 DOI 去重合并
+- **多源采集**：X-MOL 订阅邮件解析、Web of Science 提醒自动获取完整题录、Semantic Scholar 布尔检索、引用滚雪球、Crossref 检索（可选），所有来源按 DOI 去重合并
 - **元数据富化**：Crossref 权威元数据、Semantic Scholar 摘要与引用数、easyScholar 期刊等级（影响因子 / 中科院分区 / 北核等）
 - **三阶段排序**：规则过滤 → BM25 粗排 → DeepSeek listwise 精排，每篇输出分数与"为什么推荐"的中文理由
 - **中文结构化摘要**：问题 / 方法 / 关键结果 / 局限 / 对研究的用处；关键数字与英文原文逐字核验，推断内容显式标注
@@ -19,6 +19,7 @@
 
 ```
 X-MOL 订阅邮件 (.eml / IMAP) ─┐
+WoS 提醒邮件 → 完整题录导出 ──┤
 Semantic Scholar 布尔检索 ────┤                ┌─ 富化：摘要 / 引用数 / 期刊等级
 引用滚雪球（种子文献被引）────┼→ DOI 去重入库 ─┤
 Crossref 关键词检索（可选）───┘    (SQLite)    └─ 排序：规则 → BM25 → LLM 精排
@@ -31,6 +32,7 @@ Crossref 关键词检索（可选）───┘    (SQLite)    └─ 排序：
 | 环节 | 数据源 | 说明 | 成本 |
 |---|---|---|---|
 | 精选 | X-MOL 订阅邮件 | 仅解析用户自己收到的订阅邮件，不抓取网站 | 免费 |
+| 检索 | Web of Science 搜索提醒 | 收信后自动打开提醒结果页，分批导出完整题录 | 需可用的 WoS 访问权限 |
 | 检索 | Semantic Scholar `/paper/search/bulk` | 精确布尔查询，召回主力 | 免费（建议申请 Key） |
 | 检索 | 引用滚雪球 `/paper/{id}/citations` | 沿种子文献的被引关系，发现关键词覆盖不到的工作 | 免费 |
 | 检索 | Crossref 关键词检索 | 模糊匹配，召回高、噪声大，默认关闭 | 免费 |
@@ -56,7 +58,7 @@ python3 -m venv .venv
 cp config.example.yaml   config.yaml
 cp interests.example.yaml interests.yaml
 cp .env.example          .env && chmod 600 .env
-#    编辑 .env：至少填写 DEEPSEEK_API_KEY；邮件接入需 IMAP_PASSWORD
+#    编辑 .env：至少填写 DEEPSEEK_API_KEY；邮件按下方密码或 OAuth2 方式配置
 
 # 3. 初始化数据库
 .venv/bin/litradar init-db
@@ -96,6 +98,7 @@ cp .env.example          .env && chmod 600 .env
 ## 邮件接入
 
 X-MOL 的「私人定制」订阅由其网站开通，本项目只解析投递到你邮箱的订阅邮件。
+Web of Science 搜索提醒会自动触发完整结果获取，邮件中的前 5 条预览不会被当成全部结果。
 支持三种模式（`mail.mode`）：
 
 - **`folder`（默认）**：将邮件导出为 `.eml` 放入 `data/inbox/`，处理后自动移至 `data/inbox/processed/`
@@ -104,14 +107,92 @@ X-MOL 的「私人定制」订阅由其网站开通，本项目只解析投递�
 
 注意事项：
 
-- Outlook 个人账号已禁用 IMAP 密码登录（能力声明含 `LOGINDISABLED`，仅支持 OAuth2）。
-  推荐在 Outlook 中设置转发规则，把发件人含 `newsletter.x-mol.com` 的邮件转发至支持
-  授权码登录的邮箱（QQ / 163 / 126 / 飞书 / 腾讯企业邮箱均实测可用），再以该邮箱接入
+- Outlook 个人账号使用下方 OAuth2 配置直接收信；QQ / 163 等邮箱继续使用应用专用密码。
+- 升级旧配置时，把 `mail.imap_search` 改为
+  `OR FROM "newsletter.x-mol.com" FROM "alerts-noreply@clarivate.com"`。
+  WoS 默认发件人为 `alerts-noreply@clarivate.com`；专用文件夹可只搜索该发件人。
+- 推荐 `imap_mark_seen: false`，已读提醒也会采集，避免用户先看邮件造成遗漏。
+  处理过的邮件靠 Message-ID 去重，同一 WoS 提醒的多次投递靠 alert ID 去重。
 - 配置完成后用 `litradar mail-test` 做只读连通性测试：报告匹配邮件数并实际解析一封
   展示提取结果，不标记已读、不改动任何邮件
-- 每封邮件的原文、条目和完成标记在同一事务中写入，全部成功后才确认邮件；入库失败会
-  回滚本封的写入，留待下次重试。升级后的首次邮件采集会从数据库原文重放旧版未标记
+- X-MOL 邮件的原文、条目和完成标记在同一事务中写入，全部成功后才确认邮件；入库失败会
+  回滚本封的写入，留待下次重试。WoS 使用下方持久队列。升级后的首次邮件采集会从数据库原文重放旧版未标记
   完成的邮件，即使邮件已移入 processed 或被 IMAP 标为已读，也能补齐遗漏条目
+
+### WoS 自动采集
+
+日常流程为：**定时收信 → 保存提醒任务 → 后台浏览器获取全部题录 → 数量校验 → 入库、补全与评分**。
+RIS 由后台自动下载和解析，无需用户导出或上传文件。
+
+安装可选运行依赖（在运行 LitRadar 的环境中）：
+
+```bash
+python -m pip install -e '.[wos,outlook]'
+python -m playwright install chromium
+# Linux 缺少浏览器系统库时，由管理员安装 Playwright 所需系统依赖：
+# python -m playwright install-deps chromium
+```
+
+`config.example.yaml` 的 `wos` 段已给出全部配置；不使用 WoS 时可设 `wos.enabled: false`。
+自动任务使用 `data/wos-browser/` 专用浏览器目录保存会话，需要机构访问时，在同一用户、
+同一配置的桌面环境运行一次 `litradar wos-login`，完成常规登录后回到终端确认。
+运行机器必须能通过机构网络或有效的机构会话访问 WoS；只有邮件订阅并不保证数据库访问权限。
+无桌面的服务器需要先具备机构网络访问，或在有显示环境时初始化专用会话。
+该命令不会关闭或接管用户日常浏览器，也不会自动解决验证码或跳过证书错误。
+
+Outlook 直连的一次性设置：
+
+1. 在 Microsoft Entra 注册自己的公共客户端应用。个人账号需支持个人 Microsoft 账户；
+   启用公共客户端流，并添加 Office 365 Exchange Online 的委托权限
+   `IMAP.AccessAsUser.All`。授权只用于收信，不需要 SMTP 或发信权限。
+2. 在 `.env` 填 `OUTLOOK_CLIENT_ID`（应用的 Application/client ID）。在 `config.yaml` 设置：
+
+   ```yaml
+   mail:
+     mode: imap
+     imap_host: outlook.office365.com
+     imap_port: 993
+     imap_user: "你的 Outlook 邮箱"
+     imap_auth: oauth2
+     oauth_tenant: consumers
+     oauth_client_id_env: OUTLOOK_CLIENT_ID
+     oauth_token_cache: ./data/outlook-token-cache.json
+     imap_folder: "Web of Science"   # 以实际 IMAP 文件夹名称为准
+     imap_search: 'FROM "alerts-noreply@clarivate.com"'
+     imap_mark_seen: false
+   ```
+
+3. 运行 `litradar mail-login`，按微软设备码提示完成一次授权，再运行 `litradar mail-test`
+   验证文件夹和订阅匹配。后续由 MSAL 自动刷新令牌；授权被撤销时明确报错，不阻塞后台等待。
+
+如果原先 X-MOL 在其他文件夹，可将两类订阅归入同一专用收信文件夹并使用上述 OR 搜索式。
+当前配置对应一个 IMAP 账号和文件夹；示例中的文件夹不会自动覆盖用户邮箱规则。
+OAuth 缓存文件权限为 `0600`，浏览器会话和下载缓存都属于私人运行数据，不要提交或共享。
+
+日常运行继续使用原有 `litradar run` 和 `deploy/litradar-daily@.timer`。邮件原文及 WoS 任务
+在同一事务持久化后才确认收信；只有该提醒的**全部题录**成功入库才标记处理完成。
+最多每批导出 1000 条；邮件总数、页面总数、下载记录数必须一致，少导或重复标识都会失败。
+原文、下载缓存和提醒成员关系保存在 SQLite 中；失败按退避时间重试，重启或邮件归档不丢任务。
+退避时间表示最早重试时间，实际重试随下一轮定时采集执行。
+
+```bash
+litradar ingest mail             # 收信并自动处理 WoS 完整结果
+litradar wos-status              # 查看数量、完成状态、重试时间及错误
+litradar wos-sync                # 只处理已入队的到期任务，邮箱离线也可执行
+litradar wos-sync --retry-now     # 访问恢复后立即重试
+```
+
+网页统计页也会显示采集进度和需要重新登录的任务。`max_alerts_per_run` 控制每轮补采量；
+超过 `max_records_per_alert` 的大提醒会明确报错，调大上限后可重试，绝不静默截断。
+目前支持已验证模板的 WoS **搜索提醒**，不把引用提醒、作者提醒或营销邮件混入此解析器。
+“新增检索记录”可能对应多年前发表的论文，排序始终使用题录发表日期，不能用收件日期替代。
+
+开发时对一次实际导出的 32 条记录做了只读验证：32 条均有 DOI，30 条有摘要。
+公开测试使用合成样本与浏览器替身；机构登录、网络条件及无人值守浏览器仍需在部署机器完成验证。
+
+接口依据：[WoS 搜索提醒](https://webofscience.zendesk.com/hc/en-us/articles/20016493256721-Saved-Searches-and-Alerts)、
+[微软 IMAP OAuth](https://learn.microsoft.com/zh-cn/exchange/client-developer/legacy-protocols/how-to-authenticate-an-imap-pop-smtp-application-by-using-oauth)、
+[Playwright 下载](https://playwright.dev/python/docs/downloads)。
 
 ## 命令行
 

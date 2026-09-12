@@ -60,13 +60,34 @@ class MailConfig:
     imap_port: int = 993
     imap_user: str = ""
     imap_password_env: str = "IMAP_PASSWORD"
+    imap_auth: str = "password"          # password | oauth2 (Outlook)
+    oauth_client_id_env: str = "OUTLOOK_CLIENT_ID"
+    oauth_tenant: str = "consumers"
+    oauth_token_cache: str = "./data/outlook-token-cache.json"
     imap_folder: str = "INBOX"
-    imap_search: str = 'FROM "newsletter.x-mol.com"'
-    imap_mark_seen: bool = True
+    imap_search: str = 'OR FROM "newsletter.x-mol.com" FROM "alerts-noreply@clarivate.com"'
+    # 默认读取已读和未读提醒，避免用户先打开邮件导致采集漏掉。
+    imap_mark_seen: bool = False
 
     @property
     def imap_password(self) -> str | None:
         return os.environ.get(self.imap_password_env)
+
+
+@dataclass
+class WosConfig:
+    """邮件触发完整结果获取；专用浏览器目录保存机构访问会话。"""
+
+    enabled: bool = True
+    browser_profile_dir: str = "./data/wos-browser"
+    browser_channel: str = ""
+    headless: bool = True
+    timeout_seconds: int = 60
+    batch_size: int = 1000
+    max_records_per_alert: int = 10000
+    min_interval_seconds: float = 2.0
+    max_alerts_per_run: int = 10
+    retry_minutes: int = 15
 
 
 @dataclass
@@ -205,6 +226,7 @@ class Config:
     app: AppConfig = field(default_factory=AppConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     mail: MailConfig = field(default_factory=MailConfig)
+    wos: WosConfig = field(default_factory=WosConfig)
     sources: SourceConfig = field(default_factory=SourceConfig)
     ranking: RankingConfig = field(default_factory=RankingConfig)
     journal_rank: JournalRankConfig = field(default_factory=JournalRankConfig)
@@ -274,6 +296,36 @@ def _ranking_config(data: dict | None) -> RankingConfig:
     return cfg
 
 
+def _wos_config(data: dict | None) -> WosConfig:
+    if data is not None and not isinstance(data, dict):
+        raise ValueError("wos 必须是 YAML 映射")
+    data = data or {}
+    unknown = set(data) - set(WosConfig.__dataclass_fields__)
+    if unknown:
+        raise ValueError(f"未知 wos 配置项: {', '.join(sorted(map(str, unknown)))}")
+    cfg = WosConfig(**data)
+    for name in ("enabled", "headless"):
+        if not isinstance(getattr(cfg, name), bool):
+            raise ValueError(f"wos.{name} 必须是布尔值")
+    for name in ("timeout_seconds", "batch_size", "max_records_per_alert",
+                 "max_alerts_per_run", "retry_minutes"):
+        value = getattr(cfg, name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"wos.{name} 必须是正整数")
+    if cfg.batch_size > 1000:
+        raise ValueError("wos.batch_size 不能超过 1000")
+    interval = cfg.min_interval_seconds
+    if isinstance(interval, bool) or not isinstance(interval, (int, float)) \
+            or not math.isfinite(interval) or interval < 0:
+        raise ValueError("wos.min_interval_seconds 必须是非负有限数值")
+    if not isinstance(cfg.browser_profile_dir, str) or not cfg.browser_profile_dir.strip():
+        raise ValueError("wos.browser_profile_dir 必须是非空路径")
+    if not isinstance(cfg.browser_channel, str):
+        raise ValueError("wos.browser_channel 必须是字符串")
+    cfg.browser_profile_dir = str(_expand(cfg.browser_profile_dir))
+    return cfg
+
+
 def load_config(path: str | Path | None = None) -> Config:
     """从 config.yaml 加载;文件不存在时全部走默认值。"""
     cfg_path = _expand(path or os.environ.get("LITRADAR_CONFIG", "config.yaml"))
@@ -285,10 +337,19 @@ def load_config(path: str | Path | None = None) -> Config:
         app=_build(AppConfig, raw.get("app")),
         llm=_build(LLMConfig, raw.get("llm")),
         mail=_build(MailConfig, raw.get("mail")),
+        wos=_wos_config(raw.get("wos")),
         sources=_build(SourceConfig, raw.get("sources")),
         ranking=_ranking_config(raw.get("ranking")),
         journal_rank=_build(JournalRankConfig, raw.get("journal_rank")),
     )
+
+    if cfg.mail.imap_auth not in ("password", "oauth2"):
+        raise ValueError("mail.imap_auth 必须是 password 或 oauth2")
+    cfg.mail.oauth_token_cache = str(_expand(cfg.mail.oauth_token_cache))
+    # 所有入口(包括 systemd)使用同一个项目目录，与 cfg.inbox_dir 保持一致。
+    cfg.mail.folder = str(_expand(cfg.mail.folder))
+    if cfg.mail.move_processed_to:
+        cfg.mail.move_processed_to = str(_expand(cfg.mail.move_processed_to))
 
     pf = cfg.interests_file
     if pf.exists():

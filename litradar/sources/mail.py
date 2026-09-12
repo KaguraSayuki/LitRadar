@@ -1,8 +1,6 @@
 """邮件接入:本地文件夹 / Maildir / IMAP(可插拔)。
 
-Outlook 个人账号已禁用密码登录(服务器返回 ``LOGINDISABLED``),因此 IMAP 模式
-适用于 Gmail / QQ / 163 这类支持应用专用密码的邮箱 —— 把 X-MOL 邮件从 Outlook
-转发过去即可。
+Outlook 支持 OAuth2 直连与静默刷新令牌；其它 IMAP 邮箱可继续使用应用专用密码。
 """
 from __future__ import annotations
 
@@ -13,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..config import MailConfig
+from . import mail_oauth
 
 # IMAP 全程带超时:没有它,网络半挂时 systemd 的每日任务会一直吊在 read 上,
 # 既不失败也不退出,下一轮还被单实例锁挡住 —— 等于雷达静默停摆。
@@ -83,19 +82,60 @@ def imap_criteria(cfg: MailConfig) -> list[str]:
     return crit
 
 
-def _connect(cfg: MailConfig, pwd: str) -> imaplib.IMAP4_SSL:
+def _check_imap_result(result: object, operation: str) -> None:
+    """Reject IMAP ``NO/BAD`` replies instead of reporting false success."""
+    if not isinstance(result, tuple) or not result:
+        raise ConnectionError(f"IMAP {operation} failed: {result!r}")
+    typ = result[0]
+    if isinstance(typ, bytes):
+        typ = typ.decode("ascii", errors="replace")
+    if str(typ).upper() != "OK":
+        raise ConnectionError(f"IMAP {operation} failed: {result!r}")
+
+
+def _auth_mode(cfg: MailConfig) -> str:
+    mode = str(getattr(cfg, "imap_auth", "password") or "password").strip().lower()
+    if mode not in {"password", "oauth2"}:
+        raise ValueError("mail.imap_auth 必须是 password 或 oauth2")
+    return mode
+
+
+def _connect(cfg: MailConfig, pwd: str | None = None) -> imaplib.IMAP4_SSL:
+    auth_mode = _auth_mode(cfg)
+    if auth_mode == "oauth2":
+        mail_oauth.validate_imap_host(cfg.imap_host)
     conn = imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port, timeout=IMAP_TIMEOUT)
-    conn.login(cfg.imap_user, pwd)
-    conn.select(cfg.imap_folder, readonly=False)
+    try:
+        if auth_mode == "oauth2":
+            mail_oauth.authenticate(conn, cfg)
+        else:
+            if not pwd:
+                raise ValueError(f"环境变量 {cfg.imap_password_env} 未设置(应用专用密码)")
+            _check_imap_result(conn.login(cfg.imap_user, pwd), "LOGIN")
+        _check_imap_result(
+            conn.select(cfg.imap_folder, readonly=not bool(cfg.imap_mark_seen)),
+            "SELECT",
+        )
+    except Exception:
+        _disconnect(conn)
+        raise
     return conn
 
 
 def _disconnect(conn: imaplib.IMAP4_SSL) -> None:
+    # IMAP CLOSE expunges messages already marked \Deleted.  Unselect first
+    # when supported so disconnecting after a failed ingest cannot permanently
+    # delete an unrelated message.
     try:
-        conn.close()
+        unselect = getattr(conn, "unselect", None)
+        if callable(unselect):
+            unselect()
     except Exception:  # noqa: BLE001
         pass
-    conn.logout()
+    try:
+        conn.logout()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def iter_imap(cfg: MailConfig) -> Iterator[MailMessage]:
@@ -107,14 +147,15 @@ def iter_imap(cfg: MailConfig) -> Iterator[MailMessage]:
     """
     if not cfg.imap_host or not cfg.imap_user:
         raise ValueError("mail.mode=imap 需要配置 imap_host / imap_user")
-    pwd = cfg.imap_password
-    if not pwd:
+    pwd = cfg.imap_password if _auth_mode(cfg) == "password" else None
+    if _auth_mode(cfg) == "password" and not pwd:
         raise ValueError(f"环境变量 {cfg.imap_password_env} 未设置(应用专用密码)")
 
     conn = _connect(cfg, pwd)
     try:
         typ, data = conn.uid("SEARCH", None, *imap_criteria(cfg))
-        if typ != "OK" or not data or not data[0]:
+        _check_imap_result((typ, data), "SEARCH")
+        if not data or not data[0]:
             return
         for uid in data[0].split():
             typ, fetched = conn.uid("FETCH", uid, "(BODY.PEEK[])")
@@ -127,7 +168,9 @@ def iter_imap(cfg: MailConfig) -> Iterator[MailMessage]:
                 # acknowledge,所以回执可以直接借用这条已经开着的连接发 STORE,
                 # 不必像以前那样每封邮件 login/select/store/logout 一整轮。
                 def _ack(u: bytes = uid, c: imaplib.IMAP4_SSL = conn) -> None:
-                    c.uid("STORE", u, "+FLAGS", "\\Seen")
+                    _check_imap_result(
+                        c.uid("STORE", u, "+FLAGS", "\\Seen"), "STORE"
+                    )
 
                 msg.ack = _ack
             yield msg
@@ -143,12 +186,14 @@ def mark_seen(cfg: MailConfig, msg: MailMessage) -> None:
     """
     if cfg.mode != "imap" or not cfg.imap_mark_seen:
         return
-    pwd = cfg.imap_password
-    if not pwd:
+    if _auth_mode(cfg) == "password" and not cfg.imap_password:
         return
+    pwd = cfg.imap_password if _auth_mode(cfg) == "password" else None
     conn = _connect(cfg, pwd)
     try:
-        conn.uid("STORE", msg.origin.encode(), "+FLAGS", "\\Seen")
+        _check_imap_result(
+            conn.uid("STORE", msg.origin.encode(), "+FLAGS", "\\Seen"), "STORE"
+        )
     finally:
         _disconnect(conn)
 

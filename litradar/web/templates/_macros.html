@@ -49,7 +49,7 @@
 
 {# 来源标识的展示名 #}
 {% macro source_name(s) -%}
-{{ {'crossref': 'Crossref', 'xmol': 'X-MOL', 'openalex': 'OpenAlex', 'manual': '手动', 'snowball': '滚雪球'}.get(s, s) }}
+{{ {'crossref': 'Crossref', 'xmol': 'X-MOL', 'openalex': 'OpenAlex', 'manual': '手动', 'snowball': '滚雪球', 'wos': 'Web of Science'}.get(s, s) }}
 {%- endmacro %}
 
 {# 来源标签。滚雪球额外带上共被引数 —— "被几个种子文献共同引用"是这个来源

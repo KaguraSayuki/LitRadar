@@ -2,15 +2,16 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import sqlite3
 from typing import Any
 
-from . import db, enrich, rank, summarize
+from . import db, enrich, rank, summarize, wos_sync
 from .config import Config
 from .normalize import normalize_doi, title_norm
 from .rank import load_interests
-from .sources import crossref_search, mail, openalex_search, semanticscholar, xmol_email
+from .sources import crossref_search, mail, openalex_search, semanticscholar, xmol_email, wos_email
 
 
 # ------------------------------------------------------------------ ingest
@@ -56,11 +57,30 @@ def _store(conn: sqlite3.Connection, data: dict) -> tuple[int, bool]:
 
 
 def ingest_mail(cfg: Config, *, verbose: bool = True) -> dict:
-    """解析 X-MOL 订阅邮件。支持 folder / maildir / imap 三种来源。"""
+    """接收订阅邮件，并处理已持久化的 WoS 完整结果任务。"""
+    try:
+        stat = _ingest_mail(cfg, verbose=verbose)
+    except Exception:
+        # 邮箱暂时离线不应挡住此前已确认的 WoS 任务。
+        try:
+            wos_sync.run(cfg, verbose=verbose)
+        except Exception as error:
+            if verbose:
+                print(f"  [warn] WoS 队列运行失败: {type(error).__name__}")
+        raise
+    wos = wos_sync.run(cfg, verbose=verbose)
+    stat["wos"] = wos
+    for key in ("records", "new", "updated", "errors"):
+        stat[key] += wos[key]
+    return stat
+
+
+def _ingest_mail(cfg: Config, *, verbose: bool = True) -> dict:
+    """X-MOL 直接入库；WoS 留存邮件并入队，释放邮箱连接后再下载。"""
     database = db.Database(cfg.db_file)
     conn = database.connect()
     stat = {"messages": 0, "records": 0, "new": 0, "updated": 0, "errors": 0,
-            "mode": cfg.mail.mode}
+            "mode": cfg.mail.mode, "wos_queued": 0}
     started = db.now()
     try:
         def ingest_records(records, meta, raw: bytes, *, mid: str,
@@ -131,47 +151,83 @@ def ingest_mail(cfg: Config, *, verbose: bool = True) -> dict:
             if verbose:
                 print(f"  邮件 {mid[:40]}… -> {len(records)} 条")
 
+        def ingest_message(raw: bytes, *, saved_mid: str | None = None,
+                           live_msg=None) -> None:
+            try:
+                alert, meta = wos_email.parse_bytes(raw)
+            except ValueError:
+                # 识别出的 WoS 邮件模板不符：留原文供修复后离线重放，不 ack。
+                # 普通邮件由 wos_email 返回 None，不会被这个路径留档。
+                import email
+                from email import policy
+                headers = email.message_from_bytes(raw, policy=policy.default)
+                mid = saved_mid or str(headers.get("Message-ID") or "").strip() \
+                    or "sha256:" + hashlib.sha256(raw).hexdigest()
+                conn.execute(
+                    """INSERT OR IGNORE INTO raw_email
+                       (message_id,received_at,subject,raw,parsed_at) VALUES (?,?,?,?,?)""",
+                    (mid, str(headers.get("Date") or ""), str(headers.get("Subject") or ""),
+                     raw, db.now()),
+                )
+                conn.commit()
+                raise
+            if alert is not None:
+                if not cfg.wos.enabled:
+                    return
+                mid = saved_mid or meta.get("message_id") \
+                    or "sha256:" + hashlib.sha256(raw).hexdigest()
+                conn.execute("SAVEPOINT enqueue_wos")
+                try:
+                    created = wos_sync.enqueue(conn, alert, meta, raw, message_id=mid)
+                    conn.execute("RELEASE SAVEPOINT enqueue_wos")
+                except Exception:
+                    conn.execute("ROLLBACK TO SAVEPOINT enqueue_wos")
+                    conn.execute("RELEASE SAVEPOINT enqueue_wos")
+                    raise
+                conn.commit()
+                stat["wos_queued"] += int(created)
+                # durable queue 是 WoS 的邮箱回执边界；processed_at 仍须全量入库后才写。
+                if live_msg is not None:
+                    mail.acknowledge(cfg.mail, live_msg)
+                return
+            if not cfg.sources.xmol_enabled:
+                return
+            records, meta = xmol_email.parse_bytes(raw)
+            mid = saved_mid or meta.get("message_id") \
+                or "sha256:" + hashlib.sha256(raw).hexdigest()
+            ingest_records(records, meta, raw, mid=mid, live_msg=live_msg)
+
         # 迁移前版本在写 raw_email 后就提交，且 IMAP 可能已经把邮件标为
         # Seen/归档，之后不会再从 iter_messages 返回。先离线重放所有尚未
         # processed_at 的原文；成功后才把完成标记写回，同样不需要外部 ack。
         pending = conn.execute(
             "SELECT message_id, received_at, subject, raw FROM raw_email "
-            "WHERE processed_at IS NULL ORDER BY id"
+            "WHERE processed_at IS NULL AND NOT EXISTS "
+            "(SELECT 1 FROM wos_alert_email w WHERE w.message_id=raw_email.message_id) "
+            "ORDER BY id"
         ).fetchall()
         for old in pending:
             stat["messages"] += 1
             try:
-                records, meta = xmol_email.parse_bytes(old["raw"])
+                ingest_message(old["raw"], saved_mid=old["message_id"])
             except Exception as e:  # noqa: BLE001
                 stat["errors"] += 1
                 if verbose:
                     print(f"  [warn] 历史邮件重放解析失败 {old['message_id']}: {e}")
                 continue
-            replay_meta = {
-                "message_id": old["message_id"],
-                "received_at": old["received_at"] or meta.get("received_at"),
-                "subject": old["subject"] or meta.get("subject"),
-            }
-            ingest_records(records, replay_meta, old["raw"], mid=old["message_id"])
 
         for msg in mail.iter_messages(cfg.mail):
             stat["messages"] += 1
             try:
-                records, meta = xmol_email.parse_bytes(msg.raw)
+                ingest_message(msg.raw, live_msg=msg)
             except Exception as e:  # noqa: BLE001
                 stat["errors"] += 1
                 if verbose:
                     print(f"  [warn] 解析失败 {msg.source_ref}: {e}")
                 continue
 
-            if not records:
-                # 不是 X-MOL 订阅邮件:仍留档,但不入库
-                continue
-
-            mid = meta.get("message_id") or msg.source_ref
-            ingest_records(records, meta, msg.raw, mid=mid, live_msg=msg)
-
-        db.log_run(conn, "ingest_mail", "ok", stat, started_at=started)
+        db.log_run(conn, "ingest_mail", "partial" if stat["errors"] else "ok",
+                   stat, started_at=started)
         conn.commit()
     except Exception as e:  # noqa: BLE001
         # The failed transaction may contain a raw_email row or partial item;
@@ -390,7 +446,7 @@ def ingest_keyword_search(cfg: Config, *, verbose: bool = True) -> dict:
 def run_all(cfg: Config, *, days: int = 200, verbose: bool = True) -> dict:
     out: dict[str, Any] = {}
     if verbose:
-        print("[1/4] 解析 X-MOL 订阅邮件")
+        print("[1/4] 采集订阅邮件(X-MOL / Web of Science)")
     out["ingest_mail"] = ingest_mail(cfg, verbose=verbose)
 
     if verbose:

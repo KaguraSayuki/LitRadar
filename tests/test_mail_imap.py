@@ -27,9 +27,11 @@ class FakeIMAP:
 
     def login(self, user, pwd):
         self.calls.append(("login", user, pwd))
+        return "OK", [b"logged in"]
 
     def select(self, folder, readonly=False):
         self.calls.append(("select", folder, readonly))
+        return "OK", [b"0"]
 
     def uid(self, command, *args):
         self.calls.append(("uid", command, *args))
@@ -42,6 +44,9 @@ class FakeIMAP:
 
     def close(self):
         self.calls.append(("close",))
+
+    def unselect(self):
+        self.calls.append(("unselect",))
 
     def logout(self):
         self.logged_out = True
@@ -74,19 +79,36 @@ def _drain(cfg) -> list:
 def test_标已读时搜索条件加UNSEEN():
     """标了已读,UNSEEN 就等于"还没处理过",流量不再随邮箱体积增长。"""
     assert mail.imap_criteria(_cfg(imap_mark_seen=True)) == [
-        "UNSEEN", 'FROM "newsletter.x-mol.com"']
+        "UNSEEN", 'OR FROM "newsletter.x-mol.com" FROM "alerts-noreply@clarivate.com"']
 
 
 def test_不标已读时保持全量():
     """没人标已读还加 UNSEEN,用户在网页上瞄一眼邮件就会让它永远进不来。"""
     assert mail.imap_criteria(_cfg(imap_mark_seen=False)) == [
-        'FROM "newsletter.x-mol.com"']
+        'OR FROM "newsletter.x-mol.com" FROM "alerts-noreply@clarivate.com"']
 
 
 def test_搜索条件原样传给UID_SEARCH(fake_imap):
     _drain(_cfg(imap_mark_seen=True))
     search = [c for c in fake_imap.created[0].calls if c[:2] == ("uid", "SEARCH")]
-    assert search == [("uid", "SEARCH", None, "UNSEEN", 'FROM "newsletter.x-mol.com"')]
+    assert search == [(
+        "uid", "SEARCH", None, "UNSEEN",
+        'OR FROM "newsletter.x-mol.com" FROM "alerts-noreply@clarivate.com"',
+    )]
+
+
+def test_SEARCH坏结果抛错而不是假成功(fake_imap, monkeypatch):
+    class BadSearch(FakeIMAP):
+        def uid(self, command, *args):
+            if command == "SEARCH":
+                self.calls.append(("uid", command, *args))
+                return "NO", [b"temporary failure"]
+            return super().uid(command, *args)
+
+    monkeypatch.setattr(mail.imaplib, "IMAP4_SSL", BadSearch)
+    with pytest.raises(ConnectionError, match="SEARCH"):
+        list(mail.iter_imap(_cfg()))
+    assert BadSearch.created[0].logged_out is True
 
 
 # ------------------------------------------------------------------- UID
@@ -115,13 +137,43 @@ def test_回执按UID标已读且复用同一条连接(fake_imap):
 
 def test_不标已读时不发STORE(fake_imap):
     _drain(_cfg(imap_mark_seen=False))
-    assert [c for c in fake_imap.created[0].calls
+    conn = fake_imap.created[0]
+    assert [c for c in conn.calls
             if c[:2] == ("uid", "STORE")] == []
+    assert ("select", "INBOX", True) in conn.calls
+
+
+def test_断开不会调用CLOSE以免触发EXPUNGE(fake_imap):
+    _drain(_cfg(imap_mark_seen=True))
+    conn = fake_imap.created[0]
+    assert ("unselect",) in conn.calls
+    assert ("close",) not in conn.calls
 
 
 def test_连接带超时(fake_imap):
     _drain(_cfg())
     assert fake_imap.created[0].timeout == mail.IMAP_TIMEOUT
+
+
+def test_空的登录或选择结果不能假成功():
+    with pytest.raises(ConnectionError, match="LOGIN"):
+        mail._check_imap_result(None, "LOGIN")
+
+
+def test_STORE坏结果抛错并安全断开(fake_imap, monkeypatch):
+    class BadStore(FakeIMAP):
+        def uid(self, command, *args):
+            if command == "STORE":
+                self.calls.append(("uid", command, *args))
+                return "NO", [b"cannot set flag"]
+            return super().uid(command, *args)
+
+    monkeypatch.setattr(mail.imaplib, "IMAP4_SSL", BadStore)
+    with pytest.raises(ConnectionError, match="STORE"):
+        _drain(_cfg(imap_mark_seen=True))
+    conn = BadStore.created[0]
+    assert ("unselect",) in conn.calls
+    assert ("close",) not in conn.calls
 
 
 def test_缺密码时报错(fake_imap, monkeypatch):

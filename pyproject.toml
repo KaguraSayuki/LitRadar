@@ -16,6 +16,10 @@ dependencies = [
     "python-multipart>=0.0.9",
 ]
 
+[project.optional-dependencies]
+wos = ["playwright>=1.49"]
+outlook = ["msal>=1.28"]
+
 [project.scripts]
 litradar = "litradar.cli:main"
 

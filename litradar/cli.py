@@ -6,10 +6,10 @@ import json
 import sys
 from pathlib import Path
 
-from . import db, enrich, pipeline, rank, summarize
+from . import db, enrich, pipeline, rank, summarize, wos_sync
 from .config import load_config
 from .lock import AlreadyRunning, single_instance
-from .sources import mail, xmol_email
+from .sources import mail, mail_oauth, wos_email, xmol_email
 
 
 def _lock_path(cfg):
@@ -25,21 +25,30 @@ def cmd_init_db(cfg, args):
 def cmd_parse(cfg, args):
     """只解析邮件并打印,不入库 —— 用于校准解析器。"""
     n = 0
+    alerts = 0
     for msg in mail.iter_messages(cfg.mail):
+        alert, meta = wos_email.parse_bytes(msg.raw)
+        if alert is not None:
+            print(f"WoS: {alert.query} | 待获取完整结果 {alert.total} 条")
+            alerts += 1
+            continue
         records, meta = xmol_email.parse_bytes(msg.raw)
         print(f"--- {msg.source_ref} | {meta.get('subject')} | {meta.get('received_at')}")
         print(xmol_email.dumps(records))
         n += len(records)
-    print(f"共 {n} 条", file=sys.stderr)
+    print(f"共 {n} 条题录，{alerts} 个 WoS 完整结果任务", file=sys.stderr)
     return 0
 
 
 def cmd_ingest(cfg, args):
+    errors = 0
     if args.what in ("mail", "all"):
-        print(pipeline.ingest_mail(cfg))
+        result = pipeline.ingest_mail(cfg)
+        print(result)
+        errors += result["errors"]
     if args.what in ("search", "all"):
         print(pipeline.ingest_keyword_search(cfg))
-    return 0
+    return 1 if errors else 0
 
 
 def cmd_enrich(cfg, args):
@@ -62,6 +71,34 @@ def cmd_summarize(cfg, args):
 def cmd_run(cfg, args):
     out = pipeline.run_all(cfg, days=args.days)
     print(json.dumps(out, ensure_ascii=False, indent=2))
+    return 1 if out.get("ingest_mail", {}).get("errors") else 0
+
+
+def cmd_wos_sync(cfg, args):
+    out = wos_sync.run(cfg, force=args.retry_now, limit=args.limit)
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+    return 1 if out["errors"] else 0
+
+
+def cmd_wos_status(cfg, args):
+    print(json.dumps(wos_sync.status(cfg), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_wos_login(cfg, args):
+    from .sources.wos_browser import browser_login
+    browser_login(cfg.wos)
+    print("WoS 专用浏览器会话已保存。下次定时采集会继续处理待完成提醒。")
+    return 0
+
+
+def cmd_mail_login(cfg, args):
+    if cfg.mail.imap_auth != "oauth2":
+        raise ValueError("mail-login 用于 Outlook OAuth，请先设置 mail.imap_auth: oauth2")
+    mail_oauth.device_authorize(
+        cfg.mail, on_device_code=lambda flow: print(flow["message"], flush=True),
+    )
+    print("Outlook 授权缓存已保存；后续采集会自动刷新令牌。")
     return 0
 
 
@@ -78,7 +115,7 @@ def cmd_stats(cfg, args):
 
 
 def cmd_mail_test(cfg, args):
-    """只读测试 IMAP:能不能登进去、找不找得到 X-MOL 邮件、解析出什么。
+    """只读测试 IMAP:检查登录、X-MOL 题录及 WoS 提醒。
 
     **不改任何状态**:不标已读、不移动邮件、不写库。配完邮箱先跑这个。
     """
@@ -97,15 +134,14 @@ def cmd_mail_test(cfg, args):
     print(f"  服务器    : {m.imap_host}:{m.imap_port}")
     print(f"  账号      : {m.imap_user or '(未设)'}")
     print(f"  搜索式    : {m.imap_search}")
-    print(f"  密码来源  : 环境变量 {m.imap_password_env}")
+    print(f"  认证方式  : {m.imap_auth}")
 
     if not m.imap_user:
         print("\n  ❌ 未配置 imap_user。在 config.yaml 的 mail 段填收件邮箱。")
         return 1
-    if not m.imap_password:
+    if m.imap_auth == "password" and not m.imap_password:
         print(f"\n  ❌ 环境变量 {m.imap_password_env} 未设置(.env 里填应用专用密码/授权码)。")
         return 1
-    print("  密码      : 已设置\n")
 
     try:
         # 带超时:服务器半挂时不要让体检命令一直吊在这里
@@ -117,7 +153,10 @@ def cmd_mail_test(cfg, args):
 
     try:
         try:
-            conn.login(m.imap_user, m.imap_password)
+            if m.imap_auth == "oauth2":
+                mail_oauth.authenticate(conn, m)
+            else:
+                mail._check_imap_result(conn.login(m.imap_user, m.imap_password), "LOGIN")
             print("  ✅ 登录成功")
         except imaplib.IMAP4.error as e:
             msg = str(e)
@@ -130,7 +169,7 @@ def cmd_mail_test(cfg, args):
                 print("       · QQ 邮箱授权码在 设置→账户 里生成")
             return 1
 
-        conn.select(m.imap_folder, readonly=True)          # 只读!
+        mail._check_imap_result(conn.select(m.imap_folder, readonly=True), "SELECT")
         typ, data = conn.search(None, m.imap_search or "ALL")
         if typ != "OK":
             print(f"  ❌ 搜索失败: {typ}")
@@ -139,16 +178,22 @@ def cmd_mail_test(cfg, args):
         print(f"  ✅ 在 {m.imap_folder} 找到 {len(uids)} 封匹配邮件")
         if not uids:
             print("\n  ⚠️  一封都没找到。检查:")
-            print("       · Outlook 的转发规则建了吗(发件人含 newsletter.x-mol.com)")
-            print("       · 转发是否真的送达(先去网页邮箱确认)")
+            print("       · 订阅邮件是否在配置的文件夹中")
+            print("       · 原有搜索式是否同时包含 X-MOL 和 Clarivate 发件人")
             print(f"       · 搜索式是否匹配:{m.imap_search}")
             return 1
 
         print("\n  最近 5 封:")
         total = 0
+        alerts = 0
         for uid in uids[-5:]:
             typ, fetched = conn.fetch(uid, "(BODY.PEEK[])")   # PEEK:不标已读
             if typ != "OK" or not fetched or not isinstance(fetched[0], tuple):
+                continue
+            alert, meta = wos_email.parse_bytes(fetched[0][1])
+            if alert is not None:
+                print(f"      WoS {alert.query[:60]} → 完整结果 {alert.total} 条(由后台获取)")
+                alerts += 1
                 continue
             recs, meta = xmol_email.parse_bytes(fetched[0][1])
             subj = (meta.get("subject") or "")[:38]
@@ -159,19 +204,15 @@ def cmd_mail_test(cfg, args):
                 print(f"          · {r.title[:62]}")
             total += len(recs)
 
-        print(f"\n  合计可解析条目:{total}")
-        if total == 0:
+        print(f"\n  合计可解析题录:{total}，WoS 提醒:{alerts}")
+        if total == 0 and alerts == 0:
             print("  ⚠️  能登进去但解析不出条目 —— 可能邮件模板变了。")
-            print("      把一封原始邮件存成 .eml 给我,我按真实样本校准解析器。")
+            print("      检查订阅类型与邮件模板；当前支持 X-MOL 和 WoS 搜索提醒。")
         else:
             print('\n  ✅ 一切正常。把 config.yaml 的 mail.mode 设为 "imap" 后跑 ingest 即可。')
         return 0
     finally:
-        try:
-            conn.close()
-        except Exception:  # noqa: BLE001
-            pass
-        conn.logout()
+        mail._disconnect(conn)
 
 
 # ------------------------------------------------------------------ 体检
@@ -303,13 +344,32 @@ def cmd_check(cfg, args):
         else:
             line(WARN, "收件目录不存在", str(d))
     elif cfg.mail.mode == "imap":
-        if cfg.mail.imap_password:
+        if cfg.mail.imap_auth == "oauth2":
+            from importlib.util import find_spec
+            if not find_spec("msal"):
+                line(BAD, "MSAL 未安装", "pip install -e '.[outlook]'")
+                problems.append("MSAL 未安装")
+            elif not mail_oauth.cache_path(cfg.mail).exists():
+                line(WARN, "Outlook 尚未授权", "运行 litradar mail-login")
+                problems.append("Outlook 尚未授权")
+            else:
+                line(OK, "Outlook OAuth 缓存已存在", "收信时自动续期")
+        elif cfg.mail.imap_password:
             line(OK, "IMAP 密码已设置")
         else:
             line(BAD, f"{cfg.mail.imap_password_env} 未设置",
                  "Gmail/QQ 需要用【应用专用密码/授权码】,不是登录密码")
             problems.append("IMAP 密码未设置")
         line(OK, "IMAP 服务器", f"{cfg.mail.imap_host}:{cfg.mail.imap_port}")
+
+    if cfg.wos.enabled:
+        from importlib.util import find_spec
+        if find_spec("playwright"):
+            line(OK, "Playwright Python 包已安装",
+                 "Chromium 需另行安装：python -m playwright install chromium")
+        else:
+            line(WARN, "WoS 浏览器依赖未安装",
+                 "pip install -e '.[wos]'，然后 python -m playwright install chromium")
 
     print("\n【6】网络可达性")
     import requests
@@ -429,6 +489,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("stats", help="查看统计").set_defaults(func=cmd_stats)
     sub.add_parser("mail-test", help="只读测试 IMAP 邮件接入").set_defaults(func=cmd_mail_test)
+    sub.add_parser("mail-login", help="首次授权 Outlook 自动收信").set_defaults(func=cmd_mail_login)
+    sub.add_parser("wos-login", help="打开 WoS 专用浏览器进行机构登录").set_defaults(func=cmd_wos_login)
+    sub.add_parser("wos-status", help="查看 WoS 完整结果采集进度").set_defaults(func=cmd_wos_status)
+    sp = sub.add_parser("wos-sync", help="处理待完成 WoS 提醒(无需重新读取邮件)")
+    sp.add_argument("--retry-now", action="store_true", help="立即重试，忽略退避时间")
+    sp.add_argument("--limit", type=int, default=None, help="本轮最多处理多少个提醒")
+    sp.set_defaults(func=cmd_wos_sync)
     sub.add_parser("check", help="体检:配置/密钥/数据库/网络/LLM 连通性").set_defaults(func=cmd_check)
     return p
 
@@ -440,7 +507,8 @@ def main(argv: list[str] | None = None) -> int:
     if getattr(args, "days", None) is None:
         args.days = cfg.app.pipeline_window_days
     # 会打 API 的阶段加互斥锁,避免定时任务重叠导致限流互抢
-    guarded = args.cmd in ("run", "ingest", "enrich", "rank", "summarize")
+    guarded = args.cmd in ("run", "ingest", "enrich", "rank", "summarize", "wos-sync",
+                           "wos-login", "mail-login", "mail-test", "parse")
     try:
         if guarded:
             with single_instance(_lock_path(cfg)):

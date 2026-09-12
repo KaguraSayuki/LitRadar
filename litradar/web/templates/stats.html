@@ -35,6 +35,48 @@
   </div>
 </div>
 
+{% set wos_alerts = s.get('wos_alerts', []) or [] %}
+{% set wos_counts = s.get('wos_counts', {}) or {} %}
+{% set wos_status_name = {'pending': '等待采集', 'retry': '等待重试',
+                          'needs_login': '需要重新登录', 'complete': '已完成'} %}
+<h2>Web of Science 采集</h2>
+<div class="panel">
+  <div class="figures">
+    <span><b>{{ wos_counts.get('pending', 0) }}</b>等待采集</span>
+    <span><b>{{ wos_counts.get('retry', 0) }}</b>等待重试</span>
+    <span><b>{{ wos_counts.get('needs_login', 0) }}</b>需要重新登录</span>
+    <span><b>{{ wos_counts.get('complete', 0) }}</b>已完成</span>
+  </div>
+  {% if wos_alerts %}
+    <div class="bars" aria-label="Web of Science 最近采集任务">
+      {% for job in wos_alerts %}
+        {% set status = job.get('status', 'pending') %}
+        {% set query = job.get('query') or '未命名查询' %}
+        {% set imported = job.get('records_imported') or 0 %}
+        {% set expected = job.get('expected_count') or 0 %}
+        {% set error = job.get('last_error') or '' %}
+        {% set error_lower = error|string|lower %}
+        <div class="run">
+          <span class="stage" title="{{ query }}">{{ query|truncate(52, true, '…') }}</span>
+          <span class="status{{ ' status--ok' if status == 'complete' else (' status--err' if status in ('retry', 'needs_login') else '') }}">{{ wos_status_name.get(status, status) }}</span>
+          <span class="wos-count">实际 {{ imported }} / {{ expected }}</span>
+          <span class="kvs">
+            <span>尝试 <b>{{ job.get('attempts', 0) }}</b></span>
+            {% if job.get('next_attempt_at') %}<span>下次 <b>{{ job.get('next_attempt_at') }}</b></span>{% endif %}
+            {% if error %}
+              {# 服务器错误可能含页面 URL、Bearer/access token 或其它敏感上下文。
+                 含明显凭据/URL标记时只显示通用提示；普通错误仍由 Jinja 自动转义。 #}
+              <span class="wos-error">{% if 'http://' in error_lower or 'https://' in error_lower or 'token' in error_lower or 'bearer ' in error_lower %}失败详情已隐藏{% else %}{{ error|truncate(180, true, '…') }}{% endif %}</span>
+            {% endif %}
+          </span>
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="hint">还没有 Web of Science 采集任务。</p>
+  {% endif %}
+</div>
+
 {% set j_max = (s['by_journal'] | map(attribute='n') | max) if s['by_journal'] else 1 %}
 <h2>期刊命中率 <small>条目数排名前 {{ s['by_journal']|length }}</small></h2>
 <div class="panel">

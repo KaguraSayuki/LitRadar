@@ -31,8 +31,7 @@ llm:
   enabled: true
 
 # ── 邮件接入 ────────────────────────────────────────────────────────────────
-# 注意:Outlook 个人账号已禁用密码登录(IMAP 返回 LOGINDISABLED),
-#       所以走「Outlook 转发到 Gmail/QQ + 应用专用密码」这条路。
+# Outlook 使用 OAuth2 可直接自动收信；Gmail/QQ 等保留应用专用密码方式。
 mail:
   mode: "folder"                  # folder | maildir | imap
   folder: "./data/inbox"          # folder/maildir 模式读取目录
@@ -44,15 +43,36 @@ mail:
   #    imap.feishu.cn / imap.exmail.qq.com。
   imap_host: "imap.qq.com"     # Gmail: imap.gmail.com ; QQ: imap.qq.com
   imap_port: 993
-  imap_user: ""                   # 你的转发目标邮箱
+  imap_user: ""                   # 你的收信邮箱
   imap_password_env: "IMAP_PASSWORD"   # 应用专用密码,写进 .env
+  imap_auth: "password"          # password | oauth2
+  # Outlook 直连:imap_host 改为 outlook.office365.com，imap_auth 改为 oauth2。
+  # 首次执行 litradar mail-login，之后令牌自动续期。
+  oauth_client_id_env: "OUTLOOK_CLIENT_ID"
+  oauth_tenant: "consumers"      # 个人 Outlook；组织账号用 common/租户 GUID
+  oauth_token_cache: "./data/outlook-token-cache.json"
   imap_folder: "INBOX"
-  imap_search: 'FROM "newsletter.x-mol.com"'
+  imap_search: 'OR FROM "newsletter.x-mol.com" FROM "alerts-noreply@clarivate.com"'
   # true:每封处理成功的邮件会被标成已读,之后每轮只拉 UNSEEN 的
-  #       —— 流量不再随邮箱里积攒的历史邮件增长(推荐)。
-  # false:不动已读标记,于是每轮都得按 imap_search 全量拉一遍正文,
-  #        再靠 message_id 去重丢掉 —— 邮箱越大越慢。
-  imap_mark_seen: true
+  #       —— 但用户先看过的邮件会被跳过，不适合历史补采。
+  # false(推荐):读取已读和未读邮件，靠 Message-ID/alert ID 去重。
+  # 可用专用文件夹或在 imap_search 加 SINCE 限定回溯范围。
+  imap_mark_seen: false
+
+# ── Web of Science 完整结果 ─────────────────────────────────────────────────
+# 收信后自动打开 View all records 结果页并获取全部 RIS 题录，文件由后台处理。
+# 安装 pip install -e '.[wos]'，然后 python -m playwright install chromium。
+wos:
+  enabled: true
+  browser_profile_dir: "./data/wos-browser"   # 专用会话目录，勿用日常浏览器目录
+  browser_channel: ""           # 留空使用 Playwright Chromium
+  headless: true
+  timeout_seconds: 60
+  batch_size: 1000               # WoS 每次导出上限
+  max_records_per_alert: 10000   # 超过时明确报错，调大后可重试
+  max_alerts_per_run: 10         # 历史提醒分轮补齐
+  min_interval_seconds: 2
+  retry_minutes: 15             # 指数退避，最大一天；下次定时运行处理到期任务
 
 # ── 数据源 ──────────────────────────────────────────────────────────────────
 # 分工是实测得出的:Crossref 负责检索,Semantic Scholar 负责补摘要,
