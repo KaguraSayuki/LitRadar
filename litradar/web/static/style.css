@@ -486,6 +486,8 @@ h2 small { font-weight: 400; color: var(--ink-3); font-size: 13px; margin-left: 
 .footer p { margin: 0; }
 .footer__src { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; color: var(--ink-2); }
 .footer__link { margin-left: auto; white-space: nowrap; }
+/* 这个分隔点只在窄屏用 —— 桌面端链接靠右对齐,不需要它 */
+.footer__sep { display: none; }
 .footer__note { margin-top: 2px; color: var(--ink-3); }
 .toast {
   position: fixed; left: 50%; bottom: 24px; z-index: 50;
@@ -517,9 +519,14 @@ h2 small { font-weight: 400; color: var(--ink-3); font-size: 13px; margin-left: 
   :root { --topbar-h: 52px; }
   .topbar { padding: 0 14px; gap: 12px; }
   .nav { display: none; }
-  .main { padding: 16px 14px calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 24px); }
+  /* 底栏是 fixed 的,只要**最后一个元素**给它让位。之前 .main 和 .footer
+     各留了一次,加起来一百多像素死白,页脚被顶得老远。 */
+  .main { padding: 16px 14px 20px; }
   .footer { padding: 0 14px calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 20px); }
-  /* 窄屏上来源已经要折成两行,再把链接顶到右边会孤零零飘在第二行末尾 */
+  /* 窄屏上不再"来源一行、链接一行"地折成三行短句(右边空一大片),
+     改成自然文字流 —— 链接接在来源后面,行尾对齐 */
+  .footer__src { display: block; }
+  .footer__sep { display: inline; }
   .footer__link { margin-left: 0; }
   .page-head { margin-bottom: 14px; }
   .page-head h1 { font-size: 21px; }
@@ -572,12 +579,17 @@ h2 small { font-weight: 400; color: var(--ink-3); font-size: 13px; margin-left: 
   /* 底部标签栏 */
   .tabbar {
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
-    display: grid; grid-template-columns: repeat(6, 1fr);
+    /* 用 flex 而不是 grid-template-columns: repeat(N, 1fr) ——
+       列数写死过一次就踩了坑:删掉"专利"导航项之后栏里只剩 5 项,
+       grid 却还开 6 列,第 6 列空着,整条栏变成左对齐、右边空一大片。
+       导航项是数据驱动的,布局就不该再自己数一遍。 */
+    display: flex;
     height: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
     padding: 0 4px env(safe-area-inset-bottom);
     background: var(--surface); border-top: 1px solid var(--line);
   }
   .tabbar a {
+    flex: 1 1 0; min-width: 0;
     display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
     color: var(--ink-3); font-size: 10.5px; line-height: 1; letter-spacing: .01em;
     -webkit-tap-highlight-color: transparent;
