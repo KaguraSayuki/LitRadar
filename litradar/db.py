@@ -829,7 +829,9 @@ def stats(conn: sqlite3.Connection) -> dict[str, Any]:
     return {
         "items": one("SELECT COUNT(*) FROM item"),
         "papers": one("SELECT COUNT(*) FROM item WHERE kind='paper'"),
-        "new": one("SELECT COUNT(*) FROM item_state WHERE state='new' AND ignored=0"),
+        # "未读"必须和首页页签同一口径(排除 ignored / excluded、只数 paper),
+        # 否则统计页和首页给出两个对不上的数字。
+        "new": count_items(conn, kind="paper", state="new"),
         "starred": one("SELECT COUNT(*) FROM item_state WHERE starred=1"),
         "ignored": one("SELECT COUNT(*) FROM item_state WHERE ignored=1"),
         "summaries": one("SELECT COUNT(*) FROM summary"),

@@ -175,3 +175,16 @@ def test_every_whitelisted_action_still_works(conn):
     for action in sorted(db.ACTIONS):
         db.set_action(conn, a, action)
     assert conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0] == len(db.ACTIONS)
+
+
+# ------------------------------------------------------- 统计页口径
+
+def test_stats_new_matches_inbox_tab(conn):
+    """回归:统计页"未读"直接数 item_state,没排除 excluded、没限定 kind,
+    和首页"未读"页签(count_items)对不上。"""
+    a, b, c, d = _add(conn, "a"), _add(conn, "b"), _add(conn, "c"), _add(conn, "d")
+    db.set_action(conn, b, "ignore")
+    db.set_excluded(conn, [c], True)
+    db.set_action(conn, d, "read")
+    _add(conn, "p", kind="patent")
+    assert db.stats(conn)["new"] == db.count_items(conn, kind="paper", state="new") == 1
