@@ -355,18 +355,26 @@ def upsert_item(conn: sqlite3.Connection, data: dict[str, Any]) -> tuple[int, bo
 
 
 def in_window(alias: str = "i") -> str:
-    """时间窗条件,占用**一个** ``?`` 参数(形如 ``"-200 days"``),自带括号。
+    """时间窗条件,占用**两个** ``?`` 参数(同一个值传两遍,形如
+    ``("-200 days", "-200 days")``),自带括号。
 
-    除了按字面日期比较,还要捞回"只知道年份"的条目:这类记录入库时写成
-    ``YYYY-01-01`` 占位(见 `upsert_item` 里对 published_at 的特例处理),
-    按字面比会被窗口起点切掉 —— 明明是今年的论文,却永远拿不到分数,
-    在收件箱里显示成"未评分"。实测有 2 条卡在这里。
+    除了按字面日期比较,还要捞回两类条目:
+
+    1. "只知道年份"的:入库时写成 ``YYYY-01-01`` 占位(见 `upsert_item` 里对
+       published_at 的特例处理),按字面比会被窗口起点切掉 —— 明明是今年的
+       论文,却永远拿不到分数,在收件箱里显示成"未评分"。实测有 2 条卡在这里。
+    2. **压根没有日期**的:published_at 为 NULL/空时任何日期比较都不成立,
+       这类条目既进不了排序窗口(不打分)也进不了规则过滤(不会被标 excluded),
+       于是永远以"未评分"挂在列表尾部。改用 created_at 兜底:新条目先被评
+       一轮分,随后跟着 created_at 自然老化退出窗口,旧分数照旧保留。
 
     宁可多捞这一点,也不要让条目静默地永远不被评价。
     """
     p = f"{alias}.published_at" if alias else "published_at"
+    c = f"{alias}.created_at" if alias else "created_at"
     return (f"(COALESCE({p},'') >= date('now', ?) "
-            f"OR ({p} LIKE '____-01-01' AND substr({p},1,4) = strftime('%Y','now')))")
+            f"OR ({p} LIKE '____-01-01' AND substr({p},1,4) = strftime('%Y','now')) "
+            f"OR (COALESCE({p},'') = '' AND COALESCE({c},'') >= date('now', ?)))")
 
 
 def _item_filters(*, kind: str | None, state: str | None,

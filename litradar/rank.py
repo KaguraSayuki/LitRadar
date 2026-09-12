@@ -411,7 +411,8 @@ def run(cfg: Config, *, days: int = 30, verbose: bool = True) -> dict:
             f"""SELECT i.* FROM item i
                WHERE i.kind='paper' AND {db.in_window('i')}
                ORDER BY i.published_at DESC""",
-            (f"-{days} days",),
+            # in_window 占两个 ?(没有 published_at 时回退比 created_at)
+            (f"-{days} days", f"-{days} days"),
         ).fetchall())
         stat["candidates"] = len(rows)
 
@@ -451,10 +452,11 @@ def run(cfg: Config, *, days: int = 30, verbose: bool = True) -> dict:
             ph = ",".join("?" for _ in kept_ids)
             conn.execute(
                 f"DELETE FROM score WHERE {window} AND item_id NOT IN ({ph})",
-                [f"-{days} days", *kept_ids],
+                [f"-{days} days", f"-{days} days", *kept_ids],
             )
         else:
-            conn.execute(f"DELETE FROM score WHERE {window}", [f"-{days} days"])
+            conn.execute(f"DELETE FROM score WHERE {window}",
+                         [f"-{days} days", f"-{days} days"])
         conn.commit()
 
         llm = DeepSeek(cfg.llm)
