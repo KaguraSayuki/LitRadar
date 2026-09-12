@@ -53,6 +53,7 @@ def test_老库里的脏刊名会被迁移(tmp_path):
                                       created_at, updated_at)
                     VALUES ('paper','doi:10.1/b','T','t',
                             'Organic &amp; Biomolecular Chemistry','crossref','x','x')""")
+    conn.execute("PRAGMA user_version = 0")      # 装成版本化之前的老库
     conn.commit()
     database._migrate(conn)
     conn.commit()

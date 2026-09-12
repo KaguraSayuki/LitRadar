@@ -197,6 +197,57 @@ def now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
+# ------------------------------------------------------------------ 迁移
+def _migrate_v1(conn: sqlite3.Connection) -> None:
+    """版本化之前积累的全部历史步骤。每步先探测再动手(幂等):
+    老库缺的表已经由 SCHEMA 按最新结构建好,不能对它们再加一次列。"""
+    import contextlib
+
+    # journal:洗掉历史遗留的 HTML 实体与换行(见 clean_journal)
+    for rid, j in conn.execute(
+            "SELECT id, journal FROM item WHERE journal IS NOT NULL").fetchall():
+        cj = clean_journal(j)
+        if cj != j:
+            conn.execute("UPDATE item SET journal=? WHERE id=?", (cj, rid))
+
+    # summary.title_zh
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(summary)")}
+    if cols and "title_zh" not in cols:
+        conn.execute("ALTER TABLE summary ADD COLUMN title_zh TEXT")
+
+    # item_state.excluded:规则过滤标记
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(item_state)")}
+    if cols and "excluded" not in cols:
+        conn.execute("ALTER TABLE item_state ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0")
+
+    # score:去掉 profile 列(单用户,这个维度是过度设计)。
+    # SQLite 改主键要重建表,所以走 建新表 -> 拷数据 -> 换名。
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(score)")}
+    if "profile" in cols:
+        with contextlib.suppress(sqlite3.OperationalError):
+            conn.executescript("""
+                CREATE TABLE score_migrated (
+                    item_id      INTEGER PRIMARY KEY
+                                 REFERENCES item(id) ON DELETE CASCADE,
+                    rule_score   REAL, coarse_score REAL, llm_score REAL,
+                    llm_reason   TEXT, llm_model    TEXT,
+                    final_score  REAL, ranked_at    TEXT
+                );
+                INSERT OR REPLACE INTO score_migrated
+                    SELECT item_id, rule_score, coarse_score, llm_score,
+                           llm_reason, llm_model, final_score, ranked_at
+                    FROM score;
+                DROP TABLE score;
+                ALTER TABLE score_migrated RENAME TO score;
+            """)
+
+
+# 迁移步骤按版本排列:下标 + 1 = 跑完这步之后的 user_version。
+# 加新迁移就在末尾追加一个函数,**同时把 SCHEMA 改成最新结构** ——
+# 新库只建 SCHEMA、不走这里。
+_MIGRATIONS = [_migrate_v1]
+SCHEMA_VERSION = len(_MIGRATIONS)
+
 # 已经跑过建表 + 迁移的库路径(进程级)。见 connect()
 _READY: set[str] = set()
 
@@ -241,55 +292,39 @@ class Database:
     def init(self) -> None:
         conn = self.connect()
         try:
+            # 全新库(还没有 item 表)由 SCHEMA 建出来就是最新结构:直接打上
+            # 最新版本号,历史迁移一步都不用跑。老库才按缺的版本逐步补。
+            fresh = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='item'"
+            ).fetchone()[0] == 0
             conn.executescript(SCHEMA)
             conn.executescript(FTS_TRIGGERS)
-            self._migrate(conn)
+            if fresh:
+                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            else:
+                self._migrate(conn)
             conn.commit()
         finally:
             conn.close()
 
     @staticmethod
     def _migrate(conn: sqlite3.Connection) -> None:
-        """轻量迁移:已存在的库就地升级,不动老数据。"""
-        import contextlib
+        """轻量迁移:已存在的库就地升级,不动老数据。
 
-        # journal:洗掉历史遗留的 HTML 实体与换行(见 clean_journal)
-        for rid, j in conn.execute(
-                "SELECT id, journal FROM item WHERE journal IS NOT NULL").fetchall():
-            cj = clean_journal(j)
-            if cj != j:
-                conn.execute("UPDATE item SET journal=? WHERE id=?", (cj, rid))
-
-        # summary.title_zh
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(summary)")}
-        if cols and "title_zh" not in cols:
-            conn.execute("ALTER TABLE summary ADD COLUMN title_zh TEXT")
-
-        # item_state.excluded:规则过滤标记
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(item_state)")}
-        if cols and "excluded" not in cols:
-            conn.execute("ALTER TABLE item_state ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0")
-
-        # score:去掉 profile 列(单用户,这个维度是过度设计)。
-        # SQLite 改主键要重建表,所以走 建新表 -> 拷数据 -> 换名。
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(score)")}
-        if "profile" in cols:
-            with contextlib.suppress(sqlite3.OperationalError):
-                conn.executescript("""
-                    CREATE TABLE score_migrated (
-                        item_id      INTEGER PRIMARY KEY
-                                     REFERENCES item(id) ON DELETE CASCADE,
-                        rule_score   REAL, coarse_score REAL, llm_score REAL,
-                        llm_reason   TEXT, llm_model    TEXT,
-                        final_score  REAL, ranked_at    TEXT
-                    );
-                    INSERT OR REPLACE INTO score_migrated
-                        SELECT item_id, rule_score, coarse_score, llm_score,
-                               llm_reason, llm_model, final_score, ranked_at
-                        FROM score;
-                    DROP TABLE score;
-                    ALTER TABLE score_migrated RENAME TO score;
-                """)
+        用 ``PRAGMA user_version`` 记着"已经升到哪一版",只补跑缺的步骤。
+        以前每个进程第一次 connect() 都把全部步骤跑一遍 —— 全表扫 item 洗刊名、
+        三次 PRAGMA table_info、试探 score 表重建 —— 每条 CLI 命令启动都白付
+        这笔钱,库越大越慢。现在已是最新版就一步不跑。
+        """
+        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        if version >= SCHEMA_VERSION:
+            return
+        for target, step in enumerate(_MIGRATIONS, start=1):
+            if version < target:
+                step(conn)
+                # 每一步各自盖章:步骤里的 executescript 会先提交前面的语句,
+                # 中途失败也不会让做完的步骤下次重跑
+                conn.execute(f"PRAGMA user_version = {target}")
 
 
 # ---------------------------------------------------------------- item 读写
