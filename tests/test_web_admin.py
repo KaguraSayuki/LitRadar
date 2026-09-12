@@ -72,3 +72,30 @@ def test_没有origin头的照常放行(client, monkeypatch):
     """curl / 定时脚本不带 Origin,不能被误伤(未设口令时也一样)。"""
     monkeypatch.delenv("LITRADAR_TOKEN", raising=False)
     assert client.post("/admin/run/rank").status_code == 200
+
+
+# ------------------------------------------------------------- 互斥锁(与 CLI 共用)
+
+def test_锁被占时返回409(client, tmp_path):
+    """回归:网页按钮直调 pipeline,曾经完全绕过 CLI 那把锁。
+
+    定时任务在跑时点一下,两份 enrich 会互抢 Semantic Scholar 的限流;
+    双击按钮也一样。锁是同一个文件,所以这里直接把它占住来模拟。
+    """
+    from litradar.lock import single_instance
+
+    with single_instance(tmp_path / "litradar.lock"):
+        r = client.post("/admin/run/rank", headers={"X-Token": TOKEN})
+    assert r.status_code == 409
+
+
+def test_锁用完就放开(client, tmp_path):
+    """跑完一轮后还能再跑 —— 别把锁文件留成永久的墓碑。"""
+    for _ in range(2):
+        assert client.post("/admin/run/rank",
+                           headers={"X-Token": TOKEN}).status_code == 200
+
+
+def test_未知阶段仍是400(client):
+    """加锁用的 try 不能把 HTTPException 一起吞掉。"""
+    assert client.post("/admin/run/nope", headers={"X-Token": TOKEN}).status_code == 400
