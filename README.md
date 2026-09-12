@@ -237,3 +237,7 @@ litradar/
 - [Crossref](https://www.crossref.org/)、[Semantic Scholar](https://www.semanticscholar.org/)、[OpenAlex](https://openalex.org/) 提供开放学术元数据
 - [easyScholar](https://www.easyscholar.cc/) 提供期刊等级数据
 - 排序与摘要由 [DeepSeek](https://www.deepseek.com/) 模型驱动
+
+## 许可证
+
+本项目基于 [MIT License](LICENSE) 开源。
