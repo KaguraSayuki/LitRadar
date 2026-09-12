@@ -108,7 +108,9 @@ def cmd_mail_test(cfg, args):
     print("  密码      : 已设置\n")
 
     try:
-        conn = imaplib.IMAP4_SSL(m.imap_host, m.imap_port)
+        # 带超时:服务器半挂时不要让体检命令一直吊在这里
+        conn = imaplib.IMAP4_SSL(m.imap_host, m.imap_port,
+                                 timeout=mail.IMAP_TIMEOUT)
     except Exception as e:  # noqa: BLE001
         print(f"  ❌ 连接失败: {type(e).__name__}: {e}")
         return 1
