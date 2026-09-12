@@ -1,7 +1,8 @@
-"""``/admin/run/*`` 的准入测试。
+"""网页写入口的准入测试:``/admin/run/*`` 与 ``/item/{id}/action``。
 
-这个端点是整个应用里唯一会真的花钱的地方(DeepSeek 额度),所以它的闸门
-要单独测:口令、跨源。其余页面只读,漏了最多是泄露标题。
+前者是整个应用里唯一会真的花钱的地方(DeepSeek 额度),所以它的闸门
+要单独测:口令、跨源。后者的输入来自表单,得把白名单之外的值挡在库外。
+其余页面只读,漏了最多是泄露标题。
 """
 from __future__ import annotations
 
@@ -99,3 +100,32 @@ def test_锁用完就放开(client, tmp_path):
 def test_未知阶段仍是400(client):
     """加锁用的 try 不能把 HTTPException 一起吞掉。"""
     assert client.post("/admin/run/nope", headers={"X-Token": TOKEN}).status_code == 400
+
+
+# ------------------------------------------------------------- 反馈 action
+def _add_item(cfg, title: str = "T") -> int:
+    from litradar import db
+
+    conn = db.Database(cfg.db_file).connect()
+    iid, _ = db.upsert_item(conn, {
+        "kind": "paper", "dedup_key": f"doi:10.1/{title}", "doi": f"10.1/{title}",
+        "title": title, "title_norm": title.lower(), "source": "test",
+    })
+    conn.commit()
+    conn.close()
+    return iid
+
+
+def test_未知action返回400(client):
+    """回归:白名单之外的 action 以前会原样写进 feedback 表。"""
+    iid = _add_item(webapp.get_cfg())
+    r = client.post(f"/item/{iid}/action", data={"action": "nope"},
+                    headers={"X-Token": TOKEN})
+    assert r.status_code == 400
+
+
+def test_合法action照常放行(client):
+    iid = _add_item(webapp.get_cfg())
+    r = client.post(f"/item/{iid}/action", data={"action": "star"},
+                    headers={"X-Token": TOKEN})
+    assert r.status_code == 200

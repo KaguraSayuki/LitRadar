@@ -767,7 +767,16 @@ def set_excluded(conn: sqlite3.Connection, item_ids: list[int], excluded: bool =
                      (1 if excluded else 0, iid))
 
 
+# 用户反馈的全部合法动作。set_action 之外没有别的写入口。
+ACTIONS = frozenset({"star", "unstar", "read", "unread", "archive", "ignore", "unignore"})
+
+
 def set_action(conn: sqlite3.Connection, item_id: int, action: str) -> None:
+    # action 来自表单的任意字符串。以前未知值不改状态,却照样原样写进
+    # feedback 表(统计页按 action 分组、精排 prompt 取反馈样本都读它),
+    # 所以在这里就拒绝,别让垃圾落库。
+    if action not in ACTIONS:
+        raise ValueError(f"未知操作: {action!r}")
     conn.execute("INSERT OR IGNORE INTO item_state (item_id) VALUES (?)", (item_id,))
     if action in ("star", "unstar"):
         conn.execute("UPDATE item_state SET starred=? WHERE item_id=?",
