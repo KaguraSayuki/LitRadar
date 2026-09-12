@@ -42,7 +42,16 @@
 </main>
 
 <footer class="footer">
-  LitRadar,个人自用。X-MOL 订阅邮件与 Crossref 检索汇集,Semantic Scholar 补摘要,DeepSeek 精排与中文摘要。
+  {# 页脚的职责是**署名**,不是讲实现。所以只列数据来源,外加一条 AI 生成声明
+     (中文标题/摘要是模型写的,不声明容易被误当成原文)。
+     之前那版写成了"X-MOL 邮件与 Crossref 检索汇集,Semantic Scholar 补摘要,
+     DeepSeek 精排"—— 既是废话(单用户,谁不知道自己在用什么),又已经过时
+     (Crossref 检索早关了,现在是拿它做元数据;滚雪球和 easyScholar 完全没提)。 #}
+  <p class="footer__src">
+    数据来源 X-MOL 订阅 · Crossref · Semantic Scholar · easyScholar
+    <a class="footer__link" href="/stats#run">运行记录</a>
+  </p>
+  <p class="footer__note">中文标题与结构化摘要由 DeepSeek 生成,请以原文为准。</p>
 </footer>
 
 {# 手机底部标签栏(桌面隐藏) #}
