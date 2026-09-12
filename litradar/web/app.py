@@ -149,6 +149,26 @@ def require_token(request: Request) -> None:
         )
 
 
+def require_same_origin(request: Request) -> None:
+    """拒绝浏览器发来的跨源写请求 —— 口令之外的第二道闸。
+
+    为什么需要:``/admin/run/*`` 是不带 CSRF token 的简单 POST。就算没设口令
+    (默认只绑 127.0.0.1,看起来"外面进不来"),你在浏的任意网页都能往
+    ``http://127.0.0.1:8090/admin/run/all`` 发一个无需预检的跨源 POST,
+    照样把 DeepSeek 额度烧掉。
+
+    浏览器在非 GET 请求上一定会带 Origin,且这个头改不了;curl / 定时脚本
+    不带,所以"没有 Origin 就放行"不会挡住正常的自动化。
+    """
+    origin = request.headers.get("origin")
+    if not origin:
+        return
+    from urllib.parse import urlparse
+
+    if urlparse(origin).netloc != request.headers.get("host", ""):
+        raise HTTPException(403, "跨源请求被拒绝")
+
+
 # 记住口令用的 cookie 名。这不是"登录会话",只是省得每次点链接都重带 ?k=。
 COOKIE_NAME = "litradar_k"
 
@@ -465,7 +485,11 @@ def item_action(request: Request, item_id: int, action: str = Form(...)):
 
 
 @app.post("/admin/run/{stage}")
-def admin_run(stage: str, days: int = 0):
+def admin_run(request: Request, stage: str, days: int = 0):
+    # 这里是唯一会真的花钱的入口(DeepSeek 额度),两道闸一个都不能少。
+    # 前端 fetch 是同源的,cookie 会自动带上,static/app.js 无需改动。
+    require_token(request)
+    require_same_origin(request)
     cfg = get_cfg()
     # days=0 表示"用配置里的统一窗口"。之前这里默认 30,而抓取窗口是 180+,
     # 导致网页点"排序"只覆盖最近一个月,更早的条目永远是"未评分"。
