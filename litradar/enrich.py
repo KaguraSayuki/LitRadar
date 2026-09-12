@@ -19,7 +19,17 @@ from .sources import crossref_search, easyscholar, openalex_search, semanticscho
 
 
 def _merge(doi: str, cr: dict | None, s2: dict | None, oa: dict | None) -> dict | None:
-    """把三个来源合并成 {meta, patch}。摘要优先级 S2 > OpenAlex > Crossref。"""
+    """把三个来源合并成 {meta, patch, overwrite}。摘要优先级 S2 > OpenAlex > Crossref。
+
+    字段分两类,语义不同:
+      * ``patch``     —— **只填空**:库里已有值就不动。摘要属于这类(哪个源先
+                        给到就用哪个,没有高下之分);S2 的刊名也属于这类,
+                        它给的常是缩写。
+      * ``overwrite`` —— **直接覆盖**:Crossref 的刊名/ISSN/作者最规范,来了
+                        就该盖掉旧值。以前这些也只填空,于是邮件带进来的
+                        "Org. Lett." 永远换不成全称,按刊名查 easyScholar
+                        期刊等级就一直查不到。
+    """
     if not any((cr, s2, oa)):
         return None
 
@@ -28,6 +38,7 @@ def _merge(doi: str, cr: dict | None, s2: dict | None, oa: dict | None) -> dict 
         "openalex_id": None, "openalex_json": None, "crossref_json": None,
     }
     patch: dict = {}
+    overwrite: dict = {}
 
     if s2:
         if s2.get("abstract"):
@@ -38,7 +49,7 @@ def _merge(doi: str, cr: dict | None, s2: dict | None, oa: dict | None) -> dict 
             meta["oa_url"] = s2["oa_url"]
             meta["is_oa"] = 1
         if s2.get("journal"):
-            patch.setdefault("journal", s2["journal"])
+            patch.setdefault("journal", db.clean_journal(s2["journal"]))
 
     if oa:
         meta.update(
@@ -55,17 +66,27 @@ def _merge(doi: str, cr: dict | None, s2: dict | None, oa: dict | None) -> dict 
         meta["crossref_json"] = json.dumps(cr, ensure_ascii=False, default=str)
         if cr.get("abstract") and not patch.get("abstract"):
             patch["abstract"] = cr["abstract"]
-        # 期刊全称、ISSN、作者以 Crossref 为准(最规范)
+        # 期刊全称、ISSN、作者以 Crossref 为准(最规范),所以进 overwrite。
+        # 刊名要洗:Crossref 的 container-title 带 HTML 实体和换行,以前只有
+        # 入库口 upsert_item 洗,富化直写会把脏名字带回库里。
         if cr.get("journal"):
-            patch["journal"] = cr["journal"]
+            overwrite["journal"] = db.clean_journal(cr["journal"])
+            patch.pop("journal", None)          # 同一字段别在 SET 里出现两次
         if cr.get("issn"):
-            patch["issn"] = cr["issn"]
+            overwrite["issn"] = cr["issn"]
         if cr.get("authors"):
-            patch["authors"] = cr["authors"]
+            overwrite["authors"] = cr["authors"]
 
-    return {"meta": meta, "patch": patch}
+    return {"meta": meta, "patch": patch, "overwrite": overwrite}
 
 
+
+
+def _sql_value(key: str, value):
+    """authors 在库里是 JSON 文本,其余字段原样写。"""
+    if key == "authors" and isinstance(value, list):
+        return json.dumps(value, ensure_ascii=False)
+    return value
 
 
 def _pending(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
@@ -192,9 +213,15 @@ def run(cfg: Config, *, limit: int = 300, verbose: bool = True) -> dict:
                 continue
             db.save_enrichment(conn, iid, res["meta"])
             sets, vals = [], []
+            # overwrite:Crossref 的规范字段,非空就直接盖掉旧值
+            for k, v in res["overwrite"].items():
+                v = _sql_value(k, v)
+                if v not in (None, "", []):
+                    sets.append(f"{k} = ?")
+                    vals.append(v)
+            # patch:只在旧值为空时填,不动用户/更早来源已有的内容
             for k, v in res["patch"].items():
-                if k == "authors" and isinstance(v, list):
-                    v = json.dumps(v, ensure_ascii=False)
+                v = _sql_value(k, v)
                 if v not in (None, "", []):
                     sets.append(f"{k} = COALESCE(NULLIF({k}, ''), ?)")
                     vals.append(v)
