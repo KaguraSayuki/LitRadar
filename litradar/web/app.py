@@ -311,18 +311,6 @@ def week(request: Request):
         request, heads=heads, rest=rest, page="week"))
 
 
-@app.get("/patents", response_class=HTMLResponse)
-def patents(request: Request):
-    require_token(request)
-    conn = _conn()
-    try:
-        rows = _decorate(db.get_items(conn, kind="patent", state=None, limit=200), conn)
-    finally:
-        conn.close()
-    return templates.TemplateResponse(request, "patents.html", ctx(
-        request, items=rows, page="patents"))
-
-
 @app.get("/search", response_class=HTMLResponse)
 def search(request: Request, q: str = "", page: int = 1):
     require_token(request)
