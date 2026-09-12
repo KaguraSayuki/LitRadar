@@ -174,7 +174,8 @@ def run(cfg: Config, *, limit: int = 200, days: int = 30, verbose: bool = True,
                   AND {db.in_window('i')}
                 ORDER BY fs DESC, i.published_at DESC
                 LIMIT ?""",
-            (f"-{days} days", limit),
+            # in_window 占两个 ?(没有 published_at 时回退比 created_at)
+            (f"-{days} days", f"-{days} days", limit),
         ).fetchall())
         stat["pending"] = len(rows)
 

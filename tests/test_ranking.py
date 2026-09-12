@@ -171,11 +171,38 @@ def test_时间窗捞回只有年份的条目(tmp_path):
     add("old-exact", f"{old_year}-06-15")
 
     sql = f"SELECT i.doi FROM item i WHERE i.kind='paper' AND {db.in_window('i')}"
-    got = {r[0].split("/")[-1] for r in conn.execute(sql, ("-200 days",))}
+    got = {r[0].split("/")[-1] for r in conn.execute(sql, ("-200 days", "-200 days"))}
     assert "placeholder-now" in got, "今年只有年份的条目必须进窗"
     assert "placeholder-old" not in got, "往年的占位日期不该被捞回来"
     assert "old-exact" not in got
     assert db.in_window("").startswith("(COALESCE(published_at"), "无别名也要能用"
+
+
+def test_时间窗按created_at捞回无日期条目(tmp_path):
+    """回归:published_at 为 NULL/空时任何日期比较都不成立,这类条目既不打分
+    也不会被规则标 excluded,只能永远以"未评分"挂在列表尾部。
+    改用 created_at 兜底,并跟着 created_at 自然老化退出窗口。"""
+    database = db.Database(tmp_path / "t.db")
+    database.init()
+    conn = database.connect()
+
+    def add(key, pub):
+        iid, _ = db.upsert_item(conn, {
+            "kind": "paper", "dedup_key": f"doi:10.1/{key}", "doi": f"10.1/{key}",
+            "title": key, "title_norm": key, "published_at": pub, "source": "test"})
+        return iid
+
+    add("no-date-fresh", None)
+    add("no-date-empty", "")
+    stale = add("no-date-stale", None)
+    conn.execute("UPDATE item SET created_at = '2019-01-01T00:00:00+08:00' WHERE id = ?",
+                 (stale,))
+
+    sql = f"SELECT i.doi FROM item i WHERE i.kind='paper' AND {db.in_window('i')}"
+    got = {r[0].split("/")[-1] for r in conn.execute(sql, ("-30 days", "-30 days"))}
+    assert "no-date-fresh" in got, "刚入库的无日期条目必须能被评一轮分"
+    assert "no-date-empty" in got, "空字符串和 NULL 一样要兜底"
+    assert "no-date-stale" not in got, "老条目应随 created_at 自然退出窗口"
 
 
 def test_反馈记录(tmp_path):
