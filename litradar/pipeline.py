@@ -8,7 +8,7 @@ from typing import Any
 
 from . import db, enrich, rank, summarize
 from .config import Config
-from .normalize import title_norm
+from .normalize import normalize_doi, title_norm
 from .rank import load_interests
 from .sources import crossref_search, mail, openalex_search, semanticscholar, xmol_email
 
@@ -18,10 +18,22 @@ def _prepare(data: dict) -> dict | None:
     """补 dedup_key / title_norm,缺 DOI 时退化为标题键。"""
     if not data.get("title"):
         return None
+    # 所有来源都经过这里再入库。DOI 的大小写不是语义的一部分，且来源
+    # 对 ``dedup_key`` 的填写并不一致（S2 以前会保留原始大小写），所以
+    # 以归一化后的 DOI 重新生成 key，而不是只修 data["doi"]。
+    doi = normalize_doi(data.get("doi"))
+    if doi:
+        data["doi"] = doi
+        data["dedup_key"] = f"doi:{doi}"
+    elif isinstance(data.get("dedup_key"), str) \
+            and data["dedup_key"].lower().startswith("doi:"):
+        doi = normalize_doi(data["dedup_key"])
+        if doi:
+            data["doi"] = doi
+            data["dedup_key"] = f"doi:{doi}"
     if not data.get("title_norm"):
         data["title_norm"] = title_norm(data["title"])
     if not data.get("dedup_key"):
-        doi = data.get("doi")
         data["dedup_key"] = (f"doi:{doi}" if doi
                              else f"title:{data['title_norm'][:120]}")
     return data
@@ -39,7 +51,7 @@ def _store(conn: sqlite3.Connection, data: dict) -> tuple[int, bool]:
             "is_oa": extras.get("_is_oa"),
             "oa_url": extras.get("_oa_url"),
             "openalex_id": extras.get("_openalex_id"),
-        })
+        }, partial=True)
     return iid, created
 
 
@@ -51,6 +63,97 @@ def ingest_mail(cfg: Config, *, verbose: bool = True) -> dict:
             "mode": cfg.mail.mode}
     started = db.now()
     try:
+        def ingest_records(records, meta, raw: bytes, *, mid: str,
+                           live_msg=None) -> None:
+            """在一个事务中写入一封邮件；live_msg 存在时成功后才 ack。"""
+            if not records:
+                # 不是 X-MOL 订阅邮件:仍留档,但不入库
+                return
+            dup = conn.execute(
+                "SELECT id, processed_at FROM raw_email WHERE message_id = ?", (mid,)
+            ).fetchone()
+            # processed_at 是在全部 item 成功后、同一个事务里写入的。老版本
+            # 没有这个列/值的 raw_email 会再处理一次，从而修复“raw 已提交、
+            # item 只落了一半”的历史状态；不按 source_ref 计数，因为同一 DOI
+            # 可能已由别的来源入库，或一封邮件可能包含重复 DOI。
+            complete = bool(dup and dup[1])
+            if complete:
+                if verbose:
+                    print(f"  跳过已处理邮件 {mid}")
+                if live_msg is not None:
+                    mail.acknowledge(cfg.mail, live_msg)
+                return
+
+            # raw_email 是“处理完成”标记的一部分。它与该邮件的所有 item
+            # 共用一个 savepoint，任何一条失败都会撤销整封邮件的写入；
+            # savepoint 结束后才提交，外部邮件确认仍在提交之后。
+            stat["records"] += len(records)
+            message_new = message_updated = 0
+            conn.execute("SAVEPOINT ingest_mail_message")
+            try:
+                conn.execute(
+                    """INSERT OR IGNORE INTO raw_email
+                       (message_id, received_at, subject, raw, parsed_at, processed_at,
+                        parse_version, items_found)
+                       VALUES (?,?,?,?,?,?,?,?)""",
+                    (mid, meta.get("received_at"), meta.get("subject"), raw,
+                     db.now(), None, xmol_email.PARSE_VERSION, len(records)),
+                )
+
+                for rec in records:
+                    _, created = _store(conn, xmol_email.to_item_data(rec, source_ref=mid))
+                    if created:
+                        message_new += 1
+                    else:
+                        message_updated += 1
+                conn.execute("UPDATE raw_email SET processed_at=? WHERE message_id=?",
+                             (db.now(), mid))
+                conn.execute("RELEASE SAVEPOINT ingest_mail_message")
+            except Exception as e:  # noqa: BLE001
+                # rollback before logging/continuing: a later run_log commit must
+                # never accidentally commit a partially processed email.
+                conn.execute("ROLLBACK TO SAVEPOINT ingest_mail_message")
+                conn.execute("RELEASE SAVEPOINT ingest_mail_message")
+                stat["errors"] += 1
+                if verbose:
+                    title = records[0].title[:50] if records else mid[:50]
+                    print(f"  [warn] 入库失败 {title}: {e}")
+                # No acknowledge: the mail source can present it again.
+                return
+
+            # 只有所有条目已在 savepoint 中成功后才确认邮件。若 commit 或
+            # acknowledge 抛错，外层异常处理会 rollback/留待下次重试。
+            stat["new"] += message_new
+            stat["updated"] += message_updated
+            conn.commit()
+            if live_msg is not None:
+                mail.acknowledge(cfg.mail, live_msg)
+            if verbose:
+                print(f"  邮件 {mid[:40]}… -> {len(records)} 条")
+
+        # 迁移前版本在写 raw_email 后就提交，且 IMAP 可能已经把邮件标为
+        # Seen/归档，之后不会再从 iter_messages 返回。先离线重放所有尚未
+        # processed_at 的原文；成功后才把完成标记写回，同样不需要外部 ack。
+        pending = conn.execute(
+            "SELECT message_id, received_at, subject, raw FROM raw_email "
+            "WHERE processed_at IS NULL ORDER BY id"
+        ).fetchall()
+        for old in pending:
+            stat["messages"] += 1
+            try:
+                records, meta = xmol_email.parse_bytes(old["raw"])
+            except Exception as e:  # noqa: BLE001
+                stat["errors"] += 1
+                if verbose:
+                    print(f"  [warn] 历史邮件重放解析失败 {old['message_id']}: {e}")
+                continue
+            replay_meta = {
+                "message_id": old["message_id"],
+                "received_at": old["received_at"] or meta.get("received_at"),
+                "subject": old["subject"] or meta.get("subject"),
+            }
+            ingest_records(records, replay_meta, old["raw"], mid=old["message_id"])
+
         for msg in mail.iter_messages(cfg.mail):
             stat["messages"] += 1
             try:
@@ -66,41 +169,14 @@ def ingest_mail(cfg: Config, *, verbose: bool = True) -> dict:
                 continue
 
             mid = meta.get("message_id") or msg.source_ref
-            dup = conn.execute(
-                "SELECT id FROM raw_email WHERE message_id = ?", (mid,)
-            ).fetchone()
-            if dup:
-                if verbose:
-                    print(f"  跳过已处理邮件 {mid}")
-                mail.acknowledge(cfg.mail, msg)
-                continue
-
-            conn.execute(
-                """INSERT OR IGNORE INTO raw_email
-                   (message_id, received_at, subject, raw, parsed_at, parse_version, items_found)
-                   VALUES (?,?,?,?,?,?,?)""",
-                (mid, meta.get("received_at"), meta.get("subject"), msg.raw,
-                 db.now(), xmol_email.PARSE_VERSION, len(records)),
-            )
-            conn.commit()
-
-            for rec in records:
-                stat["records"] += 1
-                try:
-                    _, created = _store(conn, xmol_email.to_item_data(rec, source_ref=mid))
-                    stat["new" if created else "updated"] += 1
-                except Exception as e:  # noqa: BLE001
-                    stat["errors"] += 1
-                    if verbose:
-                        print(f"  [warn] 入库失败 {rec.title[:50]}: {e}")
-            conn.commit()
-            mail.acknowledge(cfg.mail, msg)
-            if verbose:
-                print(f"  邮件 {mid[:40]}… -> {len(records)} 条")
+            ingest_records(records, meta, msg.raw, mid=mid, live_msg=msg)
 
         db.log_run(conn, "ingest_mail", "ok", stat, started_at=started)
         conn.commit()
     except Exception as e:  # noqa: BLE001
+        # The failed transaction may contain a raw_email row or partial item;
+        # discard it before recording the diagnostic run log.
+        conn.rollback()
         db.log_run(conn, "ingest_mail", "failed", stat, error=str(e), started_at=started)
         conn.commit()
         raise
@@ -280,7 +356,7 @@ def ingest_keyword_search(cfg: Config, *, verbose: bool = True) -> dict:
         seen: set[str] = set()
         found: list[dict] = []
         for data in raw:
-            key = (data.get("doi") or "").lower() or (data.get("title") or "")
+            key = normalize_doi(data.get("doi")) or title_norm(data.get("title"))
             if not key or key in seen:
                 continue
             seen.add(key)

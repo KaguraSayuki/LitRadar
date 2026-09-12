@@ -1,6 +1,7 @@
 """配置加载。所有密钥只从环境变量 / .env 读,不写进 config.yaml。"""
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -229,6 +230,50 @@ def _build(cls, data: dict | None):
     return cls(**{k: v for k, v in data.items() if k in valid})
 
 
+def _ranking_config(data: dict | None) -> RankingConfig:
+    """读取公开的 weights 映射,同时兼容早期平铺的 w_* 字段。"""
+    if data is None:
+        return RankingConfig()
+    if not isinstance(data, dict):
+        raise ValueError("ranking 必须是 YAML 映射")
+    valid = set(RankingConfig.__dataclass_fields__) | {"weights"}
+    unknown = set(data) - valid
+    if unknown:
+        raise ValueError(f"未知 ranking 配置项: {', '.join(sorted(map(str, unknown)))}")
+
+    weights = data.get("weights")
+    if weights is None:
+        weights = {}
+    if not isinstance(weights, dict):
+        raise ValueError("ranking.weights 必须是包含 llm/coarse/rule 的映射")
+    unknown = set(weights) - {"llm", "coarse", "rule"}
+    if unknown:
+        raise ValueError(f"未知 ranking.weights 配置项: {', '.join(sorted(map(str, unknown)))}")
+
+    values = {k: v for k, v in data.items() if k != "weights"}
+    for key, value in weights.items():
+        field_name = f"w_{key}"
+        if field_name in values and values[field_name] != value:
+            raise ValueError(f"ranking.{field_name} 与 ranking.weights.{key} 冲突")
+        values[field_name] = value
+    cfg = RankingConfig(**values)
+    for key in ("llm", "coarse", "rule"):
+        value = getattr(cfg, f"w_{key}")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"ranking.weights.{key} 必须是非负有限数值")
+        try:
+            value = float(value)
+        except OverflowError as e:
+            raise ValueError(f"ranking.weights.{key} 必须是非负有限数值") from e
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"ranking.weights.{key} 必须是非负有限数值")
+        setattr(cfg, f"w_{key}", value)
+    total = cfg.w_llm + cfg.w_coarse + cfg.w_rule
+    if not math.isfinite(total) or total <= 0:
+        raise ValueError("ranking.weights 总和必须是大于 0 的有限数值")
+    return cfg
+
+
 def load_config(path: str | Path | None = None) -> Config:
     """从 config.yaml 加载;文件不存在时全部走默认值。"""
     cfg_path = _expand(path or os.environ.get("LITRADAR_CONFIG", "config.yaml"))
@@ -241,7 +286,7 @@ def load_config(path: str | Path | None = None) -> Config:
         llm=_build(LLMConfig, raw.get("llm")),
         mail=_build(MailConfig, raw.get("mail")),
         sources=_build(SourceConfig, raw.get("sources")),
-        ranking=_build(RankingConfig, raw.get("ranking")),
+        ranking=_ranking_config(raw.get("ranking")),
         journal_rank=_build(JournalRankConfig, raw.get("journal_rank")),
     )
 

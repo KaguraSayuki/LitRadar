@@ -1,6 +1,7 @@
 """结构化中文摘要 + 中文标题翻译。带数字核验,防止 LLM 编造实验数据。"""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -69,6 +70,11 @@ _FIELDS = ("one_liner", "problem", "method", "key_results", "limitation", "relev
 
 def _numbers(text: str) -> set[str]:
     return set(_NUM_RE.findall(text or ""))
+
+
+def _abstract_hash(abstract: str | None) -> str:
+    """记录生成时实际读取的原文,不把一次元数据刷新误当成摘要变化。"""
+    return hashlib.sha256((abstract or "").encode("utf-8")).hexdigest()
 
 
 def verify_numbers(summary: dict, abstract: str) -> dict:
@@ -150,22 +156,25 @@ def run(cfg: Config, *, limit: int = 200, days: int = 30, verbose: bool = True,
 
     database = db.Database(cfg.db_file)
     conn = database.connect()
+    conn.create_function("litradar_abstract_hash", 1, _abstract_hash, deterministic=True)
     started = db.now()
     try:
-        # 待处理 = 从没做过摘要的
-        #        + 摘要做在富化之前的(那会儿还没摘要,总结质量差,现在有摘要了要重做)
-        # force 时全部重做。
-        if force:
-            where = "1=1"
-        else:
-            where = """(
-                su.item_id IS NULL
-                OR (e.enriched_at > su.created_at
-                    AND i.abstract IS NOT NULL AND i.abstract <> ''
-                    AND su.depth = 'brief')
-            )"""
+        # 新摘要按原文指纹判断过期:包括无原文→有原文,也包括同一秒内补齐。
+        # 历史摘要没有指纹,用富化时间或旧的无摘要占位内容恢复一次;
+        # 成功重做后会保存指纹,之后仅引用数等元数据变化不会再触发 LLM。
+        stale = """(
+            (su.abstract_hash IS NOT NULL
+             AND su.abstract_hash <> litradar_abstract_hash(i.abstract))
+            OR (su.abstract_hash IS NULL
+                AND COALESCE(i.abstract, '') <> ''
+                AND (e.enriched_at > su.created_at
+                     OR (su.depth = 'deep' AND su.problem = '摘要未提及'
+                         AND su.method = '摘要未提及' AND su.key_results = '摘要未提及'
+                         AND su.limitation = '摘要未提及')))
+        )"""
+        where = "1=1" if force else f"(su.item_id IS NULL OR {stale})"
         rows = list(conn.execute(
-            f"""SELECT i.*, COALESCE(sc.final_score,-1) AS fs
+            f"""SELECT i.*, COALESCE(sc.final_score,-1) AS fs, su.depth AS depth
                 FROM item i
                 LEFT JOIN summary          su ON su.item_id = i.id
                 LEFT JOIN score            sc ON sc.item_id = i.id
@@ -185,19 +194,26 @@ def run(cfg: Config, *, limit: int = 200, days: int = 30, verbose: bool = True,
         # pending 上,沿排名一路下漂 —— "前 N 篇深度摘要"名不副实。
         deep_n = cfg.llm.deep_summary_top_n
         top_rows = list(conn.execute(
-            f"""SELECT i.*, COALESCE(sc.final_score,-1) AS fs, su.depth AS depth
+            f"""SELECT i.*, COALESCE(sc.final_score,-1) AS fs, su.depth AS depth,
+                       {stale} AS summary_stale
                 FROM item i
                 LEFT JOIN score   sc ON sc.item_id = i.id
                 LEFT JOIN summary su ON su.item_id = i.id
+                LEFT JOIN item_enrichment e ON e.item_id = i.id
                 WHERE i.kind='paper' AND {db.in_window('i')}
                 ORDER BY fs DESC, i.published_at DESC
                 LIMIT ?""",
             (f"-{days} days", f"-{days} days", deep_n),
         ).fetchall()) if deep_n > 0 else []
-        # 前 N 名里**还没有**深度摘要的(没摘要或只有 brief)才需要做;
-        # force 时照旧全部重做。
-        heads = top_rows if force else [r for r in top_rows if r["depth"] != "deep"]
+        # 前 N 名补深度摘要或刷新旧结果。此前已有 deep 的条目即使掉出前 N,
+        # 原文更新后也按 deep 重做,不能用 brief 覆盖掉已有方法/结果等字段。
+        heads = [r for r in top_rows
+                 if force or r["depth"] != "deep" or r["summary_stale"]]
         head_ids = {int(r["id"]) for r in heads}
+        for r in rows:
+            if r["depth"] == "deep" and int(r["id"]) not in head_ids:
+                heads.append(r)
+                head_ids.add(int(r["id"]))
         # 其余 pending 走 brief,但要去掉已经进 heads 的,别同一轮做两遍
         rest = [r for r in rows if int(r["id"]) not in head_ids]
 
@@ -207,7 +223,8 @@ def run(cfg: Config, *, limit: int = 200, days: int = 30, verbose: bool = True,
                 print(f"  深度摘要 #{r['id']}: {r['title'][:56]}…")
             try:
                 data = summarize_one(r, prof, llm)
-                db.save_summary(conn, int(r["id"]), data, "deep", cfg.llm.model)
+                db.save_summary(conn, int(r["id"]), data, "deep", cfg.llm.model,
+                                abstract_hash=_abstract_hash(r["abstract"]))
                 conn.commit()
                 stat["deep"] += 1
             except LLMError as e:
@@ -227,7 +244,8 @@ def run(cfg: Config, *, limit: int = 200, days: int = 30, verbose: bool = True,
             for r in chunk:
                 iid = int(r["id"])
                 if iid in brief:
-                    db.save_summary(conn, iid, brief[iid], "brief", cfg.llm.model)
+                    db.save_summary(conn, iid, brief[iid], "brief", cfg.llm.model,
+                                    abstract_hash=_abstract_hash(r["abstract"]))
                     stat["brief"] += 1
             conn.commit()
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..http import get_json
-from ..normalize import days_ago, parse_date
+from ..normalize import days_ago, normalize_doi, parse_date
 
 BASE = "https://api.openalex.org"
 
@@ -27,7 +27,7 @@ def deinvert(inverted: dict[str, list[int]] | None) -> str | None:
 
 
 def _work_to_item(w: dict, source: str = "openalex") -> dict | None:
-    doi = (w.get("doi") or "").replace("https://doi.org/", "") or None
+    doi = normalize_doi(w.get("doi"))
     title = w.get("title") or w.get("display_name")
     if not title:
         return None

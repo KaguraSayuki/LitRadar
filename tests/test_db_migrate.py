@@ -43,6 +43,12 @@ def _old_db(path: Path) -> None:
             cited_by_count INTEGER, is_oa INTEGER, oa_url TEXT, openalex_id TEXT,
             openalex_json TEXT, crossref_json TEXT, enriched_at TEXT
         );
+        DROP TABLE raw_email;
+        CREATE TABLE raw_email (
+            id INTEGER PRIMARY KEY, message_id TEXT UNIQUE, received_at TEXT,
+            subject TEXT, raw BLOB NOT NULL, parsed_at TEXT,
+            parse_version INTEGER DEFAULT 0, items_found INTEGER DEFAULT 0
+        );
         DROP TABLE score;
         CREATE TABLE score (
             profile TEXT NOT NULL DEFAULT 'default',
@@ -77,8 +83,10 @@ def test_老库升级到最新版(tmp_path):
     assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
     assert "excluded" in _cols(conn, "item_state")
     assert "title_zh" in _cols(conn, "summary")
+    assert "abstract_hash" in _cols(conn, "summary")
     assert "profile" not in _cols(conn, "score")
     assert "abstract_attempts" in _cols(conn, "item_enrichment")
+    assert "processed_at" in _cols(conn, "raw_email")
     assert conn.execute("SELECT final_score FROM score WHERE item_id=1").fetchone()[0] == 77.5
     assert conn.execute("SELECT journal FROM item").fetchone()[0] == \
         "Organic & Biomolecular Chemistry"
@@ -114,4 +122,92 @@ def test_已是最新版时迁移不再碰数据(tmp_path):
     conn.set_trace_callback(None)
 
     assert seen == ["PRAGMA user_version"], seen
+    conn.close()
+
+
+def test_混合大小写DOI迁移合并关联数据(tmp_path):
+    """合并重复条目时，用户反馈/评分/摘要/富化都跟到保留项。"""
+    database = db.Database(tmp_path / "dupe.db")
+    conn = database.connect()
+    # 直接写入历史形态，绕过当前 upsert 的 canonicalization。
+    for doi, title in (("10.9/ABC", "A"), ("10.9/abc", "B")):
+        conn.execute(
+            """INSERT INTO item(kind, dedup_key, doi, title, title_norm, abstract,
+               source, created_at, updated_at)
+               VALUES ('paper', ?, ?, ?, ?, ?, 'test', '2026-01-01', '2026-01-01')""",
+            (f"doi:{doi}", doi, title, title.lower(), "longer abstract" if title == "B" else None),
+        )
+    first, second = [r[0] for r in conn.execute("SELECT id FROM item ORDER BY id")]
+    conn.execute("INSERT INTO item_state(item_id) VALUES (?)", (first,))
+    conn.execute("INSERT INTO item_state(item_id) VALUES (?)", (second,))
+    conn.execute("UPDATE item_state SET starred=1 WHERE item_id=?", (first,))
+    conn.execute("UPDATE item_state SET ignored=1, state='read' WHERE item_id=?", (first,))
+    conn.execute("UPDATE item_state SET excluded=1 WHERE item_id=?", (second,))
+    conn.execute("INSERT INTO feedback(item_id, action, created_at) VALUES (?,?,?)",
+                 (first, "star", "2026-01-01T00:00:00"))
+    conn.execute("INSERT INTO feedback(item_id, action, created_at) VALUES (?,?,?)",
+                 (second, "unstar", "2026-01-02T00:00:00"))
+    conn.execute("INSERT INTO feedback(item_id, action, created_at) VALUES (?,?,?)",
+                 (first, "ignore", "2026-01-01T00:00:00"))
+    conn.execute("INSERT INTO feedback(item_id, action, created_at) VALUES (?,?,?)",
+                 (second, "unignore", "2026-01-02T00:00:01"))
+    conn.execute("INSERT INTO feedback(item_id, action, created_at) VALUES (?,?,?)",
+                 (first, "read", "2026-01-01T00:00:01"))
+    conn.execute("INSERT INTO feedback(item_id, action, created_at) VALUES (?,?,?)",
+                 (second, "unread", "2026-01-02T00:00:02"))
+    conn.execute("INSERT INTO score(item_id, final_score, ranked_at) VALUES (?,?,?)",
+                 (second, 88, "2026-01-02"))
+    conn.execute(
+        """INSERT INTO summary(item_id, problem, depth, model, abstract_hash, created_at)
+           VALUES (?,?,?,?,?,?)""",
+        (second, "problem", "deep", "model", "hash-b", "2026-01-02"),
+    )
+    conn.execute("INSERT INTO item_enrichment(item_id, crossref_json) VALUES (?,?)",
+                 (first, '{"source":"crossref"}'))
+    conn.execute("INSERT INTO journal_rank(journal_norm, journal, ranks_json, hit) "
+                 "VALUES ('old', 'Old', '{}', 0)")
+    conn.execute("PRAGMA user_version=3")
+    db.Database._migrate(conn)
+    conn.commit()
+
+    assert conn.execute("SELECT COUNT(*) FROM item").fetchone()[0] == 1
+    item = conn.execute("SELECT doi, dedup_key, abstract FROM item").fetchone()
+    assert tuple(item) == ("10.9/abc", "doi:10.9/abc", "longer abstract")
+    assert conn.execute("SELECT final_score FROM score").fetchone()[0] == 88
+    assert conn.execute("SELECT abstract_hash FROM summary").fetchone()[0] == "hash-b"
+    assert conn.execute("SELECT crossref_json FROM item_enrichment").fetchone()[0]
+    assert conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0] == 6
+    # 最新 unstar/unignore/unread 生效；旧副本的 excluded 仍保留。
+    assert tuple(conn.execute("SELECT starred, ignored, excluded, state FROM item_state").fetchone()) == \
+        (0, 0, 1, "new")
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert conn.execute("SELECT COUNT(*) FROM item_fts WHERE item_fts MATCH 'longer'").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM journal_rank").fetchone()[0] == 0
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+    # v4 的历史清理只执行一次；新写入的负缓存交给新版查询策略处理。
+    conn.execute("INSERT INTO journal_rank(journal_norm, journal, ranks_json, hit) "
+                 "VALUES ('new', 'New', '{}', 0)")
+    db.Database._migrate(conn)
+    assert conn.execute("SELECT COUNT(*) FROM journal_rank").fetchone()[0] == 1
+    conn.close()
+
+
+def test_DOI迁移保留不同标识符的末尾标点(tmp_path):
+    conn = db.Database(tmp_path / "suffix.db").connect()
+    suffixes = ["ABC", "ABC)", "ABC.", "ABC;", "ABC(D)"]
+    for suffix in suffixes:
+        for variant in (suffix, suffix.lower()):
+            doi = f"10.1234/{variant}"
+            conn.execute(
+                "INSERT INTO item(kind, dedup_key, doi, title, title_norm, source, "
+                "created_at, updated_at) VALUES ('paper', ?, ?, 'Paper', 'paper', "
+                "'test', '2026-01-01', '2026-01-01')", (f"doi:{doi}", doi),
+            )
+    conn.execute("PRAGMA user_version=3")
+    db.Database._migrate(conn)
+    conn.commit()
+    assert {r[0] for r in conn.execute("SELECT doi FROM item")} == {
+        f"10.1234/{s.lower()}" for s in suffixes}
+    assert conn.execute("SELECT COUNT(*) FROM item").fetchone()[0] == len(suffixes)
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     conn.close()

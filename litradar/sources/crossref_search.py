@@ -9,7 +9,7 @@ import re
 from typing import Any
 
 from ..http import get_json
-from ..normalize import days_ago, parse_date
+from ..normalize import days_ago, normalize_doi, parse_date
 
 BASE = "https://api.crossref.org"
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -73,7 +73,7 @@ def _msg_to_item(m: dict, source: str = "crossref") -> dict | None:
     title = (m.get("title") or [None])[0]
     if not title:
         return None
-    doi = (m.get("DOI") or "").lower() or None
+    doi = normalize_doi(m.get("DOI"))
 
     authors = []
     for a in m.get("author") or []:
@@ -124,7 +124,7 @@ def fetch_many_by_doi(dois: list[str], mailto: str = "") -> dict[str, dict]:
     与 ISSN 过滤的坑一样。
     """
     out: dict[str, dict] = {}
-    ids = [d.lower() for d in dict.fromkeys(dois) if d]
+    ids = [normalize_doi(d) for d in dict.fromkeys(dois) if normalize_doi(d)]
     for start in range(0, len(ids), BATCH_SIZE):
         chunk = ids[start:start + BATCH_SIZE]
         params: dict[str, Any] = {
