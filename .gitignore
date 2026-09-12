@@ -4,8 +4,9 @@
 !.env.example
 
 # 私人配置(含邮箱、研究方向、关注作者)—— 只提交对应的 .example
+# interests.yaml 后面带 * :网页保存时会在旁边留下 .<时间戳>.bak 备份和 .tmp 临时文件
 config.yaml
-interests.yaml
+interests.yaml*
 
 # 数据与运行时产物
 data/
