@@ -253,7 +253,8 @@ def ingest_keyword_search(cfg: Config, *, verbose: bool = True) -> dict:
                     stat["s2"] += len(got)
                     raw += got
 
-        if cfg.sources.openalex_enabled and os.environ.get(cfg.sources.openalex_api_key_env):
+        openalex_key = os.environ.get(cfg.sources.openalex_api_key_env, "")
+        if cfg.sources.openalex_enabled and openalex_key:
             for q in queries:
                 got = openalex_search.search(
                     q,
@@ -261,6 +262,7 @@ def ingest_keyword_search(cfg: Config, *, verbose: bool = True) -> dict:
                     limit=cfg.sources.openalex_per_query,
                     issns=issns or None,
                     mailto=cfg.sources.mailto,
+                    api_key=openalex_key,
                 )
                 stat["openalex"] += len(got)
                 raw += got
