@@ -5,6 +5,8 @@ import datetime
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -116,3 +118,89 @@ def test_force仍然重做前N名(tmp_path, monkeypatch):
 
     assert deep_ids == [top]
     assert brief_ids == []
+
+
+def test_无原文的deep在同秒补齐后刷新且只刷新一次(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    monkeypatch.setattr(db, "now", lambda: "2026-09-12T12:00:00+00:00")
+    conn = db.Database(cfg.db_file).connect()
+    iid = _seed(conn, "missing")
+    conn.execute("UPDATE item SET abstract=NULL WHERE id=?", (iid,))
+    db.save_score(conn, iid, final_score=90)
+    conn.commit()
+    deep_ids, _ = _patch(monkeypatch)
+    summarize.run(cfg, verbose=False)
+    assert deep_ids == [iid]
+
+    conn.execute("UPDATE item SET abstract='原文已补齐' WHERE id=?", (iid,))
+    db.save_enrichment(conn, iid, {"cited_by_count": 1})
+    conn.commit()
+    summarize.run(cfg, verbose=False)
+    summarize.run(cfg, verbose=False)
+    assert deep_ids == [iid, iid]
+    saved = conn.execute("SELECT depth, abstract_hash FROM summary WHERE item_id=?", (iid,)).fetchone()
+    assert tuple(saved) == ("deep", summarize._abstract_hash("原文已补齐"))
+    conn.close()
+
+
+def test_仅富化元数据不重做原文未变的摘要(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    conn = db.Database(cfg.db_file).connect()
+    iid = _seed(conn, "unchanged")
+    db.save_score(conn, iid, final_score=90)
+    conn.commit()
+    deep_ids, _ = _patch(monkeypatch)
+    summarize.run(cfg, verbose=False)
+
+    db.save_enrichment(conn, iid, {"cited_by_count": 10})
+    conn.execute("UPDATE item_enrichment SET enriched_at='2099-01-01' WHERE item_id=?", (iid,))
+    conn.commit()
+    summarize.run(cfg, verbose=False)
+    assert deep_ids == [iid]
+    conn.close()
+
+
+@pytest.mark.parametrize("depth", ["deep", "brief"])
+def test_历史摘要富化后刷新并保留深度(tmp_path, monkeypatch, depth):
+    cfg = _cfg(tmp_path, top_n=0)
+    conn = db.Database(cfg.db_file).connect()
+    iid = _seed(conn, "legacy")
+    db.save_summary(conn, iid, {"one_liner": "旧"}, depth, "m")
+    conn.execute("UPDATE summary SET created_at='2000-01-01' WHERE item_id=?", (iid,))
+    db.save_enrichment(conn, iid, {"cited_by_count": 1})
+    conn.commit()
+    deep_ids, brief_ids = _patch(monkeypatch)
+    summarize.run(cfg, verbose=False)
+    summarize.run(cfg, verbose=False)
+    assert deep_ids == ([iid] if depth == "deep" else [])
+    assert brief_ids == ([iid] if depth == "brief" else [])
+    assert conn.execute("SELECT depth FROM summary WHERE item_id=?", (iid,)).fetchone()[0] == depth
+    conn.close()
+
+
+def test_旧无原文占位内容没有富化时间也会恢复(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    conn = db.Database(cfg.db_file).connect()
+    iid = _seed(conn, "placeholder")
+    data = {key: "摘要未提及" for key in ("problem", "method", "key_results", "limitation")}
+    db.save_summary(conn, iid, data, "deep", "m")
+    conn.commit()
+    deep_ids, _ = _patch(monkeypatch)
+    summarize.run(cfg, verbose=False)
+    assert deep_ids == [iid]
+    conn.close()
+
+
+def test_原文更新后深度摘要掉出前N仍保留深度(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, top_n=0)
+    conn = db.Database(cfg.db_file).connect()
+    iid = _seed(conn, "former-top")
+    db.save_summary(conn, iid, {"method": "旧方法"}, "deep", "m",
+                    abstract_hash=summarize._abstract_hash("原文旧版"))
+    conn.commit()
+    deep_ids, brief_ids = _patch(monkeypatch)
+    summarize.run(cfg, verbose=False)
+    assert deep_ids == [iid]
+    assert brief_ids == []
+    assert conn.execute("SELECT method FROM summary WHERE item_id=?", (iid,)).fetchone()[0] == "m"
+    conn.close()

@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -68,6 +69,29 @@ def test_跨源请求被拒(client):
 def test_同源请求放行(client):
     r = client.post("/admin/run/rank",
                     headers={"X-Token": TOKEN, "Origin": "http://testserver"})
+    assert r.status_code == 200
+
+
+def test_同源默认端口等价且异scheme拒绝(client):
+    same = client.post("/admin/run/rank",
+                       headers={"X-Token": TOKEN, "Origin": "http://testserver:80"})
+    different_scheme = client.post(
+        "/admin/run/rank",
+        headers={"X-Token": TOKEN, "Origin": "https://testserver"},
+    )
+    different_port = client.post(
+        "/admin/run/rank",
+        headers={"X-Token": TOKEN, "Origin": "http://testserver:81"},
+    )
+    assert same.status_code == 200
+    assert different_scheme.status_code == 403
+    assert different_port.status_code == 403
+
+
+def test_反代后的https请求允许https同源(client):
+    https_client = TestClient(webapp.app, base_url="https://testserver")
+    r = https_client.post("/admin/run/rank",
+                          headers={"X-Token": TOKEN, "Origin": "https://testserver"})
     assert r.status_code == 200
 
 
@@ -131,6 +155,96 @@ def test_合法action照常放行(client):
     r = client.post(f"/item/{iid}/action", data={"action": "star"},
                     headers={"X-Token": TOKEN})
     assert r.status_code == 200
+
+
+def test_偏好和反馈写入口拒绝跨源(client):
+    """口令之外的同源闸门覆盖所有浏览器可触发的写操作。"""
+    target = webapp.get_cfg().interests_file
+    original = "direction: x\nsearch_queries: [a]\nkeywords: {core: [k]}\njournals: {core: []}\n"
+    target.write_text(original, encoding="utf-8")
+    iid = _add_item(webapp.get_cfg(), title="cross-origin")
+    headers = {"X-Token": TOKEN, "Origin": "https://untrusted.example"}
+
+    profile = client.post("/interests", data={"raw": original.replace("x", "changed")},
+                          headers=headers, follow_redirects=False)
+    old_profile = client.post("/profile", data={"raw": original},
+                              headers=headers, follow_redirects=False)
+    action = client.post(f"/item/{iid}/action", data={"action": "star"},
+                         headers=headers)
+
+    assert (profile.status_code, old_profile.status_code, action.status_code) == (403, 403, 403)
+    assert target.read_text(encoding="utf-8") == original
+    conn = webapp.db.Database(webapp.get_cfg().db_file).connect()
+    try:
+        starred = conn.execute(
+            "SELECT starred FROM item_state WHERE item_id=?", (iid,)).fetchone()
+        assert starred is None or starred[0] == 0
+    finally:
+        conn.close()
+
+
+# ------------------------------------------------------------- preference schema
+def test_错误嵌套类型拒绝保存且旧坏配置仍可编辑(client):
+    target = webapp.get_cfg().interests_file
+    bad = GOOD.replace("keywords: {core: [k]}", "keywords: [chemistry]")
+    target.write_text(bad, encoding="utf-8")
+    webapp.get_cfg().interests_data = {"direction": "x", "keywords": ["chemistry"],
+                                       "search_queries": [], "journals": {}}
+
+    rejected = _save(client, bad)
+    page = client.get("/interests", headers={"X-Token": TOKEN})
+
+    assert rejected.status_code == 400
+    assert "keywords" in rejected.text
+    assert page.status_code == 200
+    assert bad in page.text
+
+
+def test_后台Profile加载坏类型显式失败():
+    from litradar.rank import Profile
+
+    with pytest.raises(ValueError, match="keywords"):
+        Profile.from_dict({"keywords": ["chemistry"]})
+
+
+def test_空值偏好字段兼容(client):
+    raw = """direction:\nsearch_queries:\nkeywords:\njournals:\n"""
+    assert _save(client, raw).status_code == 303
+    assert client.get("/interests", headers={"X-Token": TOKEN}).status_code == 200
+
+
+def test_真实get_cfg缓存重载后坏文件可修复(tmp_path, monkeypatch):
+    """验证坏文件编辑→保存好文件→缓存清除→下次请求真实加载。"""
+    target = tmp_path / "interests.yaml"
+    bad = GOOD.replace("keywords: {core: [k]}", "keywords: [chemistry]")
+    good = GOOD.replace("keywords: {core: [k]}", "keywords: {core: [chemistry]}")
+    target.write_text(bad, encoding="utf-8")
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(yaml.safe_dump({
+        "app": {
+            "db_path": str(tmp_path / "db.sqlite"),
+            "interests": str(target),
+            "token_env": "LITRADAR_CACHE_TEST_TOKEN",
+        },
+        "llm": {"enabled": False},
+    }), encoding="utf-8")
+    monkeypatch.setattr(webapp, "CONFIG_PATH", str(config_file))
+    monkeypatch.setattr(webapp, "_cfg_cache", {})
+    monkeypatch.delenv("LITRADAR_CACHE_TEST_TOKEN", raising=False)
+    client = TestClient(webapp.app, raise_server_exceptions=False)
+
+    assert client.get("/interests").status_code == 200
+    rejected = client.post("/interests", data={"raw": bad}, follow_redirects=False)
+    assert rejected.status_code == 400
+    assert target.read_text(encoding="utf-8") == bad
+
+    saved = client.post("/interests", data={"raw": good}, follow_redirects=False)
+    assert saved.status_code == 303
+    page = client.get("/interests")
+    assert page.status_code == 200
+    cfg = webapp.get_cfg()
+    assert cfg.interests_data["keywords"]["core"] == ["chemistry"]
+    assert webapp.load_interests(cfg).core == ["chemistry"]
 
 
 # ------------------------------------------------------------- interests 保存

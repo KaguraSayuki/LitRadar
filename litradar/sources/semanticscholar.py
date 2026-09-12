@@ -14,8 +14,11 @@ from typing import Any
 
 import requests
 
+from ..normalize import normalize_doi
+
 BASE = "https://api.semanticscholar.org/graph/v1"
-FIELDS = "title,abstract,tldr,citationCount,venue,year,publicationDate,externalIds,openAccessPdf"
+FIELDS = ("title,abstract,tldr,citationCount,venue,year,publicationDate,externalIds,"
+          "openAccessPdf,authors,url")
 
 # ── 限流 ────────────────────────────────────────────────────────────────────
 # 官方规定:**1 请求/秒,跨所有端点累加**。
@@ -72,6 +75,7 @@ def _throttle(min_interval: float = MIN_INTERVAL) -> None:
 
 def fetch_by_doi(doi: str, retries: int = 3, interval: float | None = None) -> dict | None:
     """按 DOI 取单篇。"""
+    doi = normalize_doi(doi) or doi
     interval = MIN_INTERVAL if interval is None else interval
     for attempt in range(retries):
         _throttle(interval)
@@ -114,7 +118,7 @@ def fetch_many_by_doi(dois: list[str], retries: int = 3,
     "全都补不到摘要",很难排查(实测踩过这个坑)。
     """
     out: dict[str, dict] = {}
-    ids = [d for d in dict.fromkeys(dois) if d]      # 去重保序
+    ids = [normalize_doi(d) for d in dict.fromkeys(dois) if normalize_doi(d)]
     if not ids:
         return out
 
@@ -169,6 +173,17 @@ def fetch_many_by_doi(dois: list[str], retries: int = 3,
 
 def _to_dict(p: dict, doi: str | None = None) -> dict:
     oa = p.get("openAccessPdf") or {}
+    authors = []
+    for author in p.get("authors") or []:
+        if isinstance(author, dict):
+            name = author.get("name")
+        else:
+            name = str(author)
+        if name:
+            authors.append(name)
+    cited_by_count = p.get("citationCount")
+    oa_url = oa.get("url")
+    canonical_doi = normalize_doi((p.get("externalIds") or {}).get("DOI") or doi)
     return {
         # ⚠️ 必须带 kind。`_to_dict` 同时服务于「富化」和「检索」两条路径,
         # 入库时 item.kind 是 NOT NULL —— 漏了会让整批插入失败:
@@ -177,12 +192,20 @@ def _to_dict(p: dict, doi: str | None = None) -> dict:
         "title": p.get("title"),
         "abstract": p.get("abstract"),
         "tldr": (p.get("tldr") or {}).get("text"),
-        "cited_by_count": p.get("citationCount"),
+        # The non-underscored aliases are retained for enrich._merge's source
+        # contract; the underscored copies are consumed by pipeline._store and
+        # persisted immediately for search results that already contain them.
+        "cited_by_count": cited_by_count,
+        "_cited_by_count": cited_by_count,
+        "authors": authors,
         "journal": p.get("venue"),
         "published_at": p.get("publicationDate") or (
             f"{p['year']}-01-01" if p.get("year") else None),
-        "doi": (p.get("externalIds") or {}).get("DOI") or doi,
-        "oa_url": oa.get("url"),
+        "doi": canonical_doi,
+        "url": p.get("url"),
+        "oa_url": oa_url,
+        "_is_oa": 1 if oa_url else None,
+        "_oa_url": oa_url,
         "source": "semanticscholar",
     }
 

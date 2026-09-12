@@ -98,10 +98,13 @@ MAX_ABSTRACT_ATTEMPTS = 5
 
 def _pending(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
     """需要富化的条目:从未富化的 + 已富化但缺摘要(且还没试够次数)的。"""
+    # 检索可能已经带回引用数/OA，生成只有部分字段的 enrichment 行；
+    # enriched_at 为空说明仍需完整富化，不能仅凭行存在就跳过。
     rows = conn.execute(
         """SELECT i.id, i.doi FROM item i
            LEFT JOIN item_enrichment e ON e.item_id = i.id
-           WHERE i.doi IS NOT NULL AND i.doi <> '' AND e.item_id IS NULL
+           WHERE i.doi IS NOT NULL AND i.doi <> ''
+             AND (e.item_id IS NULL OR e.enriched_at IS NULL)
            ORDER BY i.published_at DESC LIMIT ?""",
         (limit,),
     ).fetchall()
@@ -128,44 +131,73 @@ def _journal_ranks(conn, cfg: Config, *, verbose: bool = True) -> dict:
 
     接口按次计额,所以:
       · 查过的刊不重复查 —— hit=0 表示接口明确说没有,不该反复问
-        (例外:后来给它配了别名,那是新线索,值得再试一次)
+        (例外:后来给它配了别名,那是新线索,值得按最终目标再试一次)
       · 单次运行有上限(cfg.journal_rank.max_lookups),异常数据打不爆额度
+
+    ``item.journal`` 可以是配置里的短名/罗马字别名,但缓存键必须统一用
+    最终目标。先完成别名映射、去重和缓存检查,最后才应用单轮上限,否则多个
+    条目/别名会反复消耗 easyScholar 额度。
     """
-    stat = {"jr_checked": 0, "jr_found": 0, "jr_missing": 0}
+    stat = {"jr_checked": 0, "jr_found": 0, "jr_missing": 0, "jr_failed": 0}
     if not cfg.journal_rank.enabled or not easyscholar.available():
         return stat
 
     aliases = {db.norm_journal(k): v
                for k, v in (cfg.journal_rank.aliases or {}).items()}
 
-    # 候选 = 从没查过的 + (上次没查到、但现在配了别名的)。
-    # 后一条不能省:实测先跑了没有别名的一轮,"Youji huaxue" 被记成查不到,
-    # 之后再加别名也永远不会重试 —— 缓存把修复路径一起锁死了。
-    need: list[str] = []
-    for r in conn.execute(
-            """SELECT DISTINCT i.journal AS journal, jr.hit AS hit
-               FROM item i
-               LEFT JOIN journal_rank jr ON jr.journal_norm = lower(trim(i.journal))
-               WHERE i.journal IS NOT NULL AND i.journal <> ''"""):
-        if r["hit"] is None or (r["hit"] == 0
-                                and db.norm_journal(r["journal"]) in aliases):
-            need.append(r["journal"])
-    need = sorted(set(need))[:max(0, cfg.journal_rank.max_lookups)]
+    def final_target(name: str) -> str:
+        """把来源刊名映射成配置中的最终查询名。"""
+        target = (name or "").strip()
+        mapped = aliases.get(db.norm_journal(target))
+        return str(mapped).strip() if mapped else target
+
+    # 先把所有条目的原始刊名折叠成最终目标。按规范化键排序保证在达到
+    # max_lookups 时选择稳定,多个别名映射到同一目标只占一个名额。
+    targets: dict[str, str] = {}
+    journals = sorted(
+        {str(r["journal"]).strip() for r in conn.execute(
+            "SELECT DISTINCT journal FROM item "
+            "WHERE journal IS NOT NULL AND journal <> ''")
+         if str(r["journal"]).strip()},
+        key=db.norm_journal,
+    )
+    for name in journals:
+        target = final_target(name)
+        key = db.norm_journal(target)
+        if key:
+            targets.setdefault(key, target)
+
+    # 缓存查找也只看最终目标。这样旧库里原始别名的 hit=0 不会把后来配置
+    # 的别名修复路径锁死;目标本身一旦成功或明确无记录,下一轮都会停下。
+    need = []
+    for key, target in targets.items():
+        cached = conn.execute(
+            "SELECT hit FROM journal_rank WHERE journal_norm = ?", (key,)
+        ).fetchone()
+        if cached is None:
+            need.append(target)
+    need = need[:max(0, cfg.journal_rank.max_lookups)]
 
     for name in need:
-        # 短名/罗马字名先换成 easyScholar 认得的全名再查,并按全名缓存
-        target = aliases.get(db.norm_journal(name), name)
-        ranks = easyscholar.fetch_rank(target)
-        db.save_journal_rank(conn, target, ranks)
+        # name 已经是最终目标,按该目标请求并缓存。
         stat["jr_checked"] += 1
+        try:
+            ranks = easyscholar.fetch_rank(name)
+        except easyscholar.RankLookupError as exc:
+            stat["jr_failed"] += 1
+            if verbose:
+                print(f"  [warn] 期刊等级查询失败 {name}: {exc}")
+            continue
+
+        db.save_journal_rank(conn, name, ranks)
         if ranks:
             stat["jr_found"] += 1
             if verbose:
-                print(f"  期刊等级 {target}: {ranks.get('sciUp') or ranks.get('sci') or ''}")
+                print(f"  期刊等级 {name}: {ranks.get('sciUp') or ranks.get('sci') or ''}")
         else:
             stat["jr_missing"] += 1
             if verbose:
-                print(f"  [warn] 期刊等级没查到: {target}")
+                print(f"  [warn] 期刊等级没查到: {name}")
         conn.commit()          # 逐条提交:中断也不会白白浪费已花掉的额度
     return stat
 

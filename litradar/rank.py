@@ -60,6 +60,108 @@ def journal_matches(journal: str | None, whitelist: list[str]) -> str | None:
 
 
 # ---------------------------------------------------------------- 兴趣偏好
+
+# ``interests.yaml`` is user-editable, so a syntactically valid YAML document
+# is not necessarily a usable profile.  Keep the schema here, next to the
+# consumer, so the web editor and the loader agree on the supported fields.
+_INTERESTS_REQUIRED = frozenset({"direction", "search_queries", "keywords", "journals"})
+_INTERESTS_SCALAR_FIELDS = ("name", "direction", "search_query")
+_INTERESTS_LIST_FIELDS = (
+    "search_queries", "s2_queries", "s2_venue_queries", "negative",
+    "negative_titles", "exclude_title_prefixes", "authors_watch", "seed_dois",
+)
+_KEYWORD_LIST_FIELDS = ("core", "bonus", "current_challenges", "boost_topics")
+_JOURNAL_LIST_FIELDS = ("core", "ok")
+
+
+def _type_label(value: Any) -> str:
+    """Return a short, stable type name for validation messages."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "布尔值"
+    if isinstance(value, (int, float)):
+        return "数字"
+    if isinstance(value, str):
+        return "字符串"
+    if isinstance(value, list):
+        return "列表"
+    if isinstance(value, dict):
+        return "映射"
+    return type(value).__name__
+
+
+def validate_interests(data: Any, *, require_keys: bool = True) -> list[str]:
+    """Validate the structure consumed from ``interests.yaml``.
+
+    ``None`` is deliberately accepted for every optional value and for the two
+    nested mappings.  Existing files commonly use ``key:`` as an intentional
+    empty value, and ``Profile.from_dict`` already treats that as empty.  List
+    elements must still be strings because the ranking code calls ``strip`` or
+    ``lower`` on them.  Unknown keys are retained for forward compatibility;
+    all fields currently read by the application are checked here.
+
+    The returned list is suitable for showing in the editor.  An empty list
+    means that the document is safe for ``Profile.from_dict`` and the other
+    preference consumers.
+    """
+    errors: list[str] = []
+    if not isinstance(data, dict):
+        return [f"顶层必须是映射,当前是{_type_label(data)}"]
+
+    if require_keys:
+        missing = _INTERESTS_REQUIRED - set(data)
+        if missing:
+            errors.append("缺少必要字段:" + "、".join(sorted(missing)))
+
+    def check_scalar(path: str) -> None:
+        value = data.get(path)
+        if value is not None and not isinstance(value, str):
+            errors.append(f"{path} 必须是字符串或 null,当前是{_type_label(value)}")
+
+    def check_string_list(path: str, value: Any) -> None:
+        if value is None:
+            return
+        if not isinstance(value, list):
+            errors.append(f"{path} 必须是字符串列表或 null,当前是{_type_label(value)}")
+            return
+        for i, element in enumerate(value):
+            if not isinstance(element, str):
+                errors.append(
+                    f"{path}[{i}] 必须是字符串,当前是{_type_label(element)}")
+
+    for path in _INTERESTS_SCALAR_FIELDS:
+        check_scalar(path)
+    for path in _INTERESTS_LIST_FIELDS:
+        check_string_list(path, data.get(path))
+
+    keywords = data.get("keywords")
+    if keywords is not None and not isinstance(keywords, dict):
+        errors.append(f"keywords 必须是映射或 null,当前是{_type_label(keywords)}")
+    elif isinstance(keywords, dict):
+        for path in _KEYWORD_LIST_FIELDS:
+            check_string_list(f"keywords.{path}", keywords.get(path))
+
+    journals = data.get("journals")
+    if journals is not None and not isinstance(journals, dict):
+        errors.append(f"journals 必须是映射或 null,当前是{_type_label(journals)}")
+    elif isinstance(journals, dict):
+        for path in _JOURNAL_LIST_FIELDS:
+            check_string_list(f"journals.{path}", journals.get(path))
+        issn = journals.get("issn")
+        if issn is not None and not isinstance(issn, dict):
+            errors.append(f"journals.issn 必须是映射或 null,当前是{_type_label(issn)}")
+        elif isinstance(issn, dict):
+            for name, values in issn.items():
+                if not isinstance(name, str):
+                    errors.append(
+                        f"journals.issn 的键必须是字符串,当前是{_type_label(name)}")
+                    continue
+                check_string_list(f"journals.issn.{name}", values)
+
+    return errors
+
+
 @dataclass
 class Profile:
     name: str
@@ -88,6 +190,13 @@ class Profile:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Profile":
+        errors = validate_interests(d, require_keys=False)
+        if errors:
+            raise ValueError("偏好字段类型错误:" + "；".join(errors))
+
+        # New web saves are validated above.  The normal field handling below
+        # intentionally stays strict so CLI/ranking never silently drops a
+        # malformed negative/keyword or other preference.
         kw = d.get("keywords") or {}
         jr = d.get("journals") or {}
         multi = [q for q in (d.get("search_queries") or []) if q and q.strip()]

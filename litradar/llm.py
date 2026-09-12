@@ -45,6 +45,8 @@ class DeepSeek:
     def chat(self, system: str, user: str, *, json_mode: bool = True,
              max_tokens: int = 2048) -> str:
         client = self._client_or_raise()
+        from openai import APIError
+
         kwargs: dict[str, Any] = {
             "model": self.cfg.model,
             "messages": [
@@ -56,7 +58,12 @@ class DeepSeek:
         }
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
-        resp = client.chat.completions.create(**kwargs)
+        try:
+            resp = client.chat.completions.create(**kwargs)
+        except APIError as e:
+            # SDK 已经完成自己的重试。统一异常类型,让调用方按批次降级,
+            # 而不是因一次断网/限流丢掉此前已成功返回的结果。
+            raise LLMError(f"{type(e).__name__}: {e}") from e
         return resp.choices[0].message.content or ""
 
     def json(self, system: str, user: str, *, max_tokens: int = 2048) -> dict:

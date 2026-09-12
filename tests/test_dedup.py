@@ -24,7 +24,10 @@ from litradar.rank import journal_initials, journal_matches  # noqa: E402
     ("10.5555/litradar.example.paper-a", "10.5555/litradar.example.paper-a"),
     ("doi:10.1021/ABC.123", "10.1021/abc.123"),
     ("https://doi.org/10.1002/anie.7232106", "10.1002/anie.7232106"),
-    ("DOI:10.5555/litradar.example.paper-b.", "10.5555/litradar.example.paper-b"),
+    ("DOI:10.1021/ABC.", "10.1021/abc."),
+    ("10.1234/ABC;", "10.1234/abc;"),
+    ("10.1234/ABC)", "10.1234/abc)"),
+    ("10.1234/ABC(D)", "10.1234/abc(d)"),
 ])
 def test_doi_归一化(raw, expected):
     assert normalize_doi(raw) == expected
@@ -34,6 +37,9 @@ def test_从文本里抓doi():
     text = "Org. Lett. (IF 4.7) 2026-09-04 DOI:10.5555/litradar.example.paper-a 作者"
     assert find_doi(text) == "10.5555/litradar.example.paper-a"
     assert find_doi("没有 DOI 的文本") is None
+    assert find_doi("DOI:10.5555/litradar.example.paper-b.") == "10.5555/litradar.example.paper-b"
+    assert find_doi("(DOI:10.1234/ABC(D)).") == "10.1234/abc(d)"
+    assert find_doi("(DOI:10.1234/ABC);") == "10.1234/abc"
 
 
 # ------------------------------------------------------------------ 标题

@@ -4,6 +4,10 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from unittest.mock import Mock
+
+import requests
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -152,3 +156,136 @@ def test_重新富化不会把计数归零(tmp_path):
                        "WHERE item_id=?", (iid,)).fetchone()
     assert tuple(row) == (3, 2)
     conn.close()
+
+
+# ------------------------------------------------------- 期刊等级缓存
+@pytest.mark.parametrize("payload", [
+    {"code": 200},
+    {"code": 200, "data": {"officialRank": []}},
+    {"code": 200, "data": {"officialRank": ""}},
+    {"code": 200, "data": {"officialRank": False}},
+    {"code": 200, "data": {"officialRank": {"all": []}}},
+    {"code": 200, "data": {"officialRank": {"select": []}}},
+])
+def test_期刊协议坏响应不能变成永久负缓存(tmp_path, monkeypatch, payload):
+    cfg = _journal_cfg(tmp_path)
+    _seed_journal(cfg, "Malformed Response Journal")
+    monkeypatch.setenv("EASYSCHOLAR_SECRET_KEY", "test-key")
+    bad, good = Mock(), Mock()
+    bad.json.return_value = payload
+    good.json.return_value = {"code": 200, "data": {
+        "officialRank": {"all": {"sci": "Q1"}}}}
+    request = Mock(side_effect=[bad, good])
+    monkeypatch.setattr(enrich.easyscholar.requests, "get", request)
+    conn = db.Database(cfg.db_file).connect()
+    assert enrich._journal_ranks(conn, cfg, verbose=False)["jr_failed"] == 1
+    assert conn.execute("SELECT COUNT(*) FROM journal_rank").fetchone()[0] == 0
+    assert enrich._journal_ranks(conn, cfg, verbose=False)["jr_found"] == 1
+    assert request.call_count == 2
+    conn.close()
+
+
+def _journal_cfg(tmp_path) -> Config:
+    cfg = Config()
+    cfg.app.db_path = str(tmp_path / "t.db")
+    cfg.journal_rank.enabled = True
+    return cfg
+
+
+def _seed_journal(cfg: Config, journal: str) -> None:
+    conn = db.Database(cfg.db_file).connect()
+    db.upsert_item(conn, {
+        "kind": "paper", "dedup_key": f"journal:{journal}",
+        "title": journal, "title_norm": journal.lower(), "source": "test",
+        "journal": journal,
+    })
+    conn.commit()
+    conn.close()
+
+
+def test_期刊临时失败不写负缓存且下一轮重试(tmp_path, monkeypatch):
+    cfg = _journal_cfg(tmp_path)
+    _seed_journal(cfg, "Review Test Journal")
+    monkeypatch.setenv("EASYSCHOLAR_SECRET_KEY", "test-key")
+    response = Mock()
+    response.status_code = 200
+    response.json.return_value = {
+        "code": 200,
+        "data": {"officialRank": {"all": {"sci": "Q1"}}},
+    }
+    request = Mock(side_effect=[requests.Timeout("temporary"), response])
+    monkeypatch.setattr(enrich.easyscholar.requests, "get", request)
+
+    conn = db.Database(cfg.db_file).connect()
+    first = enrich._journal_ranks(conn, cfg, verbose=False)
+    second = enrich._journal_ranks(conn, cfg, verbose=False)
+    row = conn.execute("SELECT hit FROM journal_rank").fetchone()
+    conn.close()
+
+    assert request.call_count == 2
+    assert first["jr_failed"] == 1
+    assert second["jr_found"] == 1
+    assert row["hit"] == 1
+
+
+def test_期刊明确无结果才写hit0并停止重试(tmp_path, monkeypatch):
+    cfg = _journal_cfg(tmp_path)
+    _seed_journal(cfg, "Confirmed Missing Journal")
+    monkeypatch.setenv("EASYSCHOLAR_SECRET_KEY", "test-key")
+    response = Mock()
+    response.status_code = 200
+    response.json.return_value = {"code": 200, "data": {}}
+    request = Mock(return_value=response)
+    monkeypatch.setattr(enrich.easyscholar.requests, "get", request)
+
+    conn = db.Database(cfg.db_file).connect()
+    enrich._journal_ranks(conn, cfg, verbose=False)
+    enrich._journal_ranks(conn, cfg, verbose=False)
+    row = conn.execute("SELECT hit FROM journal_rank").fetchone()
+    conn.close()
+
+    assert request.call_count == 1
+    assert row["hit"] == 0
+
+
+def test_别名先按最终目标去重并复用缓存(tmp_path, monkeypatch):
+    cfg = _journal_cfg(tmp_path)
+    cfg.journal_rank.aliases = {
+        "Short Journal A": "Canonical Journal",
+        "Short Journal B": "Canonical Journal",
+    }
+    _seed_journal(cfg, "Short Journal A")
+    _seed_journal(cfg, "Short Journal B")
+    monkeypatch.setattr(enrich.easyscholar, "available", lambda: True)
+    fetch = Mock(return_value={"sci": "Q2"})
+    monkeypatch.setattr(enrich.easyscholar, "fetch_rank", fetch)
+
+    conn = db.Database(cfg.db_file).connect()
+    enrich._journal_ranks(conn, cfg, verbose=False)
+    enrich._journal_ranks(conn, cfg, verbose=False)
+    conn.close()
+
+    assert fetch.call_count == 1
+    fetch.assert_called_once_with("Canonical Journal")
+
+
+def test_别名可恢复旧刊名hit0但确认目标无结果后停止(tmp_path, monkeypatch):
+    cfg = _journal_cfg(tmp_path)
+    cfg.journal_rank.aliases = {"Old Journal Name": "Canonical Journal"}
+    _seed_journal(cfg, "Old Journal Name")
+    monkeypatch.setattr(enrich.easyscholar, "available", lambda: True)
+    fetch = Mock(return_value=None)
+    monkeypatch.setattr(enrich.easyscholar, "fetch_rank", fetch)
+
+    conn = db.Database(cfg.db_file).connect()
+    db.save_journal_rank(conn, "Old Journal Name", None)
+    conn.commit()
+    enrich._journal_ranks(conn, cfg, verbose=False)
+    enrich._journal_ranks(conn, cfg, verbose=False)
+    rows = conn.execute("SELECT journal, hit FROM journal_rank ORDER BY journal").fetchall()
+    conn.close()
+
+    assert fetch.call_count == 1
+    assert fetch.call_args.args == ("Canonical Journal",)
+    assert [(r["journal"], r["hit"]) for r in rows] == [
+        ("Canonical Journal", 0), ("Old Journal Name", 0)]

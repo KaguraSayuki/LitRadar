@@ -19,7 +19,7 @@ from .. import db, journal_rank, pipeline, rank, summarize
 from ..config import Config, load_config
 from ..lock import AlreadyRunning, single_instance
 from ..normalize import days_ago
-from ..rank import load_interests
+from ..rank import load_interests, validate_interests
 
 HERE = Path(__file__).resolve().parent
 
@@ -164,9 +164,38 @@ def require_same_origin(request: Request) -> None:
     origin = request.headers.get("origin")
     if not origin:
         return
-    from urllib.parse import urlparse
 
-    if urlparse(origin).netloc != request.headers.get("host", ""):
+    # ``request.url`` already reflects the ASGI server's trusted proxy setup
+    # (the deployment passes X-Forwarded-Proto from nginx).  Compare the full
+    # origin tuple rather than only netloc: HTTPS and HTTP on the same host are
+    # different origins, while an omitted default port is equivalent to the
+    # explicit default port.
+    from urllib.parse import urlsplit
+
+    target = request.url
+    try:
+        got = urlsplit(origin)
+        got_port = got.port
+        target_port = target.port
+    except ValueError:
+        raise HTTPException(403, "跨源请求被拒绝")
+    scheme = (got.scheme or "").lower()
+    target_scheme = (target.scheme or "").lower()
+    if (scheme not in ("http", "https")
+            or target_scheme not in ("http", "https")
+            or got.username is not None
+            or got.password is not None
+            or got.path or got.query or got.fragment
+            or not got.hostname or not target.hostname):
+        raise HTTPException(403, "跨源请求被拒绝")
+
+    def effective_port(scheme: str, port: int | None) -> int | None:
+        return port if port is not None else {"http": 80, "https": 443}.get(scheme)
+
+    if (scheme != target_scheme
+            or got.hostname.lower() != target.hostname.lower()
+            or effective_port(scheme, got_port) != effective_port(
+                target_scheme, target_port)):
         raise HTTPException(403, "跨源请求被拒绝")
 
 
@@ -417,14 +446,37 @@ def stats_page(request: Request):
     return templates.TemplateResponse(request, "stats.html", ctx(request, s=s, page="stats"))
 
 
+def _editor_profile(cfg: Config):
+    """Load a profile for the editor without hiding a broken disk file.
+
+    Ranking and CLI callers use ``load_interests`` directly and therefore get
+    a clear ``ValueError`` for malformed preferences.  The editor is the one
+    place that must remain usable while repairing such a file, so it renders
+    an empty profile and returns the validation details for a warning.
+    """
+    errors = validate_interests(cfg.interests_data, require_keys=False)
+    if errors:
+        return rank.Profile.from_dict({}), errors
+    try:
+        return load_interests(cfg), []
+    except ValueError as exc:  # defensive: keep the repair page available
+        return rank.Profile.from_dict({}), [str(exc)]
+
+
 @app.get("/interests", response_class=HTMLResponse)
 def interests_page(request: Request, saved: int = 0):
     require_token(request)
     cfg = get_cfg()
     raw = cfg.interests_file.read_text(encoding="utf-8") if cfg.interests_file.exists() else ""
-    prof = load_interests(cfg)
+    prof, existing_errors = _editor_profile(cfg)
+    # Keep a syntactically valid but historically malformed file editable; the
+    # warning tells the user why the page may show fewer counts and lets them
+    # repair the raw YAML in one save.
+    warning = ("当前配置有字段类型错误,请修复后再保存: "
+               + "；".join(existing_errors)) if existing_errors else None
     return templates.TemplateResponse(request, "interests.html", ctx(
-        request, raw=raw, prof=prof, saved=bool(saved), page="interests"))
+        request, raw=raw, prof=prof, saved=bool(saved), error=warning,
+        page="interests"))
 
 
 # interests.yaml 的大小上限。正常配置约 12KB,512KB 已经宽出几十倍 ——
@@ -456,13 +508,15 @@ def _backup_interests(target: Path) -> None:
 @app.post("/interests")
 def interests_save(request: Request, raw: str = Form(...)):
     require_token(request)
+    require_same_origin(request)
     import yaml
 
     cfg = get_cfg()
 
     def fail(msg: str):
+        prof, _ = _editor_profile(cfg)
         return templates.TemplateResponse(request, "interests.html", ctx(
-            request, raw=raw, prof=load_interests(cfg), saved=False,
+            request, raw=raw, prof=prof, saved=False,
             error=msg, page="interests"), status_code=400)
 
     # 0) 大小上限,先于一切解析
@@ -486,12 +540,18 @@ def interests_save(request: Request, raw: str = Form(...)):
         return fail(f"缺少必要字段:{'、'.join(sorted(missing))}。"
                     "若确实要清空某项,请保留该键并把值留空,不要提交不完整的文件。")
 
-    # 3) 写前备份 —— 覆盖配置不可逆,必须留后路
+    # 3) 字段与元素类型。YAML 语法合法并不代表 Profile 可加载;
+    #    先挡住嵌套映射/列表中的错误类型,避免写入后编辑页和流水线一起崩。
+    type_errors = validate_interests(data)
+    if type_errors:
+        return fail("偏好字段类型错误:" + "；".join(type_errors))
+
+    # 4) 写前备份 —— 覆盖配置不可逆,必须留后路
     target = cfg.interests_file
     if target.exists():
         _backup_interests(target)
 
-    # 4) 原子写入:先写同目录的临时文件,再 rename 换掉正式文件。
+    # 5) 原子写入:先写同目录的临时文件,再 rename 换掉正式文件。
     #    直接 write_text 写到一半崩溃会留下半个文件 —— 整份配置就没了。
     tmp = target.with_name(target.name + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
@@ -514,6 +574,8 @@ def profile_redirect_get():
 @app.post("/profile")
 async def profile_redirect_post(request: Request):
     """旧页面表单 action 指向 /profile,把提交内容转到新处理器。"""
+    require_token(request)
+    require_same_origin(request)
     from urllib.parse import parse_qs
 
     body = (await request.body()).decode("utf-8", "replace")
@@ -527,6 +589,7 @@ async def profile_redirect_post(request: Request):
 @app.post("/item/{item_id}/action", response_class=HTMLResponse)
 def item_action(request: Request, item_id: int, action: str = Form(...)):
     require_token(request)
+    require_same_origin(request)
     conn = _conn()
     try:
         try:

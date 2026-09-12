@@ -12,22 +12,29 @@ _WS_RE = re.compile(r"\s+")
 
 
 def find_doi(text: str | None) -> str | None:
-    """从任意文本里抓第一个 DOI。"""
+    """从正文中提取第一个 DOI，去掉句尾标点及引用包装的多余右括号。"""
     if not text:
         return None
     m = _DOI_RE.search(text)
     if not m:
         return None
-    return normalize_doi(m.group(0))
+    doi = m.group(0).rstrip(".,;")
+    while doi.endswith(")") and doi.count(")") > doi.count("("):
+        doi = doi[:-1].rstrip(".,;")
+    return normalize_doi(doi)
 
 
 def normalize_doi(doi: str | None) -> str | None:
+    """归一化结构化 DOI 的大小写和前缀，保留标识符后缀中的所有字符。
+
+    API 和数据库字段里的末尾标点可能属于 DOI 本身；只有从正文提取时
+    才能做句尾标点的启发式清理，否则历史去重迁移可能合并不同标识符。
+    """
     if not doi:
         return None
-    doi = doi.strip().lower()
+    doi = str(doi).strip().lower()
     doi = re.sub(r"^(https?://)?(dx\.)?doi\.org/", "", doi)
     doi = re.sub(r"^doi:\s*", "", doi)
-    doi = doi.rstrip(".,;)")
     return doi or None
 
 
