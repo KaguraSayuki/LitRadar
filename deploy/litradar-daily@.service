@@ -19,3 +19,9 @@ ExecStart=/srv/Work/LitRadar/.venv/bin/python -m litradar.cli run
 TimeoutStartSec=3600
 NoNewPrivileges=true
 PrivateTmp=true
+PrivateDevices=true
+ProtectHome=read-only
+# 整个文件系统只读,只放开项目目录:数据库、锁文件、邮件收件目录都在 data/,
+# 而 interests.yaml(及其备份)就在项目根下 —— 和 web 单元保持同一套边界。
+ProtectSystem=strict
+ReadWritePaths=/srv/Work/LitRadar
