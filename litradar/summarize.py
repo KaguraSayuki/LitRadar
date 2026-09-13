@@ -146,9 +146,17 @@ def summarize_brief(rows: list[sqlite3.Row], llm: DeepSeek) -> dict[int, dict]:
 
 
 def run(cfg: Config, *, limit: int = 200, days: int = 30, verbose: bool = True,
-        force: bool = False) -> dict:
-    """生成中文摘要。默认覆盖窗口内**全部**条目,而不仅是前几名。"""
-    prof = load_interests(cfg)
+        force: bool = False, group: Profile | None = None) -> dict:
+    """生成中文摘要。默认覆盖窗口内**全部**条目,而不仅是前几名。
+
+    ``group`` 决定摘要按**哪个方向**来写(方向的描述会进 prompt,"对研究的
+    用处"这一行因此是方向相关的)。不给就用第一个启用的组。
+
+    注意:摘要里只有 ``relevance`` 与方向有关,其余字段(问题 / 方法 / 关键结果 /
+    局限)是通用的 —— 整条摘要按组重算会把 LLM 成本乘上组数,所以中性的部分
+    仍然一份共享(按组的 relevance 落在 summary_group,见 db 的注释)。
+    """
+    prof = group or load_interests(cfg)
     llm = DeepSeek(cfg.llm)
     stat: dict = {"deep": 0, "brief": 0, "brief_failed": 0, "skipped": 0}
     if not llm.available:

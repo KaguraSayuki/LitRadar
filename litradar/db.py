@@ -876,6 +876,10 @@ def upsert_item(conn: sqlite3.Connection, data: dict[str, Any]) -> tuple[int, bo
     """按 dedup_key 插入或补全。返回 (item_id, 是否新建)。
 
     已存在的条目只补空字段,不覆盖已有内容(避免低质量源盖掉高质量源)。
+
+    **这里不管订阅组的成员关系。** 入库但没记 ``item_group`` 的条目不会出现在
+    任何组的收件箱与排序里(排序与列表都只认成员)。采集路径统一走
+    ``pipeline._store(group_id=...)``;手动插数据时记得自己调 ``add_to_group``。
     """
     # ``upsert_item`` 也是若干来源和管理脚本直接使用的共同边界，不能只
     # 依赖 pipeline._prepare。DOI 与 dedup_key 必须始终使用同一个 canonical

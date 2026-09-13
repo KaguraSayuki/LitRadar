@@ -674,20 +674,24 @@ def llm_rerank(rows: list[tuple[sqlite3.Row, float, dict]], prof: Profile,
 
 
 # ------------------------------------------------------------------- driver
-def run(cfg: Config, *, days: int = 30, verbose: bool = True) -> dict:
-    prof = load_interests(cfg)
-    database = db.Database(cfg.db_file)
-    conn = database.connect()
-    started = db.now()
-    stat: dict[str, Any] = {}
+def _rank_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
+                group_id: int, *, days: int, verbose: bool) -> dict:
+    """**一个组**的排序:规则 → BM25 →(可选)LLM 精排。
 
+    候选只取**本组的成员**:不给全库打分,否则 LLM 花费会随组数直接翻倍。
+    规则与 BM25 是本地计算(免费),所以永远都跑;LLM 精排花钱,受
+    ``prof.llm_rank`` 控制。
+    """
+    started = db.now()
+    stat: dict[str, Any] = {"group": prof.slug}
     try:
         rows = list(conn.execute(
             f"""SELECT i.* FROM item i
+                JOIN item_group ig ON ig.item_id = i.id AND ig.group_id = ?
                WHERE i.kind='paper' AND {db.in_window('i')}
                ORDER BY i.published_at DESC""",
             # in_window 占两个 ?(没有 published_at 时回退比 created_at)
-            (f"-{days} days", f"-{days} days"),
+            (group_id, f"-{days} days", f"-{days} days"),
         ).fetchall())
         stat["candidates"] = len(rows)
 
@@ -699,6 +703,8 @@ def run(cfg: Config, *, days: int = 30, verbose: bool = True) -> dict:
         # 之前它们只是"没有分数",仍排在列表末尾逼用户手动忽略 ——
         # 实测 139 条忽略反馈里 119 条属于这种。
         #
+        # **excluded 是按组的**:组 A 的规则排除的文献,完全可能是组 B 的核心。
+        #
         # 例外只有一个:被**收藏**的不参与自动排除。收藏是用户明确说过的
         # "我要留着",不能被后续收紧的检索词悄悄吃掉。
         starred = db.starred_ids(conn)
@@ -706,45 +712,49 @@ def run(cfg: Config, *, days: int = 30, verbose: bool = True) -> dict:
         auto_dropped = [int(r["id"]) for r in rows if int(r["id"]) not in kept_ids_now]
         dropped_ids = [i for i in auto_dropped if i not in starred]
         # 反过来说,历史上被旧逻辑误伤的收藏条目要恢复出来
-        db.set_excluded(conn, [i for i in auto_dropped if i in starred], False)
+        db.set_excluded(conn, [i for i in auto_dropped if i in starred], False,
+                        group_slug=prof.slug)
         stat["protected_by_star"] = len(auto_dropped) - len(dropped_ids)
-        db.set_excluded(conn, dropped_ids, True)
+        db.set_excluded(conn, dropped_ids, True, group_slug=prof.slug)
         conn.commit()
 
-        db.set_excluded(conn, [int(r["id"]) for r, _, _ in kept], False)
+        db.set_excluded(conn, [int(r["id"]) for r, _, _ in kept], False,
+                        group_slug=prof.slug)
 
         kept = coarse_rank(kept, prof, cfg.llm.rerank_top_k)
         stat["after_coarse"] = len(kept)
 
-        # 清掉本轮【最终未被保留】条目的旧分数。
+        # 清掉本轮【最终未被保留】条目**在本组**的旧分数。
         # 必须在 coarse_rank 之后做:放在之前只会按中间集合清理,
-        # 那些"过了规则但没进 LLM"的条目会带着上一轮的分数残留下来。粗排截断
-        # 还是硬上限时踩过:本轮只评 50 条,库里却有 66 条分数。
+        # 那些"过了规则但没进 LLM"的条目会带着上一轮的分数残留下来。
         kept_ids = [int(r["id"]) for r, _, _ in kept]
         window = ("item_id IN (SELECT id FROM item WHERE kind='paper' "
                   f"AND {db.in_window('')})")
         if kept_ids:
             ph = ",".join("?" for _ in kept_ids)
             conn.execute(
-                f"DELETE FROM score WHERE {window} AND item_id NOT IN ({ph})",
-                [f"-{days} days", f"-{days} days", *kept_ids],
+                f"DELETE FROM score WHERE group_id = ? AND {window} "
+                f"AND item_id NOT IN ({ph})",
+                [group_id, f"-{days} days", f"-{days} days", *kept_ids],
             )
         else:
-            conn.execute(f"DELETE FROM score WHERE {window}",
-                         [f"-{days} days", f"-{days} days"])
+            conn.execute(f"DELETE FROM score WHERE group_id = ? AND {window}",
+                         [group_id, f"-{days} days", f"-{days} days"])
         conn.commit()
 
         llm = DeepSeek(cfg.llm)
         llm_scores: dict[int, tuple[float, str]] = {}
-        if llm.available and kept:
+        if not prof.llm_rank:
+            stat["llm_skipped"] = "本组已关闭 LLM 精排(interests.yaml 的 llm_rank)"
+        elif llm.available and kept:
             # 反馈闭环的消费端:收藏 / 否决过的标题当少样本塞进精排 prompt。
             # 之前这里没传,prompt 里的正负例永远是"(暂无)"——
             # 用户点的每一次收藏都只是落库,从不影响下一轮打分。
-            liked, disliked = feedback_examples(conn)
+            liked, disliked = feedback_examples(conn, group_id=group_id)
             stat["feedback_liked"] = len(liked)
             stat["feedback_disliked"] = len(disliked)
             if verbose:
-                print(f"  LLM 精排 {len(kept)} 篇…"
+                print(f"  [{prof.name}] LLM 精排 {len(kept)} 篇…"
                       f"(参考 {len(liked)} 正例 / {len(disliked)} 负例)")
             llm_scores = llm_rerank(kept, prof, cfg, llm,
                                     liked=liked, disliked=disliked)
@@ -758,8 +768,9 @@ def run(cfg: Config, *, days: int = 30, verbose: bool = True) -> dict:
         #     封顶在 w_coarse+w_rule(=15)。以前这里除以 0.15 补回满量程,
         #     一个只有粗排分的条目能冲到 100,反超真被 LLM 评过的,而界面上
         #     根本看不出它没被评过。宁可让它明显偏低,也不要假装它很相关。
-        #   * 压根没跑(没配 key / 全部批次失败)—— 保持归一化。此时全场都没有
-        #     LLM 分,谁也不会反超谁;分数铺满 0-100,界面的阈值筛选才有意义。
+        #   * 压根没跑(没配 key / 全部批次失败 / 本组关了精排)—— 保持归一化。
+        #     此时全场都没有 LLM 分,谁也不会反超谁;分数铺满 0-100,界面的
+        #     阈值筛选才有意义。
         normalize_missing = not llm_scores
         for row, rule, detail in kept:
             iid = int(row["id"])
@@ -775,19 +786,57 @@ def run(cfg: Config, *, days: int = 30, verbose: bool = True) -> dict:
                 total_w = w.w_coarse + w.w_rule
                 final = (base / total_w if total_w else 0.0) if normalize_missing else base
             db.save_score(
-                conn, iid,
+                conn, iid, group_id=group_id,
                 rule_score=round(rule, 2), coarse_score=round(coarse, 2),
                 llm_score=ls, llm_reason=reason,
                 llm_model=cfg.llm.model if ls is not None else None,
                 final_score=round(final, 2),
             )
         stat["scored"] = len(kept)
-        db.log_run(conn, "rank", "ok", stat, started_at=started)
+        db.log_run(conn, "rank", "ok", stat, started_at=started,
+                   group_slug=prof.slug)
         conn.commit()
     except Exception as e:  # noqa: BLE001
-        db.log_run(conn, "rank", "failed", stat, error=str(e), started_at=started)
+        db.log_run(conn, "rank", "failed", stat, error=str(e),
+                   started_at=started, group_slug=prof.slug)
         conn.commit()
         raise
+    return stat
+
+
+def run(cfg: Config, *, days: int = 30, verbose: bool = True,
+        group: Profile | None = None) -> dict:
+    """按订阅组排序。``group`` 指定时只跑那一个组。
+
+    **一个组失败不影响其它组**:某个方向的画像写坏了,不该让另外两个方向
+    当天没有分数。
+    """
+    groups = [group] if group is not None else load_enabled_groups(cfg)
+    conn = db.Database(cfg.db_file).connect()
+    try:
+        ids = db.sync_groups(conn, load_groups(cfg))
+        conn.commit()
+        total: dict[str, Any] = {"groups": {}, "candidates": 0, "after_rule": 0,
+                                 "dropped_by_rule": 0, "after_coarse": 0,
+                                 "scored": 0, "llm_scored": 0, "errors": 0,
+                                 "feedback_liked": 0, "feedback_disliked": 0}
+        for prof in groups:
+            gid = ids.get(prof.slug)
+            if gid is None:
+                continue
+            try:
+                stat = _rank_group(conn, cfg, prof, gid, days=days, verbose=verbose)
+            except Exception as e:  # noqa: BLE001
+                total["errors"] += 1
+                total["groups"][prof.slug] = {"error": f"{type(e).__name__}: {e}"}
+                if verbose:
+                    print(f"  [warn] 订阅组「{prof.name}」排序失败: "
+                          f"{type(e).__name__}: {e}")
+                continue
+            total["groups"][prof.slug] = stat
+            for key in ("candidates", "after_rule", "dropped_by_rule", "after_coarse",
+                        "scored", "llm_scored", "feedback_liked", "feedback_disliked"):
+                total[key] += int(stat.get(key, 0) or 0)
+        return total
     finally:
         conn.close()
-    return stat

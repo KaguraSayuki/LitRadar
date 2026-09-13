@@ -47,12 +47,15 @@ def test_sdk_errors_use_application_exception(monkeypatch, kind):
 
 def _seed(cfg, count):
     conn = db.Database(cfg.db_file).connect()
+    gid = db.ensure_group(conn, db.DEFAULT_GROUP_SLUG, name=db.DEFAULT_GROUP_NAME)
     for i in range(count):
-        db.upsert_item(conn, {
+        iid, _ = db.upsert_item(conn, {
             "kind": "paper", "dedup_key": f"doi:10.9999/{i}", "doi": f"10.9999/{i}",
             "title": f"Chemistry paper {i}", "title_norm": f"chemistry paper {i}",
             "published_at": datetime.date.today().isoformat(), "source": "test",
         })
+        # 排序只看本组成员;真实链路里由 pipeline._store(group_id=...) 记
+        db.add_to_group(conn, gid, iid)
     conn.commit()
     return conn
 
