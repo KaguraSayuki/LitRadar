@@ -8,7 +8,8 @@ from typing import Any
 from . import db, enrich, rank, summarize
 from .config import Config, read_secret
 from .normalize import normalize_doi, title_norm
-from .rank import load_interests
+from .rank import (Profile, load_enabled_groups, load_groups,
+                   load_interests)
 from .sources import crossref_search, mail, openalex_search, semanticscholar, xmol_email
 
 
@@ -38,12 +39,19 @@ def _prepare(data: dict) -> dict | None:
     return data
 
 
-def _store(conn: sqlite3.Connection, data: dict) -> tuple[int, bool]:
+def _store(conn: sqlite3.Connection, data: dict, *,
+           group_id: int | None = None) -> tuple[int, bool]:
+    """入库唯一入口。``group_id`` 给了就把这篇记进该组。
+
+    成员关系决定"它出现在哪个组的收件箱里",所以凡是分组采集都必须带上它。
+    """
     extras = {k: data.pop(k) for k in list(data) if k.startswith("_")}
     data = _prepare(data)
     if data is None:
         raise ValueError("缺少标题")
     iid, created = db.upsert_item(conn, data)
+    if group_id is not None:
+        db.add_to_group(conn, group_id, iid)
     if extras and any(v is not None for v in extras.values()):
         db.save_enrichment(conn, iid, {
             "cited_by_count": extras.get("_cited_by_count"),
@@ -58,6 +66,11 @@ def ingest_mail(cfg: Config, *, verbose: bool = True) -> dict:
     """解析 X-MOL 订阅邮件。支持 folder / maildir / imap 三种来源。"""
     database = db.Database(cfg.db_file)
     conn = database.connect()
+    # X-MOL 是**全局来源**:推什么由 X-MOL 网站上的订阅决定,本项目没法按方向
+    # 驱动它。所以它的条目记进所有启用的组,再由各组的规则与关键词决定相关性。
+    group_ids = db.sync_groups(conn, load_groups(cfg))
+    mail_group_ids = [group_ids[g.slug] for g in load_enabled_groups(cfg)
+                      if g.slug in group_ids]
     stat = {"messages": 0, "records": 0, "new": 0, "updated": 0, "errors": 0,
             "mode": cfg.mail.mode}
     started = db.now()
@@ -100,7 +113,9 @@ def ingest_mail(cfg: Config, *, verbose: bool = True) -> dict:
                 )
 
                 for rec in records:
-                    _, created = _store(conn, xmol_email.to_item_data(rec, source_ref=mid))
+                    iid, created = _store(conn, xmol_email.to_item_data(rec, source_ref=mid))
+                    for gid in mail_group_ids:
+                        db.add_to_group(conn, gid, iid)
                     if created:
                         message_new += 1
                     else:
@@ -184,8 +199,9 @@ def ingest_mail(cfg: Config, *, verbose: bool = True) -> dict:
     return stat
 
 
-def _ingest_snowball(conn: sqlite3.Connection, cfg: Config, prof,
-                     stat: dict, *, verbose: bool = True) -> list[dict]:
+def _ingest_snowball(conn: sqlite3.Connection, cfg: Config, prof: Profile,
+                     group_id: int, stat: dict, *,
+                     verbose: bool = True) -> list[dict]:
     """引用滚雪球:顺着自己领域的基础文献往前滚。
 
     精度靠**共被引计数**,不靠关键词:
@@ -220,7 +236,8 @@ def _ingest_snowball(conn: sqlite3.Connection, cfg: Config, prof,
     yr = f"{cutoff.year}-{date.today().year}"
 
     # ---- 1. 刷新最久没查的几个种子 ----
-    todo = db.pick_seeds_to_query(conn, seeds, cfg.sources.snowball_seeds_per_run)
+    todo = db.pick_seeds_to_query(conn, seeds, cfg.sources.snowball_seeds_per_run,
+                                 group_id=group_id)
     for seed in todo:
         got = semanticscholar.fetch_citations(
             f"DOI:{seed}", year=yr, since=cutoff.isoformat(),
@@ -228,20 +245,24 @@ def _ingest_snowball(conn: sqlite3.Connection, cfg: Config, prof,
             interval=cfg.sources.s2_min_interval, verbose=verbose)
         if not got:
             # 记失败也更新时间戳:否则一个 404 的死种子会每轮都排在最前面
-            db.mark_seed_queried(conn, seed, 0, status="failed")
+            db.mark_seed_queried(conn, seed, 0, group_id=group_id,
+                                 status="failed")
             stat["snowball_failed"] += 1
             conn.commit()
             continue
-        stat["snowball_new_cites"] += db.save_seed_cites(conn, seed, got)
-        db.mark_seed_queried(conn, seed, len(got), status="ok")
+        stat["snowball_new_cites"] += db.save_seed_cites(conn, seed, got,
+                                                      group_id=group_id)
+        db.mark_seed_queried(conn, seed, len(got), group_id=group_id)
         stat["snowball_refreshed"] += 1
         conn.commit()          # 逐种子提交:中断也不丢已花掉的额度
 
     # ---- 2. 在累积的引用关系上做共被引闸门 ----
-    kept = db.cocited_items(conn, cfg.sources.snowball_min_cocitations)
+    kept = db.cocited_items(conn, cfg.sources.snowball_min_cocitations,
+                            group_id=group_id)
     stat["snowball_kept"] = len(kept)
     if verbose:
-        total = conn.execute("SELECT COUNT(DISTINCT citing_doi) FROM seed_cite").fetchone()[0]
+        total = conn.execute("SELECT COUNT(DISTINCT citing_doi) FROM seed_cite "
+                             "WHERE group_id=?", (group_id,)).fetchone()[0]
         print(f"  滚雪球 刷新 {stat['snowball_refreshed']}/{len(todo)} 个种子"
               + (f"(失败 {stat['snowball_failed']})" if stat["snowball_failed"] else "")
               + f" · 累计引用关系 {total} 条"
@@ -249,26 +270,27 @@ def _ingest_snowball(conn: sqlite3.Connection, cfg: Config, prof,
     return kept
 
 
-def ingest_keyword_search(cfg: Config, *, verbose: bool = True) -> dict:
-    """用 interests.yaml 里的检索词做全量召回。
+def _issns_for(prof: Profile) -> list[str]:
+    """本组期刊白名单的 ISSN(Crossref / OpenAlex 的 issn 过滤用)。"""
+    out: list[str] = []
+    for name in list(prof.journals_core) + list(prof.journals_ok):
+        out += prof.journal_issns.get(name) or []
+    return out
 
-    Crossref 为主力(免费无预算限制);OpenAlex 仅在配了 API Key 时启用
-    —— 它 2026 年起改为额度制,未配 key 会直接返回 "Insufficient budget"。
+
+def _ingest_group(conn, cfg: Config, prof: Profile, group_id: int, *,
+                  verbose: bool = True) -> dict:
+    """**一个组**的召回:Crossref / S2 bulk / S2 venue / OpenAlex / 滚雪球。
+
+    命中的条目都记进这个组(item_group),这样"它出现在哪个组的收件箱"和
+    "哪个组的规则给它打分"才是同一个事实。
     """
-    prof = load_interests(cfg)
-    issns: list[str] = []
-    jr = (cfg.interests_data.get("journals") or {})
-    issn_map = jr.get("issn") or {}
-    for name in list(jr.get("core") or []) + list(jr.get("ok") or []):
-        issns += issn_map.get(name) or []
-
-    database = db.Database(cfg.db_file)
-    conn = database.connect()
+    issns = _issns_for(prof)
     queries = prof.queries or ([prof.query] if prof.query else [])
     stat: dict[str, Any] = {"queries": queries, "s2_queries": prof.s2_queries,
                             "per_query": {}, "crossref": 0, "s2": 0,
                             "snowball": 0, "unique": 0, "openalex": 0,
-                            "new": 0, "updated": 0, "errors": 0}
+                            "raw": 0, "new": 0, "updated": 0, "errors": 0}
     started = db.now()
     try:
         raw: list[dict] = []
@@ -346,9 +368,10 @@ def ingest_keyword_search(cfg: Config, *, verbose: bool = True) -> dict:
 
         # 引用滚雪球:第三条召回腿。前两条靠词表,这条靠领域前辈的引用关系 ——
         # 所以它能捞到"换了说法"的工作,那是关键词召回天然的盲区。
-        got_snow = _ingest_snowball(conn, cfg, prof, stat, verbose=verbose)
+        got_snow = _ingest_snowball(conn, cfg, prof, group_id, stat, verbose=verbose)
         stat["snowball"] = len(got_snow)
         raw += got_snow
+        stat["raw"] = len(raw)
 
         # 入库前去重:Crossref 同一 DOI 可能被多条查询、甚至同一响应重复返回,
         # 不去重会白白多花 LLM 精排的钱。
@@ -364,25 +387,65 @@ def ingest_keyword_search(cfg: Config, *, verbose: bool = True) -> dict:
 
         for data in found:
             try:
-                _, created = _store(conn, data)
+                _, created = _store(conn, data, group_id=group_id)
                 stat["new" if created else "updated"] += 1
             except Exception as e:  # noqa: BLE001
                 stat["errors"] += 1
                 if verbose:
                     print(f"  [warn] 入库失败: {e}")
         conn.commit()
-        db.log_run(conn, "ingest_search", "ok", stat, started_at=started)
+        db.log_run(conn, "ingest_search", "ok", stat, started_at=started,
+                   group_slug=prof.slug)
         conn.commit()
         if verbose:
-            print(f"  {len(queries)} 条查询 → 原始 {len(raw)} → 去重 {stat['unique']} "
-                  f"→ 新增 {stat['new']} / 更新 {stat['updated']}")
+            print(f"  [{prof.name}] {len(queries)} 条查询 → 原始 {stat['raw']} → "
+                  f"去重 {stat['unique']} → 新增 {stat['new']} / 更新 {stat['updated']}")
     except Exception as e:  # noqa: BLE001
-        db.log_run(conn, "ingest_search", "failed", stat, error=str(e), started_at=started)
+        db.log_run(conn, "ingest_search", "failed", stat, error=str(e),
+                   started_at=started, group_slug=prof.slug)
         conn.commit()
         raise
+    return stat
+
+
+def ingest_keyword_search(cfg: Config, *, verbose: bool = True,
+                          group: Profile | None = None) -> dict:
+    """按订阅组做全量召回。
+
+    每个组用自己的检索词、期刊白名单与滚雪球种子各跑一遍;规则过滤与 BM25
+    也按组各算(见 ``rank.run``)。``group`` 指定时只跑那一个组。
+
+    **单个组失败不拖垮其它组**:一个方向配错了检索词,不该让另外两个方向
+    当天颗粒无收。失败会被记进 ``groups[slug].error`` 与 ``errors`` 计数。
+    """
+    groups = [group] if group is not None else load_enabled_groups(cfg)
+    conn = db.Database(cfg.db_file).connect()
+    try:
+        ids = db.sync_groups(conn, load_groups(cfg))
+        conn.commit()
+        total: dict[str, Any] = {"groups": {}, "crossref": 0, "s2": 0, "snowball": 0,
+                                 "openalex": 0, "unique": 0, "new": 0,
+                                 "updated": 0, "errors": 0}
+        for prof in groups:
+            gid = ids.get(prof.slug)
+            if gid is None:
+                continue
+            try:
+                stat = _ingest_group(conn, cfg, prof, gid, verbose=verbose)
+            except Exception as e:  # noqa: BLE001
+                total["errors"] += 1
+                total["groups"][prof.slug] = {"error": f"{type(e).__name__}: {e}"}
+                if verbose:
+                    print(f"  [warn] 订阅组「{prof.name}」采集失败: "
+                          f"{type(e).__name__}: {e}")
+                continue
+            total["groups"][prof.slug] = stat
+            for key in ("crossref", "s2", "snowball", "openalex", "unique",
+                        "new", "updated", "errors"):
+                total[key] += int(stat.get(key, 0))
+        return total
     finally:
         conn.close()
-    return stat
 
 
 # --------------------------------------------------------------- 编排入口

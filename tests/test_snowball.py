@@ -105,13 +105,46 @@ def test_跨轮次累积也能凑够票(conn):
 
 
 def test_已在库的不再返回(conn):
+    """"已在库"从分组起是**已在这个组里** —— 单组场景两者等价。"""
     db.save_seed_cites(conn, "s1", [_cite("10.1/have")])
     db.save_seed_cites(conn, "s2", [_cite("10.1/have")])
-    db.upsert_item(conn, {"kind": "paper", "dedup_key": "doi:10.1/have",
-                          "doi": "10.1/have", "title": "H", "title_norm": "h",
-                          "source": "snowball"})
+    iid, _ = db.upsert_item(conn, {"kind": "paper", "dedup_key": "doi:10.1/have",
+                                   "doi": "10.1/have", "title": "H",
+                                   "title_norm": "h", "source": "snowball"})
+    db.add_to_group(conn, db.group_id(conn, db.DEFAULT_GROUP_SLUG), iid)
     conn.commit()
     assert db.cocited_items(conn, min_seeds=2) == []
+
+
+def test_别的组捞到过的仍算本组候选(conn):
+    """A 组先入库的论文,对 B 组仍是合法候选 —— 否则第二个方向永远捞不到它。"""
+    a = db.ensure_group(conn, "a")
+    b = db.ensure_group(conn, "b")
+    db.save_seed_cites(conn, "s1", [_cite("10.1/shared")], group_id=a)
+    db.save_seed_cites(conn, "s2", [_cite("10.1/shared")], group_id=a)
+    iid, _ = db.upsert_item(conn, {"kind": "paper", "dedup_key": "doi:10.1/shared",
+                                   "doi": "10.1/shared", "title": "S",
+                                   "title_norm": "s", "source": "snowball"})
+    db.add_to_group(conn, a, iid)
+    conn.commit()
+
+    # A 组已经收了它 → 不再是 A 的候选
+    assert db.cocited_items(conn, min_seeds=2, group_id=a) == []
+    # B 组自己的种子引用了它 → 仍是 B 的候选(哪怕它已在全局库里)
+    db.save_seed_cites(conn, "t1", [_cite("10.1/shared")], group_id=b)
+    db.save_seed_cites(conn, "t2", [_cite("10.1/shared")], group_id=b)
+    assert len(db.cocited_items(conn, min_seeds=2, group_id=b)) == 1
+
+
+def test_两个组的共被引票数不互相借(conn):
+    """A 的一个种子 + B 的一个种子,不该凑成"被两个种子引用"。"""
+    a = db.ensure_group(conn, "a")
+    b = db.ensure_group(conn, "b")
+    db.save_seed_cites(conn, "s1", [_cite("10.1/mix")], group_id=a)
+    db.save_seed_cites(conn, "s2", [_cite("10.1/mix")], group_id=b)
+
+    assert db.cocited_items(conn, min_seeds=2, group_id=a) == []
+    assert db.cocited_items(conn, min_seeds=2, group_id=b) == []
 
 
 def test_大小写不同的DOI算同一条(conn):
