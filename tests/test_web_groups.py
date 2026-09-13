@@ -131,3 +131,44 @@ def test_配置坏了不该让页面_500(tmp_path, monkeypatch):
     monkeypatch.setattr(webapp, "get_cfg", lambda: cfg)
 
     assert TestClient(webapp.app).get("/").status_code == 200
+
+
+def test_详情页显示当前组的分与状态(tmp_path, monkeypatch):
+    """回归:详情页的 score/summary_group/group_state 三处 join 都漏了组条件。
+
+    漏掉的后果不是报错,而是同一条 item 关联出多行、fetchone() 取到哪一组的
+    分全凭运气;而且 ignored 读的是 v5 起废弃的 item_state.ignored。
+    """
+    from litradar import db as _db
+
+    cfg = Config()
+    cfg.app.db_path = str(tmp_path / "d.db")
+    cfg.app.interests = str(tmp_path / "i.yaml")
+    cfg.interests_data = TWO_GROUPS
+    monkeypatch.setattr(webapp, "get_cfg", lambda: cfg)
+    conn = _db.Database(cfg.db_file).connect()
+    ids = _db.sync_groups(conn, load_groups(cfg))
+    iid, _ = _db.upsert_item(conn, {
+        "kind": "paper", "dedup_key": "doi:both", "doi": "both",
+        "title": "Both groups", "title_norm": "both groups", "source": "t",
+        "published_at": TODAY})
+    for slug in ("org", "mat"):
+        _db.add_to_group(conn, ids[slug], iid)
+    _db.save_score(conn, iid, group_id=ids["org"], final_score=11.0)
+    _db.save_score(conn, iid, group_id=ids["mat"], final_score=88.0)
+    _db.save_group_relevance(conn, ids["org"], iid, "对有机的用处", "m")
+    _db.save_group_relevance(conn, ids["mat"], iid, "对材料的用处", "m")
+    _db.set_action(conn, iid, "ignore", group_slug="mat")
+    conn.commit()
+    conn.close()
+
+    c = TestClient(webapp.app)
+    org_page = c.get("/item/1")
+    mat_page = c.get("/item/1?g=mat")
+
+    assert "11.0" in org_page.text, "该显示 org 组的分,而不是运气好的那组"
+    assert "88.0" in mat_page.text
+    assert "对有机的用处" in org_page.text
+    assert "对材料的用处" in mat_page.text
+    # ignored 的按组语义在数据层已由 test_groups.py 钉住;详情页上它是按钮,
+    # 没有可见的状态文案,不该在这里猜措辞

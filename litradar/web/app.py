@@ -566,20 +566,28 @@ def item_detail(request: Request, item_id: int):
     g = active_group(request, get_cfg())
     conn = _conn()
     try:
+        # 三处都按当前组:score / summary_group / group_state 的主键都带
+        # group_id。漏掉组条件的后果不是报错,而是**同一条 item 关联出多行**,
+        # fetchone() 取到哪一组的分全凭运气 —— 单组时看不出问题。
+        # ignored 也读 group_state:item_state.ignored 是 v5 起的废弃列。
+        gid = db.group_id(conn, g.slug if g else None) or -1
         row = conn.execute(
             """SELECT i.*, sc.final_score, sc.rule_score, sc.coarse_score, sc.llm_score,
                       sc.llm_reason, su.title_zh, su.one_liner, su.problem, su.method,
-                      su.key_results, su.limitation, su.relevance, su.depth,
+                      su.key_results, su.limitation, su.depth,
+                      COALESCE(sg.relevance, su.relevance) AS relevance,
                       COALESCE(s.state,'new') state, COALESCE(s.starred,0) starred,
-                      COALESCE(s.ignored,0) ignored,
+                      COALESCE(gs.ignored,0) ignored,
                       e.cited_by_count, e.is_oa, e.oa_url
                FROM item i
-               LEFT JOIN score          sc ON sc.item_id=i.id
-               LEFT JOIN summary        su ON su.item_id=i.id
-               LEFT JOIN item_state     s  ON s.item_id=i.id
+               LEFT JOIN score         sc ON sc.item_id=i.id AND sc.group_id=?
+               LEFT JOIN summary       su ON su.item_id=i.id
+               LEFT JOIN summary_group sg ON sg.item_id=i.id AND sg.group_id=?
+               LEFT JOIN item_state    s  ON s.item_id=i.id
+               LEFT JOIN group_state   gs ON gs.item_id=i.id AND gs.group_id=?
                LEFT JOIN item_enrichment e ON e.item_id=i.id
                WHERE i.id=?""",
-            (item_id,),
+            (gid, gid, gid, item_id),
         ).fetchone()
         # 在连接还开着的时候挂标签 —— _decorate 要读期刊缓存表
         it = _decorate([row], conn)[0] if row else None
