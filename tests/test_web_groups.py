@@ -172,3 +172,56 @@ def test_详情页显示当前组的分与状态(tmp_path, monkeypatch):
     assert "对材料的用处" in mat_page.text
     # ignored 的按组语义在数据层已由 test_groups.py 钉住;详情页上它是按钮,
     # 没有可见的状态文案,不该在这里猜措辞
+
+
+# ───────────────────────────── 花费护栏按组记账(阶段 4)
+def _log(cfg, stage, slug=None):
+    from datetime import datetime, timezone
+
+    from litradar import db as _db
+
+    ts = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    conn = _db.Database(cfg.db_file).connect()
+    conn.execute(
+        "INSERT INTO run_log (stage, started_at, finished_at, status, group_slug) "
+        "VALUES (?,?,?,?,?)",
+        (stage, ts, ts, "ok", slug))
+    conn.commit()
+    conn.close()
+
+
+def test_额度按组各算各的(tmp_path, monkeypatch):
+    """在 A 组点三次,不该把 B 组的额度也吃掉。"""
+    cfg = Config()
+    cfg.app.db_path = str(tmp_path / "g.db")
+    cfg.app.interests = str(tmp_path / "i.yaml")
+    cfg.interests_data = TWO_GROUPS
+    cfg.admin.cooldown_seconds = 0
+    cfg.admin.daily_limit = 3
+    monkeypatch.setattr(webapp, "get_cfg", lambda: cfg)
+    monkeypatch.setattr(webapp.rank, "run", lambda *a, **kw: {"scored": 0})
+    for _ in range(3):
+        _log(cfg, "rank", "org")
+    c = TestClient(webapp.app)
+
+    blocked = c.post("/admin/run/rank?g=org")
+    allowed = c.post("/admin/run/rank?g=mat")
+
+    assert blocked.status_code == 429, "org 组自己已经跑满"
+    assert allowed.status_code == 200, "mat 组不该被 org 的额度牵连"
+
+
+def test_全局工作算进每个组的账(tmp_path, monkeypatch):
+    """mail / enrich 是全局的(不按方向跑),它们的记录不该在按组算账时消失。"""
+    cfg = Config()
+    cfg.app.db_path = str(tmp_path / "g.db")
+    cfg.app.interests = str(tmp_path / "i.yaml")
+    cfg.interests_data = TWO_GROUPS
+    cfg.admin.cooldown_seconds = 0
+    cfg.admin.daily_limit = 1
+    monkeypatch.setattr(webapp, "get_cfg", lambda: cfg)
+    monkeypatch.setattr(webapp.rank, "run", lambda *a, **kw: {"scored": 0})
+    _log(cfg, "rank", None)          # 不带组的记录(旧版 / 全局入口)
+    c = TestClient(webapp.app)
+
+    assert c.post("/admin/run/rank?g=org").status_code == 429
