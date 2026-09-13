@@ -134,16 +134,69 @@ CREATE TABLE IF NOT EXISTS seed_query (
     status     TEXT                  -- ok / failed
 );
 
+-- 订阅组:一个研究方向一组。slug 是稳定标识(改名/改方向不动它),id 在库内
+-- 稳定,所有按组的表都用 group_id 关联。组本身来自 interests.yaml,
+-- 每次加载时对账(sync_groups),所以删掉一个组不会连带删掉历史分值。
+CREATE TABLE IF NOT EXISTS interest_group (
+    id         INTEGER PRIMARY KEY,
+    slug       TEXT NOT NULL UNIQUE,
+    name       TEXT NOT NULL DEFAULT '',
+    direction  TEXT NOT NULL DEFAULT '',
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    llm_rank   INTEGER NOT NULL DEFAULT 1,   -- 本组是否跑 LLM 精排(花钱开关)
+    position   INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- 这篇文献属于哪些组 —— 由采集时命中的查询决定,是"该组收件箱"的权威来源。
+-- 同一篇可以被多个组命中(DOI 去重后只有一行 item)。
+CREATE TABLE IF NOT EXISTS item_group (
+    group_id   INTEGER NOT NULL REFERENCES interest_group(id) ON DELETE CASCADE,
+    item_id    INTEGER NOT NULL REFERENCES item(id) ON DELETE CASCADE,
+    first_seen TEXT NOT NULL,
+    PRIMARY KEY (group_id, item_id)
+);
+CREATE INDEX IF NOT EXISTS idx_item_group_item ON item_group(item_id);
+
+-- 每组的"被规则排除 / 用户忽略"。**刻意与 item_state 分开**:
+-- starred / state(已读) 是对"这篇文献"的判断,全局一份;
+-- ignored / excluded 是对"它与某个方向的关系"的判断,按组各一份 ——
+-- 同一篇完全可能对 A 组无关、对 B 组是核心。
+CREATE TABLE IF NOT EXISTS group_state (
+    group_id INTEGER NOT NULL REFERENCES interest_group(id) ON DELETE CASCADE,
+    item_id  INTEGER NOT NULL REFERENCES item(id) ON DELETE CASCADE,
+    ignored  INTEGER NOT NULL DEFAULT 0,
+    excluded INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (group_id, item_id)
+);
+
+-- 摘要里**唯一**与方向有关的一行(relevance = "对研究的用处")。其余字段
+-- (problem / method / key_results / …)与方向无关,留在 summary 里共享 ——
+-- 否则每多一个组就要把整条摘要重算一遍。
+CREATE TABLE IF NOT EXISTS summary_group (
+    group_id   INTEGER NOT NULL REFERENCES interest_group(id) ON DELETE CASCADE,
+    item_id    INTEGER NOT NULL REFERENCES item(id) ON DELETE CASCADE,
+    relevance  TEXT,
+    model      TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (group_id, item_id)
+);
+
+-- 分值按组存:同一篇在不同组里的规则 / BM25 / LLM 分可以完全不同。
 CREATE TABLE IF NOT EXISTS score (
-    item_id      INTEGER PRIMARY KEY REFERENCES item(id) ON DELETE CASCADE,
+    group_id     INTEGER NOT NULL REFERENCES interest_group(id) ON DELETE CASCADE,
+    item_id      INTEGER NOT NULL REFERENCES item(id) ON DELETE CASCADE,
     rule_score   REAL,
     coarse_score REAL,
     llm_score    REAL,
     llm_reason   TEXT,
     llm_model    TEXT,
     final_score  REAL,
-    ranked_at    TEXT
+    ranked_at    TEXT,
+    PRIMARY KEY (group_id, item_id)
 );
+
 
 CREATE TABLE IF NOT EXISTS summary (
     item_id     INTEGER PRIMARY KEY REFERENCES item(id) ON DELETE CASCADE,
@@ -187,7 +240,8 @@ CREATE TABLE IF NOT EXISTS run_log (
     finished_at TEXT,
     status      TEXT,
     stats       TEXT,
-    error       TEXT
+    error       TEXT,
+    group_slug  TEXT              -- 按组计花费护栏的账本(空 = 全部组)
 );
 
 -- 全文检索
@@ -538,11 +592,140 @@ def _migrate_v4(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM journal_rank WHERE hit=0")
 
 
+def _migrate_v5(conn: sqlite3.Connection) -> None:
+    """订阅分组:分值按组存,并补齐成员关系与组级状态。
+
+    老库必须**无损且不空**:所有既有条目归入默认组,既有的 excluded/ignored
+    搬进该组的 group_state,score 原值搬到 (默认组, item)。否则升级后收件箱
+    会因为"没有成员关系"而整个空掉。
+    """
+    default_id = ensure_group(conn, DEFAULT_GROUP_SLUG, name=DEFAULT_GROUP_NAME)
+
+    run_cols = {r[1] for r in conn.execute("PRAGMA table_info(run_log)")}
+    if run_cols and "group_slug" not in run_cols:
+        conn.execute("ALTER TABLE run_log ADD COLUMN group_slug TEXT")
+
+    stamp = now()
+    conn.execute(
+        """INSERT OR IGNORE INTO item_group (group_id, item_id, first_seen)
+           SELECT ?, id, COALESCE(created_at, ?) FROM item""",
+        (default_id, stamp),
+    )
+
+    # 组级状态:老库只有全局一份,原样搬给默认组。
+    # 搬完**就地清空**这两列 —— item_state.ignored/excluded 从 v5 起是废弃
+    # 列,留着会和 group_state 变成两份真相(set_action 之后只更新 group_state,
+    # 旧列会停在迁移那一刻的值,读它的人看到的是错的而不是空的)。
+    state_cols = {r[1] for r in conn.execute("PRAGMA table_info(item_state)")}
+    if {"ignored", "excluded"} <= state_cols:
+        # JOIN item:老库里可能残留 item 已删、item_state 还在的孤儿行,直接搬
+        # 会连孤儿一起复制进 group_state,凭空造出新的外键违规。
+        conn.execute(
+            """INSERT OR IGNORE INTO group_state (group_id, item_id, ignored, excluded)
+               SELECT ?, s.item_id, COALESCE(s.ignored,0), COALESCE(s.excluded,0)
+                 FROM item_state s
+                 JOIN item i ON i.id = s.item_id
+                WHERE COALESCE(s.ignored,0) <> 0 OR COALESCE(s.excluded,0) <> 0""",
+            (default_id,),
+        )
+        conn.execute(
+            """UPDATE item_state SET ignored=0, excluded=0
+                WHERE COALESCE(ignored,0) <> 0 OR COALESCE(excluded,0) <> 0""")
+
+    # score 改复合主键。SQLite 改主键只能重建表,走 建新表 → 拷数据 → 换名。
+    score_cols = {r[1] for r in conn.execute("PRAGMA table_info(score)")}
+    if score_cols and "group_id" not in score_cols:
+        conn.executescript(f"""
+            CREATE TABLE score_v5 (
+                group_id     INTEGER NOT NULL
+                             REFERENCES interest_group(id) ON DELETE CASCADE,
+                item_id      INTEGER NOT NULL REFERENCES item(id) ON DELETE CASCADE,
+                rule_score   REAL, coarse_score REAL, llm_score REAL,
+                llm_reason   TEXT, llm_model    TEXT,
+                final_score  REAL, ranked_at    TEXT,
+                PRIMARY KEY (group_id, item_id)
+            );
+            INSERT INTO score_v5
+                (group_id, item_id, rule_score, coarse_score, llm_score,
+                 llm_reason, llm_model, final_score, ranked_at)
+                SELECT {default_id}, item_id, rule_score, coarse_score, llm_score,
+                       llm_reason, llm_model, final_score, ranked_at
+                  FROM score;
+            DROP TABLE score;
+            ALTER TABLE score_v5 RENAME TO score;
+        """)
+
+
+def ensure_group(conn: sqlite3.Connection, slug: str, *, name: str = "",
+                 direction: str = "", enabled: bool = True,
+                 llm_rank: bool = True, position: int = 0) -> int:
+    """按 slug 取组,不存在就建。返回稳定的 group_id。"""
+    slug = (slug or DEFAULT_GROUP_SLUG).strip() or DEFAULT_GROUP_SLUG
+    row = conn.execute("SELECT id FROM interest_group WHERE slug=?", (slug,)).fetchone()
+    if row:
+        return int(row["id"])
+    stamp = now()
+    cur = conn.execute(
+        """INSERT INTO interest_group
+           (slug, name, direction, enabled, llm_rank, position, created_at, updated_at)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (slug, name or slug, direction, int(bool(enabled)), int(bool(llm_rank)),
+         int(position), stamp, stamp),
+    )
+    return int(cur.lastrowid)
+
+
+def sync_groups(conn: sqlite3.Connection, groups) -> dict[str, int]:
+    """把 interests.yaml 里的组对账进库,返回 {slug: group_id}。
+
+    只增改不删除:删掉一个组不该连带删掉它的历史分值(想清干净就自己
+    删库里的行)。这样"临时注释掉一个组"是可逆的。
+    """
+    mapping: dict[str, int] = {}
+    for position, group in enumerate(groups):
+        gid = ensure_group(
+            conn, group.slug, name=group.name, direction=group.direction,
+            enabled=group.enabled, llm_rank=group.llm_rank, position=position,
+        )
+        conn.execute(
+            """UPDATE interest_group
+                  SET name=?, direction=?, enabled=?, llm_rank=?, position=?, updated_at=?
+                WHERE id=?""",
+            (group.name or group.slug, group.direction, int(bool(group.enabled)),
+             int(bool(group.llm_rank)), position, now(), gid),
+        )
+        mapping[group.slug] = gid
+    return mapping
+
+
+def groups(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """库里已知的组,按展示顺序。"""
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM interest_group ORDER BY position, id")]
+
+
+def group_id(conn: sqlite3.Connection, slug: str | None) -> int | None:
+    """slug → id;查不到返回 None(调用方自己决定是建还是忽略)。"""
+    row = conn.execute("SELECT id FROM interest_group WHERE slug=?",
+                       ((slug or DEFAULT_GROUP_SLUG),)).fetchone()
+    return int(row["id"]) if row else None
+
+
 # 迁移步骤按版本排列:下标 + 1 = 跑完这步之后的 user_version。
 # 加新迁移就在末尾追加一个函数,**同时把 SCHEMA 改成最新结构** ——
 # 新库只建 SCHEMA、不走这里。
-_MIGRATIONS = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4]
+_MIGRATIONS = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5]
 SCHEMA_VERSION = len(_MIGRATIONS)
+
+# 只能在迁移之后建的索引(见 Database.init 的注释)。
+POST_MIGRATION_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_score_final ON score(group_id, final_score DESC);
+"""
+
+# 老库升级时,所有历史条目都归到这个组名下 —— 这样收件箱不会因为分组功能
+# 上线而突然变空。旧的 interests.yaml(没有 groups:)也映射到这个 slug。
+DEFAULT_GROUP_SLUG = "default"
+DEFAULT_GROUP_NAME = "默认订阅组"
 
 # 已经跑过建表 + 迁移的库路径(进程级)。见 connect()
 _READY: set[str] = set()
@@ -599,6 +782,10 @@ class Database:
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             else:
                 self._migrate(conn)
+            # 依赖"迁移后结构"的索引必须在这里建:SCHEMA 先于迁移执行,那时
+            # 老库的 score 表还没有 group_id,把索引写进 SCHEMA 会让老库直接
+            # 启动失败(executescript 报 no such column)。
+            conn.executescript(POST_MIGRATION_INDEXES)
             conn.commit()
         finally:
             conn.close()
@@ -725,6 +912,48 @@ def in_window(alias: str = "i") -> str:
             f"OR (COALESCE({p},'') = '' AND COALESCE({c},'') >= date('now', ?)))")
 
 
+def _read_group_id(conn: sqlite3.Connection, slug: str | None) -> int:
+    """读路径用的 group_id:查不到就返回 -1(什么都关联不上)。
+
+    读路径**不建组** —— 建组是写路径(pipeline.sync_groups / save_score)的事,
+    在读事务里偷偷 INSERT 只会在回滚时白做。默认组不存在时,条目照常列出,
+    只是没有分数与组级状态,这正是空库该有的样子。
+    """
+    gid = group_id(conn, slug)
+    return gid if gid is not None else -1
+
+
+def _write_group_id(conn: sqlite3.Connection, slug: str | None = None) -> int:
+    """写路径用的 group_id。
+
+    默认组不存在时会**建出来** —— 单组用户的调用点(save_score /
+    set_excluded / set_action)不该先手动 sync 一次组。
+
+    但**具名组**不存在时直接报错,不顺手新建:组的权威来源是 interests.yaml
+    (sync_groups),写一个不存在的 slug 只可能是调用方拿了过期的组名。
+    要是悄悄建出来,拼错的 slug 就会在库里攒出一堆空组。
+    """
+    gid = group_id(conn, slug)
+    if gid is not None:
+        return gid
+    if slug in (None, "", DEFAULT_GROUP_SLUG):
+        return ensure_group(conn, DEFAULT_GROUP_SLUG, name=DEFAULT_GROUP_NAME)
+    raise ValueError(f"未知订阅组 {slug!r}:请先 sync_groups / ensure_group")
+
+
+def _group_joins() -> str:
+    """按组关联的三张表。三处 SELECT 共用,避免写法漂移。
+
+    三个 ``?`` 都要传**同一个** group_id(顺序即 sc / gs / sg)。分值表是
+    ``PRIMARY KEY (group_id, item_id)``,不加这个条件会让一条 item 按组数
+    复制成多行 —— 列表里就会出现重复条目。
+    """
+    return """
+        LEFT JOIN score         sc ON sc.item_id = i.id AND sc.group_id = ?
+        LEFT JOIN group_state   gs ON gs.item_id = i.id AND gs.group_id = ?
+        LEFT JOIN summary_group sg ON sg.item_id = i.id AND sg.group_id = ?"""
+
+
 def _item_filters(*, kind: str | None, state: str | None,
                   min_score: float | None, since: str | None) -> tuple[list[str], list]:
     """get_items 与 count_items 共用同一套筛选条件,防止两处写法漂移
@@ -741,7 +970,8 @@ def _item_filters(*, kind: str | None, state: str | None,
     if state == "starred":
         where.append("COALESCE(s.starred,0) = 1")
     elif state == "ignored":
-        where.append("COALESCE(s.ignored,0) = 1")
+        # ignored 是**按组**的:同一篇可能对 A 组无关、对 B 组是核心
+        where.append("COALESCE(gs.ignored,0) = 1")
     elif state == "new":
         where.append("COALESCE(s.state,'new') = 'new'")
     elif state:
@@ -758,8 +988,8 @@ def _item_filters(*, kind: str | None, state: str | None,
         #
         # 2) excluded —— 被规则过滤(实测 139 条忽略反馈里 119 条属于这种),
         #    本来就不该出现在列表里逼用户手动处理。
-        where.append("COALESCE(s.ignored,0) = 0")
-        where.append("COALESCE(s.excluded,0) = 0")
+        where.append("COALESCE(gs.ignored,0) = 0")
+        where.append("COALESCE(gs.excluded,0) = 0")
     # 两个伪状态视图刻意**免疫**上面这两条:收藏是用户亲手挑的清单,
     # 不能因为之后收紧了检索词就被"吃掉";不感兴趣页签本来就是收容所,
     # 进去的东西必然带着 ignored=1。
@@ -774,17 +1004,18 @@ def _item_filters(*, kind: str | None, state: str | None,
 
 def count_items(conn: sqlite3.Connection, *, kind: str | None = "paper",
                 state: str | None = None, min_score: float | None = None,
-                since: str | None = None) -> int:
+                since: str | None = None, group_slug: str | None = None) -> int:
     """与 get_items 条件一致的计数,供分页算总页数。"""
     where, params = _item_filters(kind=kind, state=state,
                                   min_score=min_score, since=since)
+    gid = _read_group_id(conn, group_slug)
     sql = f"""
         SELECT COUNT(*) FROM item i
-        LEFT JOIN score      sc ON sc.item_id = i.id
-        LEFT JOIN item_state s  ON s.item_id  = i.id
+        {_group_joins()}
+        LEFT JOIN item_state s ON s.item_id = i.id
         WHERE {' AND '.join(where)}
     """
-    return int(conn.execute(sql, params).fetchone()[0])
+    return int(conn.execute(sql, [gid, gid, gid, *params]).fetchone()[0])
 
 
 def get_items(
@@ -797,9 +1028,11 @@ def get_items(
     limit: int = 200,
     offset: int = 0,
     order: str = "score",
+    group_slug: str | None = None,
 ) -> list[sqlite3.Row]:
     where, params = _item_filters(kind=kind, state=state,
                                   min_score=min_score, since=since)
+    gid = _read_group_id(conn, group_slug)
 
     order_sql = {
         "score": "COALESCE(sc.final_score,-1) DESC, i.published_at DESC",
@@ -808,14 +1041,15 @@ def get_items(
 
     sql = f"""
         SELECT i.*, sc.final_score, sc.llm_score, sc.llm_reason,
-               su.title_zh, su.one_liner, su.relevance, su.method, su.key_results,
+               su.title_zh, su.one_liner, su.method, su.key_results,
                su.problem, su.limitation,
+               COALESCE(sg.relevance, su.relevance) AS relevance,
                COALESCE(s.state,'new') AS state,
                COALESCE(s.starred,0) AS starred,
-               COALESCE(s.ignored,0) AS ignored,
+               COALESCE(gs.ignored,0) AS ignored,
                e.cited_by_count, e.is_oa, e.oa_url
         FROM item i
-        LEFT JOIN score        sc ON sc.item_id = i.id
+        {_group_joins()}
         LEFT JOIN summary      su ON su.item_id = i.id
         LEFT JOIN item_state   s  ON s.item_id  = i.id
         LEFT JOIN item_enrichment e ON e.item_id = i.id
@@ -823,20 +1057,22 @@ def get_items(
         ORDER BY {order_sql}
         LIMIT ? OFFSET ?
     """
-    return conn.execute(sql, [*params, limit, offset]).fetchall()
+    return conn.execute(sql, [gid, gid, gid, *params, limit, offset]).fetchall()
 
 
 def search_items(conn: sqlite3.Connection, q: str, limit: int = 100,
-                 offset: int = 0) -> list[sqlite3.Row]:
+                 offset: int = 0, group_slug: str | None = None) -> list[sqlite3.Row]:
     # 必须与 get_items 选出同一组列 —— 卡片宏会用到 cited_by_count / is_oa / oa_url
-    sql = """
+    gid = _read_group_id(conn, group_slug)
+    sql = f"""
         SELECT i.*, sc.final_score, sc.llm_reason, su.title_zh, su.one_liner,
+               COALESCE(sg.relevance, su.relevance) AS relevance,
                COALESCE(s.state,'new') AS state, COALESCE(s.starred,0) AS starred,
-               COALESCE(s.ignored,0) AS ignored,
+               COALESCE(gs.ignored,0) AS ignored,
                e.cited_by_count, e.is_oa, e.oa_url
         FROM item_fts f
         JOIN item i ON i.id = f.rowid
-        LEFT JOIN score            sc ON sc.item_id = i.id
+        {_group_joins()}
         LEFT JOIN summary          su ON su.item_id = i.id
         LEFT JOIN item_state       s  ON s.item_id  = i.id
         LEFT JOIN item_enrichment  e  ON e.item_id  = i.id
@@ -848,7 +1084,8 @@ def search_items(conn: sqlite3.Connection, q: str, limit: int = 100,
     if not terms:
         return []
     try:
-        return conn.execute(sql, (" ".join(terms), limit, offset)).fetchall()
+        return conn.execute(sql, (gid, gid, gid, " ".join(terms),
+                                  limit, offset)).fetchall()
     except sqlite3.OperationalError:
         return []
 
@@ -859,17 +1096,24 @@ def search_items(conn: sqlite3.Connection, q: str, limit: int = 100,
 
 
 
-def save_score(conn: sqlite3.Connection, item_id: int, **kw) -> None:
+def save_score(conn: sqlite3.Connection, item_id: int, *,
+               group_id: int | None = None, group_slug: str | None = None,
+               **kw) -> None:
+    """写某个组里这篇的分值。
+
+    ``group_id`` / ``group_slug`` 都不给时落到默认组 —— 单组用户的写法不用改。
+    """
+    gid = group_id if group_id is not None else _write_group_id(conn, group_slug)
     conn.execute(
-        """INSERT INTO score (item_id, rule_score, coarse_score, llm_score,
-                              llm_reason, llm_model, final_score, ranked_at)
-           VALUES (?,?,?,?,?,?,?,?)
-           ON CONFLICT(item_id) DO UPDATE SET
+        """INSERT INTO score (group_id, item_id, rule_score, coarse_score,
+                              llm_score, llm_reason, llm_model, final_score, ranked_at)
+           VALUES (?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(group_id, item_id) DO UPDATE SET
              rule_score=excluded.rule_score, coarse_score=excluded.coarse_score,
              llm_score=excluded.llm_score, llm_reason=excluded.llm_reason,
              llm_model=excluded.llm_model, final_score=excluded.final_score,
              ranked_at=excluded.ranked_at""",
-        (item_id, kw.get("rule_score"), kw.get("coarse_score"),
+        (gid, item_id, kw.get("rule_score"), kw.get("coarse_score"),
          kw.get("llm_score"), kw.get("llm_reason"), kw.get("llm_model"),
          kw.get("final_score"), now()),
     )
@@ -1068,21 +1312,37 @@ def starred_ids(conn: sqlite3.Connection) -> set[int]:
             conn.execute("SELECT item_id FROM item_state WHERE starred=1")}
 
 
-def set_excluded(conn: sqlite3.Connection, item_ids: list[int], excluded: bool = True) -> None:
-    """标记/取消标记被规则过滤的条目。收件箱据此隐藏它们。"""
+def set_excluded(conn: sqlite3.Connection, item_ids: list[int],
+                 excluded: bool = True, *, group_slug: str | None = None) -> None:
+    """标记/取消标记**某个组里**被规则过滤的条目。收件箱据此隐藏它们。
+
+    按组:组 A 的规则排除的文献,可能是组 B 的核心方向。
+    """
     if not item_ids:
         return
+    gid = _write_group_id(conn, group_slug)
     for iid in item_ids:
-        conn.execute("INSERT OR IGNORE INTO item_state (item_id) VALUES (?)", (iid,))
-        conn.execute("UPDATE item_state SET excluded=? WHERE item_id=?",
-                     (1 if excluded else 0, iid))
+        # 不用 upsert:group_state 有个列就叫 excluded,而 upsert 的伪表也叫
+        # excluded,"excluded=excluded.excluded" 读起来等于自欺,拆成两步清楚。
+        conn.execute("INSERT OR IGNORE INTO group_state (group_id, item_id) VALUES (?,?)",
+                     (gid, iid))
+        conn.execute("UPDATE group_state SET excluded=? WHERE group_id=? AND item_id=?",
+                     (1 if excluded else 0, gid, iid))
 
 
 # 用户反馈的全部合法动作。set_action 之外没有别的写入口。
 ACTIONS = frozenset({"star", "unstar", "read", "unread", "archive", "ignore", "unignore"})
 
 
-def set_action(conn: sqlite3.Connection, item_id: int, action: str) -> None:
+def set_action(conn: sqlite3.Connection, item_id: int, action: str, *,
+               group_slug: str | None = None) -> None:
+    """记录一次用户反馈。
+
+    状态归属分两轴:**star 与已读/归档是全局的**(这是对"这篇文献"的判断:
+    我看过、我要留着),而 **ignore / unignore 是按组的**(这是对"它与某个
+    方向的关系"的判断 —— 同一篇可能对 A 组无关、对 B 组是核心)。
+    不带 group_slug 时落在默认组,单组用户的写法不用改。
+    """
     # action 来自表单的任意字符串。以前未知值不改状态,却照样原样写进
     # feedback 表(统计页按 action 分组、精排 prompt 取反馈样本都读它),
     # 所以在这里就拒绝,别让垃圾落库。
@@ -1092,10 +1352,12 @@ def set_action(conn: sqlite3.Connection, item_id: int, action: str) -> None:
     if action in ("star", "unstar"):
         conn.execute("UPDATE item_state SET starred=? WHERE item_id=?",
                      (1 if action == "star" else 0, item_id))
-    elif action == "ignore":
-        conn.execute("UPDATE item_state SET ignored=1 WHERE item_id=?", (item_id,))
-    elif action == "unignore":
-        conn.execute("UPDATE item_state SET ignored=0 WHERE item_id=?", (item_id,))
+    elif action in ("ignore", "unignore"):
+        gid = _write_group_id(conn, group_slug)
+        conn.execute("INSERT OR IGNORE INTO group_state (group_id, item_id) VALUES (?,?)",
+                     (gid, item_id))
+        conn.execute("UPDATE group_state SET ignored=? WHERE group_id=? AND item_id=?",
+                     (1 if action == "ignore" else 0, gid, item_id))
     elif action in ("read", "unread", "archive"):
         val = {"read": "read", "unread": "new", "archive": "archived"}[action]
         conn.execute("UPDATE item_state SET state=? WHERE item_id=?", (val, item_id))
@@ -1106,12 +1368,15 @@ def set_action(conn: sqlite3.Connection, item_id: int, action: str) -> None:
 
 
 def log_run(conn: sqlite3.Connection, stage: str, status: str, stats: Any = None,
-            error: str | None = None, started_at: str | None = None) -> None:
+            error: str | None = None, started_at: str | None = None,
+            group_slug: str | None = None) -> None:
     conn.execute(
-        """INSERT INTO run_log (stage, started_at, finished_at, status, stats, error)
-           VALUES (?,?,?,?,?,?)""",
+        """INSERT INTO run_log
+           (stage, started_at, finished_at, status, stats, error, group_slug)
+           VALUES (?,?,?,?,?,?,?)""",
         (stage, started_at or now(), now(), status,
-         json.dumps(stats, ensure_ascii=False) if stats is not None else None, error),
+         json.dumps(stats, ensure_ascii=False) if stats is not None else None, error,
+         group_slug),
     )
 
 

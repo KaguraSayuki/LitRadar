@@ -155,6 +155,17 @@ def test_混合大小写DOI迁移合并关联数据(tmp_path):
                  (first, "read", "2026-01-01T00:00:01"))
     conn.execute("INSERT INTO feedback(item_id, action, created_at) VALUES (?,?,?)",
                  (second, "unread", "2026-01-02T00:00:02"))
+    # SCHEMA 现在建的是 v5 的复合主键 score(item_id 不再是主键)。要模拟一个
+    # v3 的库,得先把 score 换回旧结构,否则下面的历史写法会撞 NOT NULL。
+    conn.executescript("""
+        DROP TABLE score;
+        CREATE TABLE score (
+            item_id      INTEGER PRIMARY KEY REFERENCES item(id) ON DELETE CASCADE,
+            rule_score   REAL, coarse_score REAL, llm_score REAL,
+            llm_reason   TEXT, llm_model    TEXT,
+            final_score  REAL, ranked_at    TEXT
+        );
+    """)
     conn.execute("INSERT INTO score(item_id, final_score, ranked_at) VALUES (?,?,?)",
                  (second, 88, "2026-01-02"))
     conn.execute(
@@ -177,9 +188,13 @@ def test_混合大小写DOI迁移合并关联数据(tmp_path):
     assert conn.execute("SELECT abstract_hash FROM summary").fetchone()[0] == "hash-b"
     assert conn.execute("SELECT crossref_json FROM item_enrichment").fetchone()[0]
     assert conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0] == 6
-    # 最新 unstar/unignore/unread 生效；旧副本的 excluded 仍保留。
+    # 最新 unstar/unignore/unread 生效；starred/state 仍是全局的。
     assert tuple(conn.execute("SELECT starred, ignored, excluded, state FROM item_state").fetchone()) == \
-        (0, 0, 1, "new")
+        (0, 0, 0, "new")
+    # v5 起 ignored/excluded 按组存放:默认组里应保留旧副本的 excluded=1。
+    # 旧的 item_state 那两列同时被清空,避免出现两份真相。
+    assert tuple(conn.execute(
+        "SELECT ignored, excluded FROM group_state").fetchone()) == (0, 1)
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     assert conn.execute("SELECT COUNT(*) FROM item_fts WHERE item_fts MATCH 'longer'").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM journal_rank").fetchone()[0] == 0
@@ -210,4 +225,93 @@ def test_DOI迁移保留不同标识符的末尾标点(tmp_path):
         f"10.1234/{s.lower()}" for s in suffixes}
     assert conn.execute("SELECT COUNT(*) FROM item").fetchone()[0] == len(suffixes)
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    conn.close()
+
+
+# ─────────────────────────────── v4 → v5:分组上线后老库不能丢也不能空
+LEGACY_SCORE = """
+DROP TABLE score;
+CREATE TABLE score (
+    item_id      INTEGER PRIMARY KEY REFERENCES item(id) ON DELETE CASCADE,
+    rule_score   REAL, coarse_score REAL, llm_score REAL,
+    llm_reason   TEXT, llm_model    TEXT,
+    final_score  REAL, ranked_at    TEXT
+);
+"""
+
+
+def test_v4库升级到分组后条目不丢也不空(tmp_path):
+    """这是分组功能最关键的一条回归:升级后收件箱必须还是满的。
+
+    老库没有 item_group,如果迁移不把既有条目归入默认组,收件箱会整个空掉
+    —— 数据没丢,但用户看到的是"东西全没了"。
+    """
+    database = db.Database(tmp_path / "v4.db")
+    conn = database.connect()
+    conn.executescript(LEGACY_SCORE)          # 换回 v4 的 score 形态
+    for n, (title, doi) in enumerate([("Kept", "10.1/kept"), ("Excluded", "10.1/ex")]):
+        conn.execute(
+            """INSERT INTO item(kind, dedup_key, doi, title, title_norm, source,
+                                created_at, updated_at)
+               VALUES ('paper', ?, ?, ?, ?, 'test', '2026-01-01', '2026-01-01')""",
+            (f"doi:{doi}", doi, title, title.lower()))
+    kept, excluded = [r[0] for r in conn.execute("SELECT id FROM item ORDER BY id")]
+    conn.execute("INSERT INTO item_state(item_id, starred, ignored, excluded) VALUES (?,1,0,0)", (kept,))
+    conn.execute("INSERT INTO item_state(item_id, starred, ignored, excluded) VALUES (?,0,1,1)", (excluded,))
+    conn.execute("INSERT INTO score(item_id, final_score, llm_score, ranked_at) VALUES (?,?,?,?)",
+                 (kept, 77.0, 60.0, "2026-01-02"))
+    conn.execute("PRAGMA user_version=4")
+    conn.commit()
+
+    db.Database._migrate(conn)
+    conn.commit()
+
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+    # 1) 默认组存在,且所有历史条目都归入其中 —— 收件箱不会空
+    default_id = db.group_id(conn, db.DEFAULT_GROUP_SLUG)
+    assert default_id is not None
+    assert conn.execute("SELECT COUNT(*) FROM item_group WHERE group_id=?",
+                        (default_id,)).fetchone()[0] == 2
+    # 2) 分值原值搬到 (默认组, item),没丢也没串组
+    assert tuple(conn.execute("SELECT group_id, final_score, llm_score FROM score").fetchone()) == \
+        (default_id, 77.0, 60.0)
+    # 3) 全局的 ignored/excluded 搬进默认组的 group_state,并就地清空旧列
+    assert tuple(conn.execute(
+        "SELECT item_id, ignored, excluded FROM group_state").fetchone()) == (excluded, 1, 1)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM item_state WHERE COALESCE(ignored,0)<>0 "
+        "OR COALESCE(excluded,0)<>0").fetchone()[0] == 0
+    # 4) star 保持全局,且收件箱里还剩那条没被排除的
+    assert db.count_items(conn, state="starred") == 1
+    visible = db.get_items(conn, group_slug=db.DEFAULT_GROUP_SLUG)
+    assert [r["title"] for r in visible] == ["Kept"]
+    assert visible[0]["final_score"] == 77.0
+    # 5) 重复跑迁移必须幂等(每次 connect 都可能触发)
+    db.Database._migrate(conn)
+    conn.commit()
+    assert conn.execute("SELECT COUNT(*) FROM item_group").fetchone()[0] == 2
+    assert conn.execute("SELECT COUNT(*) FROM group_state").fetchone()[0] == 1
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    conn.close()
+
+
+def test_v4库升级后能直接跑第二次迁移不会重复计分(tmp_path):
+    """幂等性:迁移只跑一次由 user_version 保证,重复调用也不该产生重复行。"""
+    database = db.Database(tmp_path / "twice.db")
+    conn = database.connect()
+    conn.executescript(LEGACY_SCORE)
+    conn.execute(
+        """INSERT INTO item(kind, dedup_key, doi, title, title_norm, source,
+                            created_at, updated_at)
+           VALUES ('paper','doi:10.2/a','10.2/a','A','a','test','2026-01-01','2026-01-01')""")
+    conn.execute("INSERT INTO score(item_id, final_score) VALUES (1, 5.0)")
+    conn.execute("PRAGMA user_version=4")
+    conn.commit()
+
+    for _ in range(3):
+        db.Database._migrate(conn)
+        conn.commit()
+
+    assert conn.execute("SELECT COUNT(*) FROM item_group").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM score").fetchone()[0] == 1
     conn.close()
