@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -91,6 +92,75 @@ def _type_label(value: Any) -> str:
     return type(value).__name__
 
 
+def _group_label(entry: Any, index: int) -> str:
+    """报错时能一眼看出是哪一组。"""
+    if isinstance(entry, dict):
+        ident = str(entry.get("slug") or entry.get("name") or "").strip()
+        if ident:
+            return f"groups[{index}]({ident})"
+    return f"groups[{index}]"
+
+
+def _resolve_slug(entry: dict, index: int) -> tuple[str, str | None]:
+    """定出这一组的 slug。返回 (slug, 错误)。
+
+    显式写了就用显式的;没写就从组名派生。校验与加载**共用这一个函数**,
+    否则两处派生规则一旦分叉,校验说没问题、加载却撞 slug。
+    """
+    raw = entry.get("slug")
+    if raw is not None and not isinstance(raw, str):
+        return "", f"slug 必须是字符串,当前是{_type_label(raw)}"
+    explicit = (raw or "").strip()
+    if explicit:
+        return explicit, None
+    name = str(entry.get("name") or "").strip()
+    return _derive_slug(name or "default", index), None
+
+
+def _validate_groups(data: dict, groups: Any, *, require_keys: bool) -> list[str]:
+    """校验 ``groups:`` 形态。老的单方向格式由 validate_interests 自己处理。"""
+    errors: list[str] = []
+    if not isinstance(groups, list):
+        return [f"groups 必须是列表,当前是{_type_label(groups)}"]
+    if require_keys and not groups:
+        return ["groups 不能是空列表;不分组就删掉 groups:,直接用单方向格式"]
+
+    # 同一层既写 groups: 又写单方向字段,读者无法判断哪个生效 —— 直接拒绝。
+    flat = (set(_INTERESTS_REQUIRED) | set(_INTERESTS_SCALAR_FIELDS)
+            | set(_INTERESTS_LIST_FIELDS) | {"keywords", "journals"})
+    stray = sorted(flat & set(data))
+    if stray:
+        errors.append("用了 groups: 就不要再在同一层写单方向字段:" + "、".join(stray))
+
+    seen: dict[str, int] = {}
+    for index, entry in enumerate(groups):
+        label = _group_label(entry, index)
+        if not isinstance(entry, dict):
+            errors.append(f"{label} 必须是映射,当前是{_type_label(entry)}")
+            continue
+        if "groups" in entry:
+            errors.append(f"{label} 里不能再嵌套 groups")
+            continue
+        # 结构按单方向那套校验,但不强制字段齐全 —— 某一组可以只配检索词,
+        # 也可以只配关键词。真正"什么都没配"的组只是什么都捞不到而已。
+        errors.extend(f"{label}: {e}"
+                      for e in validate_interests(entry, require_keys=False))
+        for field_name in ("enabled", "llm_rank"):
+            value = entry.get(field_name)
+            if value is not None and not isinstance(value, bool):
+                errors.append(
+                    f"{label}.{field_name} 必须是布尔值,当前是{_type_label(value)}")
+        slug, slug_error = _resolve_slug(entry, index)
+        if slug_error:
+            errors.append(f"{label}.{slug_error}")
+        elif slug in seen:
+            errors.append(f"{label} 的 slug {slug!r} 与 groups[{seen[slug]}] 重复;"
+                          "请显式写明不同的 slug")
+        else:
+            seen[slug] = index
+    return errors
+
+
 def validate_interests(data: Any, *, require_keys: bool = True) -> list[str]:
     """Validate the structure consumed from ``interests.yaml``.
 
@@ -108,6 +178,9 @@ def validate_interests(data: Any, *, require_keys: bool = True) -> list[str]:
     errors: list[str] = []
     if not isinstance(data, dict):
         return [f"顶层必须是映射,当前是{_type_label(data)}"]
+
+    if data.get("groups") is not None:
+        return _validate_groups(data, data.get("groups"), require_keys=require_keys)
 
     if require_keys:
         missing = _INTERESTS_REQUIRED - set(data)
@@ -187,6 +260,14 @@ class Profile:
     # 引用滚雪球的种子 DOI。必须是 1-3 年前的文献 —— 新论文被引 0-1 次,滚不出来。
     seed_dois: list[str] = field(default_factory=list)
     exclude_title_prefixes: list[str] = field(default_factory=list)
+    # ── 订阅分组 ──────────────────────────────────────────────────────────
+    # slug 是**稳定标识**:库里的 score / item_group / group_state 都按它对应的
+    # group_id 关联。改名不要改 slug,否则等于换了一个组。
+    slug: str = db.DEFAULT_GROUP_SLUG
+    enabled: bool = True
+    # 本组是否跑 LLM 精排。规则与 BM25 是本地计算、不花钱,永远都跑;
+    # 精排是按组花钱的,所以给一个按组的开关(见 config 的 admin 段)。
+    llm_rank: bool = True
 
     @classmethod
     def from_dict(cls, d: dict) -> "Profile":
@@ -249,8 +330,83 @@ class Profile:
         return " ".join(out)
 
 
+def _derive_slug(name: str, index: int) -> str:
+    """从组名派生一个可用作 URL / cookie 的稳定 slug。
+
+    纯中文组名派生不出 ASCII,这时用名字的摘要 —— 只要名字不变,slug 就不变
+    (用序号的话,组一重排身份就串了)。想改名又不想换身份,就显式写 slug。
+    """
+    base = re.sub(r"[^a-z0-9]+", "-", (name or "").strip().lower()).strip("-")
+    if base:
+        return base[:48]
+    digest = hashlib.sha1((name or f"group-{index}").encode("utf-8")).hexdigest()
+    return "g" + digest[:10]
+
+
+def _as_bool(value: Any, default: bool, *, field_name: str) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"{field_name} 必须是布尔值(true/false),当前是{_type_label(value)}")
+
+
+def load_groups(cfg: Config) -> list[Profile]:
+    """读出所有订阅组。
+
+    **老格式(没有 groups:)整份文件就是一组,slug 固定为 ``default``** ——
+    库里已有的历史数据都在这个 slug 下(见 ``db._migrate_v5``),换成别的名字
+    会让升级后的收件箱直接变空。
+    """
+    data = cfg.interests_data or {}
+    if not isinstance(data, dict):
+        return [Profile.from_dict({})]
+
+    raw = data.get("groups")
+    if raw is None:
+        prof = Profile.from_dict(data)
+        prof.slug = db.DEFAULT_GROUP_SLUG
+        if not (prof.name or "").strip() or prof.name == "default":
+            prof.name = db.DEFAULT_GROUP_NAME
+        return [prof]
+
+    if not isinstance(raw, list):
+        raise ValueError("interests.yaml 的 groups 必须是列表")
+
+    out: list[Profile] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise ValueError(f"groups[{index}] 必须是映射")
+        prof = Profile.from_dict(entry)
+        slug, slug_error = _resolve_slug(entry, index)
+        if slug_error:
+            raise ValueError(f"groups[{index}]: {slug_error}")
+        if slug in seen:
+            raise ValueError(f"重复的订阅组 slug {slug!r};请显式指定不同的 slug")
+        seen.add(slug)
+        prof.slug = slug
+        prof.name = (prof.name or "").strip()
+        if not prof.name or prof.name == "default":
+            prof.name = slug
+        prof.enabled = _as_bool(entry.get("enabled"), True, field_name=f"groups[{index}].enabled")
+        prof.llm_rank = _as_bool(entry.get("llm_rank"), True,
+                                 field_name=f"groups[{index}].llm_rank")
+        out.append(prof)
+    return out or [Profile.from_dict({})]
+
+
+def load_enabled_groups(cfg: Config) -> list[Profile]:
+    """要参与采集与排序的组。``enabled: false`` 用来临时停掉一个方向。"""
+    return [g for g in load_groups(cfg) if g.enabled]
+
+
 def load_interests(cfg: Config) -> Profile:
-    return Profile.from_dict(cfg.interests_data or {})
+    """取第一组。
+
+    兼容单组调用点;分组流程请用 ``load_groups`` / ``load_enabled_groups``。
+    """
+    return load_groups(cfg)[0]
 
 
 # ------------------------------------------------------------------- Stage 1
