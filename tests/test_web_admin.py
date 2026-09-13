@@ -352,3 +352,214 @@ def test_兜底分只在_LLM_可用时才标(client, monkeypatch):
         conn.execute("DELETE FROM item WHERE id=?", (iid,))
         conn.commit()
         conn.close()
+
+
+# ──────────────────── 花钱阶段的密码 + 冷却 + 每日上限(护栏)
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+
+def _set_password(monkeypatch, password: str = "hunter2-hunter2") -> str:
+    """设置管理员密码(测试里用低迭代次数,否则 600k 次会拖慢整个套件)。"""
+    from litradar.passwords import hash_password
+
+    monkeypatch.setenv("LITRADAR_ADMIN_PASSWORD_HASH",
+                       hash_password(password, iterations=1000))
+    return password
+
+
+def _log_run(cfg, stage: str, *, when: str | None = None) -> str:
+    """直接写 run_log —— 冷却与每日上限的账本就是它,所以要能精确控制时间。"""
+    stamp = when or datetime.now(timezone.utc).astimezone().isoformat(
+        timespec="seconds")
+    conn = webapp.db.Database(cfg.db_file).connect()
+    conn.execute(
+        "INSERT INTO run_log (stage, started_at, finished_at, status) VALUES (?,?,?,?)",
+        (stage, stamp, stamp, "ok"))
+    conn.commit()
+    conn.close()
+    return stamp
+
+
+def test_花钱阶段要密码(client, monkeypatch):
+    _set_password(monkeypatch)
+
+    r = client.post("/admin/run/rank", headers={"X-Token": TOKEN})
+
+    assert r.status_code == 401
+    # 前端靠这个头区分"该弹密码框"和"URL 里的 token 不对"(两者都是 401)
+    assert r.headers.get("X-Admin-Password-Required") == "1"
+
+
+def test_花钱阶段密码对就放行(client, monkeypatch):
+    pw = _set_password(monkeypatch)
+
+    r = client.post("/admin/run/rank",
+                    headers={"X-Token": TOKEN, "X-Admin-Password": pw})
+
+    assert r.status_code == 200
+
+
+def test_花钱阶段密码错被拒(client, monkeypatch):
+    _set_password(monkeypatch)
+
+    r = client.post("/admin/run/rank",
+                    headers={"X-Token": TOKEN, "X-Admin-Password": "wrong-password"})
+
+    assert r.status_code == 401
+
+
+def test_免费阶段不要密码(client, monkeypatch):
+    """mail / search 只花免费额度,不该每次点都弹密码框。"""
+    _set_password(monkeypatch)
+    monkeypatch.setattr(webapp.pipeline, "ingest_mail", lambda *a, **k: {"messages": 0})
+
+    assert client.post("/admin/run/mail", headers={"X-Token": TOKEN}).status_code == 200
+
+
+def test_没设密码时照常放行但有提醒(client, monkeypatch):
+    """与 token 同语义:设了就校验,没设不拦(check 会明确提醒)。"""
+    monkeypatch.delenv("LITRADAR_ADMIN_PASSWORD_HASH", raising=False)
+
+    assert client.post("/admin/run/rank", headers={"X-Token": TOKEN}).status_code == 200
+
+
+def test_冷却期内拒绝并给出重试时间(client):
+    cfg = webapp.get_cfg()
+    cfg.admin.daily_limit = 0                 # 隔离出冷却这一条
+    _log_run(cfg, "rank")
+
+    r = client.post("/admin/run/rank", headers={"X-Token": TOKEN})
+
+    assert r.status_code == 429
+    assert int(r.headers["Retry-After"]) >= 1
+    assert "还要等" in r.text
+
+
+def test_冷却过后可以再跑(client):
+    cfg = webapp.get_cfg()
+    cfg.admin.daily_limit = 0
+    cfg.admin.cooldown_seconds = 60
+    old = (datetime.now(timezone.utc).astimezone()
+           - timedelta(seconds=600)).isoformat(timespec="seconds")
+    _log_run(cfg, "rank", when=old)
+
+    assert client.post("/admin/run/rank", headers={"X-Token": TOKEN}).status_code == 200
+
+
+def test_每日上限三次(client):
+    cfg = webapp.get_cfg()
+    cfg.admin.cooldown_seconds = 0            # 隔离出每日上限这一条
+    cfg.admin.daily_limit = 3
+    midnight = datetime.now(timezone.utc).astimezone().replace(
+        hour=0, minute=0, second=5)
+    for n in range(3):
+        _log_run(cfg, "rank",
+                 when=midnight.replace(second=5 + n).isoformat(timespec="seconds"))
+
+    r = client.post("/admin/run/rank", headers={"X-Token": TOKEN})
+
+    assert r.status_code == 429
+    assert "上限" in r.text
+
+
+def test_未到每日上限仍放行(client):
+    cfg = webapp.get_cfg()
+    cfg.admin.cooldown_seconds = 0
+    cfg.admin.daily_limit = 3
+    midnight = datetime.now(timezone.utc).astimezone().replace(
+        hour=0, minute=0, second=5)
+    for n in range(2):
+        _log_run(cfg, "rank",
+                 when=midnight.replace(second=5 + n).isoformat(timespec="seconds"))
+
+    assert client.post("/admin/run/rank", headers={"X-Token": TOKEN}).status_code == 200
+
+
+def test_昨天的运行不占今天的额度(client):
+    cfg = webapp.get_cfg()
+    cfg.admin.cooldown_seconds = 0
+    cfg.admin.daily_limit = 1
+    yesterday = (datetime.now(timezone.utc).astimezone()
+                 - timedelta(days=1)).isoformat(timespec="seconds")
+    for _ in range(3):
+        _log_run(cfg, "rank", when=yesterday)
+
+    assert client.post("/admin/run/rank", headers={"X-Token": TOKEN}).status_code == 200
+
+
+def test_all_与子阶段共用同一条额度(client):
+    """点过 rank 之后马上点 all,等于又要跑一次 rank,该被同一条冷却拦住。"""
+    cfg = webapp.get_cfg()
+    cfg.admin.daily_limit = 0
+    _log_run(cfg, "rank")
+
+    r = client.post("/admin/run/all", headers={"X-Token": TOKEN})
+
+    assert r.status_code == 429
+
+
+def test_账本也认_ingest_mail_这种内部阶段名(client):
+    """run_log 里记的是 ingest_mail,不是网页用的 mail。"""
+    cfg = webapp.get_cfg()
+    cfg.admin.daily_limit = 0
+    cfg.admin.guarded_stages = ["mail"]
+    _log_run(cfg, "ingest_mail")
+
+    r = client.post("/admin/run/mail", headers={"X-Token": TOKEN})
+
+    assert r.status_code == 429
+
+
+def test_绑非回环地址又没口令时直接拒绝(client, monkeypatch):
+    """回归:check 早就标 BAD,但代码照旧放行 —— 现在是 fail closed。"""
+    webapp.get_cfg().app.host = "0.0.0.0"
+    monkeypatch.delenv("LITRADAR_TOKEN", raising=False)
+
+    r = client.post("/admin/run/mail")
+
+    assert r.status_code == 403
+    assert "非回环地址" in r.text
+
+
+def test_暴露但有口令时照常(client, monkeypatch):
+    webapp.get_cfg().app.host = "0.0.0.0"
+    monkeypatch.setattr(webapp.pipeline, "ingest_mail", lambda *a, **k: {})
+
+    assert client.post(
+        "/admin/run/mail", headers={"X-Token": TOKEN}).status_code == 200
+
+
+def test_all_跑一次不会被自己记成五次(client):
+    """回归:每日上限曾经把 all 的 5 个子阶段记录**求和**,于是跑一次 all
+    就变成 5 次,第二次直接被自己拦下。应按单个子阶段的最大次数算。"""
+    cfg = webapp.get_cfg()
+    cfg.admin.cooldown_seconds = 0
+    cfg.admin.daily_limit = 3
+    midnight = datetime.now(timezone.utc).astimezone().replace(
+        hour=0, minute=0, second=5)
+    # 模拟"跑过一次 all":5 个子阶段各留一行
+    for n, name in enumerate(("ingest_mail", "ingest_search", "enrich",
+                              "rank", "summarize")):
+        _log_run(cfg, name,
+                 when=midnight.replace(second=5 + n).isoformat(timespec="seconds"))
+
+    assert client.post("/admin/run/all", headers={"X-Token": TOKEN}).status_code == 200
+
+
+def test_all_达到三次后被拦(client):
+    cfg = webapp.get_cfg()
+    cfg.admin.cooldown_seconds = 0
+    cfg.admin.daily_limit = 3
+    midnight = datetime.now(timezone.utc).astimezone().replace(
+        hour=0, minute=0, second=5)
+    for run in range(3):                      # 三次 all = rank 也有三行
+        for n, name in enumerate(("ingest_mail", "ingest_search", "enrich",
+                                  "rank", "summarize")):
+            _log_run(cfg, name,
+                     when=midnight.replace(second=5 + run * 10 + n).isoformat(
+                         timespec="seconds"))
+
+    r = client.post("/admin/run/all", headers={"X-Token": TOKEN})
+
+    assert r.status_code == 429
+    assert "上限" in r.text

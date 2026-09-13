@@ -99,6 +99,7 @@ def test_check_command_runs_to_completion(tmp_path, monkeypatch, capsys):
     cfg = Config()
     cfg.app.db_path = str(tmp_path / "check.db")
     monkeypatch.delenv("EASYSCHOLAR_SECRET_KEY", raising=False)
+    monkeypatch.delenv("LITRADAR_ADMIN_PASSWORD_HASH", raising=False)
     monkeypatch.setenv("S2_API_KEY", "fake-s2-key")   # 走到 6b 的 else 分支
 
     class FakeResponse:
@@ -126,3 +127,53 @@ def test_check_command_runs_to_completion(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "EASYSCHOLAR_SECRET_KEY 未设置" in out      # 新增的那一项确实打印了
     assert "【6b】" in out and "【7】" in out            # 后半段真的跑到了
+    # 花钱阶段的护栏也要如实报出来:没设密码就得提醒,别让它默默无护栏
+    assert "LITRADAR_ADMIN_PASSWORD_HASH 未设置" in out
+    assert "每阶段每日上限 3 次" in out
+
+
+# ------------------------------------------------- 管理员密码的设置与清除
+def test_admin_password_set_then_clear(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from litradar import cli, config, passwords
+
+    monkeypatch.setattr(config, "ROOT", tmp_path)
+    env_path = tmp_path / ".env"
+    env_path.write_text("DEEPSEEK_API_KEY=keep-me\n", encoding="utf-8")
+
+    answers = iter(["s3cret-password", "s3cret-password"])
+    monkeypatch.setattr("getpass.getpass", lambda *a, **k: next(answers))
+    cfg = config.Config()
+
+    assert cli.cmd_admin_password(cfg, SimpleNamespace(clear=False)) == 0
+
+    text = env_path.read_text(encoding="utf-8")
+    assert "DEEPSEEK_API_KEY=keep-me" in text, "写入不能碰其它行"
+    line = [l for l in text.splitlines()
+            if l.startswith(cfg.app.admin_password_env + "=")][0]
+    stored = line.split("=", 1)[1]
+    assert passwords.verify_password("s3cret-password", stored)
+    assert "s3cret-password" not in text, "只存哈希,绝不写明文"
+
+    assert cli.cmd_admin_password(cfg, SimpleNamespace(clear=True)) == 0
+    assert cfg.app.admin_password_env not in env_path.read_text(encoding="utf-8")
+
+
+def test_admin_password_rejects_short_or_mismatched(tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    from litradar import cli, config
+
+    monkeypatch.setattr(config, "ROOT", tmp_path)
+    cfg = config.Config()
+
+    monkeypatch.setattr("getpass.getpass", lambda *a, **k: "short")
+    assert cli.cmd_admin_password(cfg, SimpleNamespace(clear=False)) == 1
+
+    answers = iter(["long-enough-password", "different-password"])
+    monkeypatch.setattr("getpass.getpass", lambda *a, **k: next(answers))
+    assert cli.cmd_admin_password(cfg, SimpleNamespace(clear=False)) == 1
+
+    assert not (tmp_path / ".env").exists(), "校验失败不该写出任何东西"
+    assert "不一致" in capsys.readouterr().err

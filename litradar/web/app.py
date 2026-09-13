@@ -5,7 +5,7 @@ import hashlib
 import hmac
 import os
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,7 @@ from .. import db, journal_rank, pipeline, rank, summarize
 from ..config import Config, load_config
 from ..lock import AlreadyRunning, single_instance
 from ..normalize import days_ago
+from ..passwords import verify_password
 from ..rank import load_interests, validate_interests
 
 HERE = Path(__file__).resolve().parent
@@ -197,6 +198,113 @@ def require_same_origin(request: Request) -> None:
             or effective_port(scheme, got_port) != effective_port(
                 target_scheme, target_port)):
         raise HTTPException(403, "跨源请求被拒绝")
+
+
+# 阶段名 → run_log 里记的名字。"all" 展开成它实际会跑的每个阶段,这样
+# "先点 rank 再点 all" 也会被冷却拦住(它确实会再跑一次 rank 花钱)。
+_STAGE_LOG_NAMES: dict[str, tuple[str, ...]] = {
+    "mail": ("ingest_mail",),
+    "search": ("ingest_search",),
+    "enrich": ("enrich",),
+    "rank": ("rank",),
+    "summarize": ("summarize",),
+    "all": ("ingest_mail", "ingest_search", "enrich", "rank", "summarize"),
+}
+
+# 前端靠它区分"该弹密码框"与"口令(URL token)不对" —— 两者都是 401。
+ADMIN_PASSWORD_HEADER = "X-Admin-Password"
+ADMIN_PASSWORD_REQUIRED_HEADER = "X-Admin-Password-Required"
+
+
+def require_exposure_safe(cfg: Config) -> None:
+    """绑了非回环地址却没设接口口令 —— 直接拒绝手动触发,而不是只在 check 里提醒。
+
+    ``litradar check`` 早就把这种组合标成 BAD,但那只是提醒:代码照旧放行,
+    同网段任何人都能点着按钮烧额度。既然"对外必须带口令"是本项目写明的约定,
+    就让它 fail closed。
+    """
+    if cfg.app.token or cfg.app.is_loopback:
+        return
+    raise HTTPException(
+        403,
+        f"服务绑定了非回环地址 {cfg.app.host!r} 但没有设置 {cfg.app.token_env};"
+        " 为避免同网段任何人触发流水线,已拒绝手动运行。"
+        " 请设置接口口令,或把 app.host 改回 127.0.0.1(对外经反向代理)。",
+    )
+
+
+def require_admin_password(request: Request, cfg: Config) -> None:
+    """花钱阶段前的步进验证(密码 ≠ URL 里的 token)。
+
+    与 require_token 同样是"设了就校验":没配密码就不拦 —— 但那种状态下
+    ``litradar check`` 会明确告诉你花钱接口没有这道闸。
+    """
+    stored = cfg.app.admin_password_hash
+    if not stored:
+        return
+    got = request.headers.get(ADMIN_PASSWORD_HEADER, "")
+    if not verify_password(got, stored):
+        raise HTTPException(
+            401, "需要管理员密码",
+            headers={ADMIN_PASSWORD_REQUIRED_HEADER: "1"},
+        )
+
+
+def require_stage_limits(cfg: Config, stage: str) -> None:
+    """冷却 + 每日上限。账本用 run_log,所以 CLI 与定时任务跑的也计入。
+
+    口令解决不了"点多少次":误点、写错的循环脚本、泄露的凭据都能反复花钱。
+    这里把单日损失封顶。
+    """
+    limits = cfg.admin
+    if not limits.cooldown_seconds and not limits.daily_limit:
+        return
+    names = _STAGE_LOG_NAMES.get(stage, (stage,))
+    conn = db.Database(cfg.db_file).connect()
+    try:
+        rows = db.recent_stage_runs(conn, names)
+    finally:
+        conn.close()
+
+    now = datetime.now(timezone.utc).astimezone()
+    today = now.date()
+    times = []
+    per_stage: dict[str, int] = {}
+    for name, raw in rows:
+        try:
+            when = datetime.fromisoformat(raw)
+        except (TypeError, ValueError):
+            continue          # 历史脏数据不该让闸门失效或 500
+        times.append(when)
+        if when.astimezone().date() == today:
+            per_stage[name] = per_stage.get(name, 0) + 1
+    if not times:
+        return
+
+    if limits.cooldown_seconds:
+        last = max(times)
+        waited = (now - last).total_seconds()
+        if waited < limits.cooldown_seconds:
+            retry = int(limits.cooldown_seconds - waited) + 1
+            raise HTTPException(
+                429,
+                f"「{stage}」刚跑过,还要等 {retry} 秒(admin.cooldown_seconds="
+                f"{limits.cooldown_seconds})",
+                headers={"Retry-After": str(retry)},
+            )
+
+    if limits.daily_limit and per_stage:
+        # ``all`` 会记下 5 个子阶段各一行,所以这里取**单个子阶段的最大次数**,
+        # 不能求和 —— 求和的话跑一次 all 就变成 5 次,第二次就被自己拦下了。
+        busiest, count = max(per_stage.items(), key=lambda kv: kv[1])
+        if count >= limits.daily_limit:
+            raise HTTPException(
+                429,
+                f"「{stage}」今天已经跑了 {count} 次(阶段 {busiest}),达到上限 "
+                f"admin.daily_limit={limits.daily_limit};"
+                " 要再跑请调大该值,或等明天",
+            )
+
 
 
 # 记住口令用的 cookie 名。这不是"登录会话",只是省得每次点链接都重带 ?k=。
@@ -611,11 +719,16 @@ def item_action(request: Request, item_id: int, action: str = Form(...)):
 
 @app.post("/admin/run/{stage}")
 def admin_run(request: Request, stage: str, days: int = 0):
-    # 这里是唯一会真的花钱的入口(DeepSeek 额度),两道闸一个都不能少。
+    # 这里是唯一会真的花钱的入口(DeepSeek 额度),闸门一个都不能少:
+    #   口令 → 同源 → 暴露检查 →(花钱阶段)密码 →(花钱阶段)冷却 + 每日上限。
     # 前端 fetch 是同源的,cookie 会自动带上,static/app.js 无需改动。
     require_token(request)
     require_same_origin(request)
     cfg = get_cfg()
+    require_exposure_safe(cfg)
+    if stage in cfg.admin.guarded_stages:
+        require_admin_password(request, cfg)
+        require_stage_limits(cfg, stage)
     # days=0 表示"用配置里的统一窗口"。之前这里默认 30,而抓取窗口是 180+,
     # 导致网页点"排序"只覆盖最近一个月,更早的条目永远是"未评分"。
     if days <= 0:

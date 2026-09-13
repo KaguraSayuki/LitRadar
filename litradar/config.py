@@ -47,6 +47,13 @@ def _expand(p: str | Path) -> Path:
     return p if p.is_absolute() else (ROOT / p)
 
 
+# 只绑本机的几种写法。空字符串在 uvicorn 里等于绑全部网卡,所以不在其中。
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
+
+# /admin/run/{stage} 接受的阶段,与 web/app.py 的分发一致。
+_ADMIN_STAGES = frozenset({"mail", "search", "enrich", "rank", "summarize", "all"})
+
+
 def read_secret(env_name: str | None) -> str | None:
     """读取密钥类环境变量:去掉首尾空白,空值一律当作"没设置"。
 
@@ -178,12 +185,18 @@ class RankingConfig:
 
 @dataclass
 class AppConfig:
-    host: str = "0.0.0.0"
-    port: int = 8080
+    # 默认只绑回环。以前代码默认是 0.0.0.0:8080,与 config.example.yaml、deploy/
+    # 和 README 全都对不上 —— 没写 config.yaml 就直接跑的用户会在不知情的情况下
+    # 把所有页面(含手动触发接口)暴露给同网段。
+    host: str = "127.0.0.1"
+    port: int = 8090
     db_path: str = "./data/litradar.db"
     timezone: str = "Asia/Shanghai"
     # 没有账号体系。设了 token 就校验,没设就不校验(默认只绑 127.0.0.1)。
     token_env: str = "LITRADAR_TOKEN"
+    # 花钱阶段(rank / summarize / all)额外要一次密码。存 PBKDF2 哈希而非明文,
+    # 用 `litradar admin-password` 生成并写进 .env。
+    admin_password_env: str = "LITRADAR_ADMIN_PASSWORD_HASH"
     interests: str = "./interests.yaml"   # 我的检索词与偏好(不是"账号")
 
     # 流水线时间窗(天)。**必须 ≥ 抓取窗口** —— 否则抓回来的文献进了库,
@@ -195,6 +208,36 @@ class AppConfig:
     @property
     def token(self) -> str | None:
         return read_secret(self.token_env)
+
+    @property
+    def admin_password_hash(self) -> str | None:
+        return read_secret(self.admin_password_env)
+
+    @property
+    def is_loopback(self) -> bool:
+        """是否只绑本机。绑非回环地址又没设 token 时,/admin/run/* 会 fail closed。"""
+        return (self.host or "").strip().lower() in _LOOPBACK_HOSTS
+
+
+@dataclass
+class AdminConfig:
+    """花钱阶段(默认 rank / summarize / all)的护栏。
+
+    口令只解决"谁能点",解决不了"点多少次":误点、脚本写错循环、凭据泄露都能
+    反复花钱。所以再加冷却与每日上限,把单日损失封顶。账本用 run_log,因此
+    CLI 与定时任务跑过的同样计入 —— 上限是"这一天这个阶段一共跑了几次",
+    而不是"网页上点了几次"。
+    """
+
+    # 需要密码、并受冷却与每日上限约束的阶段。
+    # mail / search 只花免费额度,默认不管;enrich 走 S2 / easyScholar 的免费
+    # 额度(有限流),需要时自己加进来。
+    guarded_stages: list[str] = field(
+        default_factory=lambda: ["rank", "summarize", "all"])
+    # 同一阶段两次运行的最小间隔(秒);0 = 不限制。
+    cooldown_seconds: int = 60
+    # 同一阶段每天最多跑几次;0 = 不限制。
+    daily_limit: int = 3
 
 
 @dataclass
@@ -223,6 +266,7 @@ class Config:
     app: AppConfig = field(default_factory=AppConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     mail: MailConfig = field(default_factory=MailConfig)
+    admin: AdminConfig = field(default_factory=AdminConfig)
     sources: SourceConfig = field(default_factory=SourceConfig)
     ranking: RankingConfig = field(default_factory=RankingConfig)
     journal_rank: JournalRankConfig = field(default_factory=JournalRankConfig)
@@ -292,6 +336,35 @@ def _ranking_config(data: dict | None) -> RankingConfig:
     return cfg
 
 
+def _admin_config(data: dict | None) -> AdminConfig:
+    """花钱阶段的护栏配置。阶段名写错会静默失去保护,所以这里严格校验。"""
+    if data is not None and not isinstance(data, dict):
+        raise ValueError("admin 必须是 YAML 映射")
+    data = data or {}
+    unknown = set(data) - set(AdminConfig.__dataclass_fields__)
+    if unknown:
+        raise ValueError(f"未知 admin 配置项: {', '.join(sorted(map(str, unknown)))}")
+    cfg = AdminConfig(**data)
+
+    if not isinstance(cfg.guarded_stages, (list, tuple)) \
+            or not all(isinstance(s, str) for s in cfg.guarded_stages):
+        raise ValueError("admin.guarded_stages 必须是阶段名列表")
+    cfg.guarded_stages = [s.strip().lower() for s in cfg.guarded_stages]
+    # 允许留空(等于关掉这层保护),但不允许拼错 —— 拼错的后果是"以为有护栏,
+    # 其实没有",比不做更危险。
+    misspelled = [s for s in cfg.guarded_stages if s not in _ADMIN_STAGES]
+    if misspelled:
+        raise ValueError(
+            f"未知 admin.guarded_stages: {', '.join(misspelled)};"
+            f" 可选 {', '.join(sorted(_ADMIN_STAGES))}")
+
+    for name in ("cooldown_seconds", "daily_limit"):
+        value = getattr(cfg, name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"admin.{name} 必须是非负整数(0 = 不限制)")
+    return cfg
+
+
 def load_config(path: str | Path | None = None) -> Config:
     """从 config.yaml 加载;文件不存在时全部走默认值。"""
     cfg_path = _expand(path or os.environ.get("LITRADAR_CONFIG", "config.yaml"))
@@ -303,6 +376,7 @@ def load_config(path: str | Path | None = None) -> Config:
         app=_build(AppConfig, raw.get("app")),
         llm=_build(LLMConfig, raw.get("llm")),
         mail=_build(MailConfig, raw.get("mail")),
+        admin=_admin_config(raw.get("admin")),
         sources=_build(SourceConfig, raw.get("sources")),
         ranking=_ranking_config(raw.get("ranking")),
         journal_rank=_build(JournalRankConfig, raw.get("journal_rank")),

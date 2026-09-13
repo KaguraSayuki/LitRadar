@@ -8,15 +8,27 @@ app:
   port: 8090
   db_path: "./data/litradar.db"
   timezone: "Asia/Shanghai"
-  # 没有账号体系。绑 0.0.0.0 时建议设 LITRADAR_TOKEN,
-  # 否则同网段任何人都能调 /admin/run/* 烧掉你的 DeepSeek 额度。
+  # 没有账号体系。绑非回环地址时**必须**设 LITRADAR_TOKEN,否则 /admin/run/*
+  # 会直接拒绝手动触发(fail closed),避免同网段任何人烧掉你的 DeepSeek 额度。
   token_env: "LITRADAR_TOKEN"
+  # 花钱阶段的额外密码哈希(PBKDF2)。用 `litradar admin-password` 生成写入 .env。
+  admin_password_env: "LITRADAR_ADMIN_PASSWORD_HASH"
   interests: "./interests.yaml"   # 你的检索词与偏好
 
   # 流水线时间窗(天)。**必须 ≥ 抓取窗口**(sources.s2_search_lookback_days),
   # 否则抓回来的文献进了库却落在排序窗口之外,永远拿不到分数。
   # 定时任务、命令行 --days、网页上的"排序/摘要"按钮都默认用它。
   pipeline_window_days: 200
+
+# ── 花钱阶段的护栏 ──────────────────────────────────────────────────────────
+# 口令只解决"谁能点",解决不了"点多少次":误点、写错循环的脚本、泄露的凭据
+# 都能反复花钱。这里再加冷却与每日上限,把单日损失封顶。
+# 账本用 run_log,所以命令行与定时任务跑的**同样计入** —— 上限约束的是
+# "这一天这个阶段一共跑了几次",而不是"网页上点了几次"。
+admin:
+  guarded_stages: [rank, summarize, all]   # 要密码、并受下面两项约束的阶段
+  cooldown_seconds: 60                     # 同一阶段两次运行的最小间隔;0 = 不限制
+  daily_limit: 3                           # 同一阶段每天最多跑几次;0 = 不限制
 
 llm:
   provider: deepseek

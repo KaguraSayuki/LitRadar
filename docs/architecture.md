@@ -196,7 +196,15 @@ LLM 失败时的降级行为值得注意:没拿到 LLM 分的条目,`final` 由�
 | `POST /admin/run/{stage}` | 手动触发单阶段 |
 | `GET /healthz` | 健康检查 |
 
-两道闸:
+`/admin/run/{stage}` 是唯一会花钱的入口（`rank` / `summarize` / `all` 走 DeepSeek），
+它依次过四道闸，顺序不能换：
+
+| 顺序 | 闸门 | 作用 |
+|---|---|---|
+| 1 | `require_token` | `?k=` / `X-Token` / cookie；**设了才校验** |
+| 2 | `require_same_origin` | 拒绝跨源写请求（Origin 检查） |
+| 3 | `require_exposure_safe` | 绑了非回环地址又没设口令 → **直接 403**（fail closed） |
+| 4 | `require_admin_password` + `require_stage_limits` | 只对 `admin.guarded_stages`（默认 rank/summarize/all）：步进验证 + 冷却 + 每日上限 |
 
 - `require_token`:设了 `LITRADAR_TOKEN` 就要求 `?k=`、`X-Token` 或 cookie
   (`hmac.compare_digest` 比较,避免时序侧信道)。未设则放行 —— 默认只绑回环,
@@ -204,6 +212,16 @@ LLM 失败时的降级行为值得注意:没拿到 LLM 分的条目,`final` 由�
 - `require_same_origin`:写操作要求同源。**这不是多余的**:`/admin/run/*` 是不带
   CSRF token 的简单 POST,你在浏览器里打开的任意网页都能往 `127.0.0.1:8090`
   发跨源 POST,把 DeepSeek 额度烧掉,即使服务只绑本机。
+- `require_exposure_safe`:把"对外必须带口令"这条约定从**提示**变成**强制**。
+  以前 `litradar check` 会标 BAD,但代码照旧放行。
+- `require_admin_password`:密码与 URL 里的 token 是两件事 —— token 长期有效、
+  可能在浏览器历史或反代日志里;密码每次输入、只在内存里存在。存的是 PBKDF2
+  哈希(`litradar/passwords.py`,只用标准库),格式非法的存储值一律判为不匹配,
+  绝不放行。前端靠 `X-Admin-Password-Required` 响应头决定"弹密码框"还是
+  "报口令错误"(两者都是 401)。
+- `require_stage_limits`:冷却 + 每日上限,**账本是 `run_log`** —— 所以进程重启
+  不会把额度清零,CLI 与定时任务跑的同样计入。`all` 会展开成它实际跑的每个
+  子阶段,因此"点过 rank 再点 all"同样会被拦住。
 
 ## 7. 配置
 
