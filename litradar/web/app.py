@@ -758,18 +758,31 @@ async def profile_redirect_post(request: Request):
 def item_action(request: Request, item_id: int, action: str = Form(...)):
     require_token(request)
     require_same_origin(request)
+    # 在哪个组点的就记到哪个组。star 与已读/归档是全局的,但 ignore 是
+    # "它与这个方向的关系",落到默认组的话在 B 组点一下会改掉 A 组的视图。
+    # 刚写进配置、还没被流水线 sync 的组不会出问题:它名下的 item_group 是
+    # 空的,收件箱里就没有条目,也就没有按钮可点。
+    g = active_group(request, get_cfg())
+    gslug = g.slug if g else None
     conn = _conn()
     try:
         try:
-            db.set_action(conn, item_id, action)
+            db.set_action(conn, item_id, action, group_slug=gslug)
         except ValueError as e:          # 白名单之外的 action
             raise HTTPException(400, str(e))
         conn.commit()
+        # 回读也要同组,而且 ignored 只能从 group_state 读 ——
+        # item_state.ignored 自 v5 起是废弃列(迁移时已清零,恒为 0)。
+        # 读错列会让刚点完的按钮立刻弹回默认,用户以为没生效就反复点。
+        gid = db.group_id(conn, gslug) or -1
         row = conn.execute(
             """SELECT i.*, COALESCE(s.state,'new') state,
-                      COALESCE(s.starred,0) starred, COALESCE(s.ignored,0) ignored
-               FROM item i LEFT JOIN item_state s ON s.item_id=i.id WHERE i.id=?""",
-            (item_id,),
+                      COALESCE(s.starred,0) starred, COALESCE(gs.ignored,0) ignored
+               FROM item i
+               LEFT JOIN item_state  s  ON s.item_id=i.id
+               LEFT JOIN group_state gs ON gs.item_id=i.id AND gs.group_id=?
+               WHERE i.id=?""",
+            (gid, item_id),
         ).fetchone()
     finally:
         conn.close()

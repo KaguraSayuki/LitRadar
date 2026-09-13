@@ -174,6 +174,90 @@ def test_详情页显示当前组的分与状态(tmp_path, monkeypatch):
     # 没有可见的状态文案,不该在这里猜措辞
 
 
+# ───────────────────────────── 反馈按钮的按组语义
+@pytest.fixture
+def both_client(tmp_path, monkeypatch):
+    """一条**同时属于两个组**的 item。
+
+    组级状态只有在这种条目上才看得见差异:只在一个组里的条目,写错组的后果
+    是"另一个组凭空多了一条",而不是"当前组纹丝不动"。
+    """
+    cfg = Config()
+    cfg.app.db_path = str(tmp_path / "both.db")
+    cfg.app.interests = str(tmp_path / "i.yaml")
+    cfg.interests_data = TWO_GROUPS
+    monkeypatch.setattr(webapp, "get_cfg", lambda: cfg)
+
+    conn = db.Database(cfg.db_file).connect()
+    ids = db.sync_groups(conn, load_groups(cfg))
+    iid, _ = db.upsert_item(conn, {
+        "kind": "paper", "dedup_key": "doi:both-groups", "doi": "both-groups",
+        "title": "Both groups", "title_norm": "both groups", "source": "test",
+        "published_at": TODAY})
+    for slug in ("org", "mat"):
+        db.add_to_group(conn, ids[slug], iid)
+    conn.commit()
+    conn.close()
+    return TestClient(webapp.app), cfg, iid, ids
+
+
+def test_点不感兴趣后按钮不回弹(client):
+    """回归:回读读的是 ``item_state.ignored`` —— v5 起废弃、迁移时已清零的列。
+
+    读死列的后果是按钮立刻弹回「不感兴趣」,看起来像没生效。用户于是反复点,
+    feedback 里因此堆出一串重复的 ignore(真实库里 217 条就是这么来的)。
+    """
+    r = client.post("/item/1/action", data={"action": "ignore"})
+
+    assert r.status_code == 200
+    assert "litradarAction(1, 'unignore')" in r.text, "点完该变成「恢复」"
+
+
+def test_再点恢复又回到不感兴趣(client):
+    """往返:两个方向都要按库里的真实状态回显,而不是都停在默认。"""
+    first = client.post("/item/1/action", data={"action": "ignore"})
+    assert "litradarAction(1, 'unignore')" in first.text
+
+    r = client.post("/item/1/action", data={"action": "unignore"})
+
+    assert "litradarAction(1, 'ignore')" in r.text
+
+
+def test_不感兴趣只落在当前组(both_client):
+    """回归:action 没带 group_slug,忽略永远写进默认组。
+
+    后果不是报错,而是"在 mat 组点一下改掉了 org 组的视图",而 mat 自己
+    的视图纹丝不动 —— 按钮照旧弹回默认,两边的账都错。
+    """
+    c, cfg, iid, ids = both_client
+
+    r = c.post(f"/item/{iid}/action?g=mat", data={"action": "ignore"})
+    assert r.status_code == 200
+    assert f"litradarAction({iid}, 'unignore')" in r.text, "按钮该按 mat 组回显"
+
+    conn = db.Database(cfg.db_file).connect()
+    rows = dict(conn.execute(
+        "SELECT group_id, ignored FROM group_state WHERE item_id=?", (iid,)).fetchall())
+    conn.close()
+    assert rows.get(ids["mat"]) == 1, "mat 组该记下这次忽略"
+    assert rows.get(ids["org"], 0) == 0, "org 组不该被牵连"
+
+
+def test_已读与收藏仍是全局的(both_client):
+    """两轴的分界:star / 已读是"我对这篇文献"的判断,不该被组切碎。"""
+    c, cfg, iid, ids = both_client
+
+    c.post(f"/item/{iid}/action?g=mat", data={"action": "read"})
+    c.post(f"/item/{iid}/action?g=org", data={"action": "star"})
+
+    conn = db.Database(cfg.db_file).connect()
+    row = conn.execute("SELECT state, starred FROM item_state WHERE item_id=?",
+                       (iid,)).fetchone()
+    conn.close()
+    assert row["state"] == "read"
+    assert row["starred"] == 1
+
+
 # ───────────────────────────── 花费护栏按组记账(阶段 4)
 def _log(cfg, stage, slug=None):
     from datetime import datetime, timezone
