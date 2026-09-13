@@ -445,13 +445,17 @@ def _format_item(i: int, row: sqlite3.Row) -> str:
             f"    摘要: {abs_ or '(无摘要)'}")
 
 
-def feedback_examples(conn: sqlite3.Connection, limit: int = 6) -> tuple[list[str], list[str]]:
+def feedback_examples(conn: sqlite3.Connection, limit: int = 6, *,
+                      group_id: int | None = None) -> tuple[list[str], list[str]]:
     """取收藏 / 忽略的标题,供精排 prompt 做少样本校准。
 
     这是反馈闭环真正被消费的地方 —— 之前反馈只落库,从不影响打分。
 
     忽略样本只取**有分数的**:那些是 LLM 认为相关、用户却否掉的,才是有信息量的
     负例。被规则过滤的条目用户根本没看见,拿来做负例会污染判断。
+
+    收藏是全局的(对"这篇文献"的判断);忽略按组(对"它与某个方向的关系")。
+    不给 group_id 时按默认组取,单组用户行为不变。
     """
     liked = [r[0] for r in conn.execute(
         """SELECT i.title FROM item_state s
@@ -459,12 +463,13 @@ def feedback_examples(conn: sqlite3.Connection, limit: int = 6) -> tuple[list[st
            WHERE s.starred = 1 AND i.kind = 'paper'
            ORDER BY s.item_id DESC LIMIT ?""", (limit,))]
 
+    gid = group_id if group_id is not None else db._read_group_id(conn, None)
     disliked = [r[0] for r in conn.execute(
-        """SELECT i.title FROM item_state s
-           JOIN item i ON i.id = s.item_id
-           JOIN score  sc ON sc.item_id = i.id
-           WHERE s.ignored = 1 AND i.kind = 'paper'
-           ORDER BY sc.final_score DESC LIMIT ?""", (limit,))]
+        """SELECT i.title FROM group_state gs
+           JOIN item i ON i.id = gs.item_id
+           JOIN score  sc ON sc.item_id = i.id AND sc.group_id = gs.group_id
+           WHERE gs.ignored = 1 AND i.kind = 'paper' AND gs.group_id = ?
+           ORDER BY sc.final_score DESC LIMIT ?""", (gid, limit))]
     return liked, disliked
 
 
