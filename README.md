@@ -171,6 +171,7 @@ litradar summarize      # 生成中文摘要（默认补缺失及原文已变化
 litradar run            # 完整流水线（以上全部）
 litradar stats          # 数据统计
 litradar mail-test      # IMAP 连通性测试（只读）
+litradar admin-password # 设置/清除花钱阶段的管理员密码（只存哈希）
 litradar check          # 体检:配置 / 密钥 / 数据库 / 网络 / LLM 连通性
 litradar parse          # 仅解析邮件（调试解析器用）
 
@@ -334,8 +335,17 @@ Caddy/nginx），不要直接把服务绑到 `0.0.0.0`。
 - 本项目**不抓取 X-MOL 网站**（其 `robots.txt` 禁止爬取检索页），仅解析用户自己
   收到的订阅邮件；X-MOL 站内订阅照常使用
 - 定位为单用户自托管，无账号体系，默认仅绑定回环地址。如需绑定非回环地址，
-  应设置 `LITRADAR_TOKEN` 接口口令（访问时带 `?k=<token>`），否则同网段任何人
-  都能触发 `/admin/run/*` 消耗你的 LLM 额度
+  必须设置 `LITRADAR_TOKEN` 接口口令（访问时带 `?k=<token>`）—— 没设时
+  `/admin/run/*` 会直接拒绝手动触发（fail closed），而不是放行给同网段
+- **花钱接口有三层护栏**（默认只作用于 `rank` / `summarize` / `all`）：
+  1. `LITRADAR_TOKEN` 接口口令（长期凭据，可放 URL）；
+  2. **管理员密码**（`litradar admin-password` 设置，存 PBKDF2 哈希），每次运行
+     花钱阶段时在网页上再输一次，用完即忘；
+  3. **频率护栏**：`admin.cooldown_seconds` 冷却 + `admin.daily_limit` 每日上限
+     （默认每阶段 3 次）。账本用 `run_log`，所以命令行与定时任务跑的同样计入 ——
+     上限约束的是"这一天这个阶段一共跑了几次"，不是"网页上点了几次"。
+  第 2 层是**步进验证（sudo 模式），不是 2FA**：两个凭据都是"你知道的东西"。
+  三层都可关（不设密码 / 把限制设为 0），`litradar check` 会如实报出当前状态
 - 不建议将服务暴露于公网：订阅邮件内容面向订阅者本人，公网暴露构成对非授权用户的再分发
 - 密钥仅通过环境变量传入（`.env`，POSIX 建议权限 600，Windows 用 ACL 限制），不写入配置文件；
   `.env`、`config.yaml`、`interests.yaml`、`data/` 均已被 `.gitignore` 排除

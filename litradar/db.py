@@ -1115,6 +1115,28 @@ def log_run(conn: sqlite3.Connection, stage: str, status: str, stats: Any = None
     )
 
 
+def recent_stage_runs(conn: sqlite3.Connection, stages: Iterable[str],
+                      *, limit: int = 500) -> list[tuple[str, str]]:
+    """最近若干条运行记录的 ``(stage, 结束时间)``,供"冷却 + 每日上限"当账本。
+
+    刻意用 run_log 而不是内存计数:进程重启不会把额度计数清零,而且 CLI 与
+    定时任务跑过的同样算数 —— 上限约束的是"这一天这个阶段一共跑了几次"。
+    返回阶段名是因为 ``all`` 要按**每个子阶段各自**的次数算,不能求和。
+    """
+    names = [s for s in stages if s]
+    if not names:
+        return []
+    marks = ", ".join("?" for _ in names)
+    rows = conn.execute(
+        f"""SELECT stage, COALESCE(finished_at, started_at) AS at FROM run_log
+            WHERE stage IN ({marks})
+              AND COALESCE(finished_at, started_at) IS NOT NULL
+            ORDER BY id DESC LIMIT ?""",
+        (*names, limit),
+    ).fetchall()
+    return [(r[0], r[1]) for r in rows]
+
+
 def stats(conn: sqlite3.Connection) -> dict[str, Any]:
     def one(sql: str, *a):
         r = conn.execute(sql, a).fetchone()

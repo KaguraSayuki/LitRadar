@@ -24,12 +24,13 @@
 | 6 | 推送邮件周报 | 用户要局域网网页 | 全部改为 Web 界面,无邮件推送 |
 | 7 | HTMX | 为减少依赖 | 改为**原生 fetch**,零前端依赖 |
 | 8 | 专利监控(SciFinder) | SciFinder 移除后无专利源 | **已砍掉**。所有现有数据源都不含专利,`/patents` 页面与导航已移除;要接需先解决专利族去重与 18 个月公开延迟 |
-| 9 | `auth.enabled` + `password_hash`(用 `litradar hash-password` 生成)+ `/login` 页面 | 未实现账号体系 | 改为 `LITRADAR_TOKEN` 接口口令(访问带 `?k=`);默认只绑回环地址,不设口令也安全。**`hash-password` 命令不存在** |
+| 9 | `auth.enabled` + `password_hash`(用 `litradar hash-password` 生成)+ `/login` 页面 | 没有账号体系,也没有登录页 | 全站鉴权改成 `LITRADAR_TOKEN` 接口口令(`?k=`,长期凭据)。花钱阶段另加**步进验证**:`litradar admin-password` 生成 PBKDF2 哈希写进 `.env`,运行时在网页上再输一次密码 —— 名字不是原稿的 `hash-password`,`password_hash` 也改成环境变量而非写进 config.yaml;并附冷却与每日上限(见文首第 15 条) |
 | 10 | 排序拆成 `rules.py` / `coarse.py` / `llm_rerank.py`,另有 `notify.py` 提醒与 `epo.py` EPO OPS 客户端 | 三阶段合并在单个 `rank.py`;提醒与 EPO 均未实现 | `openalex.py` / `crossref.py` 实际是 `sources/openalex_search.py`、`sources/crossref_search.py` |
 | 11 | 画像存 `profiles/default.yaml` | 改为项目根的 `interests.yaml`,网页可在线编辑并自动留备份 | |
 | 12 | `scripts/seed_demo.py` 灌 mock 数据 | **从未创建** | 测试改用 pytest fixture 与真实 `.eml` 样本 |
 | 13 | `docs/COMPLIANCE.md` 记录合规边界 | **未创建** | 边界写在 README「安全与合规」一节 |
-| 14 | `app.host: "0.0.0.0"` + `port: 8080`;`.env` 含 `EPO_KEY` / `EPO_SECRET` | 默认只绑 `127.0.0.1:8090`;EPO 未接入 | 绑 `0.0.0.0` 会绕过 nginx 的 TLS 与口令保护,**勿照抄**;实际密钥清单见 `.env.example` |
+| 14 | `app.host: "0.0.0.0"` + `port: 8080`;`.env` 含 `EPO_KEY` / `EPO_SECRET` | 默认只绑 `127.0.0.1:8090`(代码默认值也已对齐);EPO 未接入 | 绑非回环地址会绕过 nginx 的 TLS 与口令保护,**勿照抄**;实际密钥清单见 `.env.example` |
+| 15 | 原稿只设想了一层口令 | 花钱接口(`/admin/run/*` 里的 rank / summarize / all)后来又加了三道约束 | ① 绑非回环地址又没设口令 → 直接 403(fail closed);② 管理员密码(步进验证,PBKDF2 哈希存 `.env`);③ 冷却 + 每日上限(默认每阶段 3 次,账本用 `run_log`,CLI 与定时任务同样计入)。配置见 `config.yaml` 的 `admin` 段 |
 
 保留不变的核心设计:三阶段排序漏斗(规则 → BM25 → LLM)、SQLite 数据模型、
 期刊缩写归一匹配、数字核验防幻觉、systemd 调度、单用户 LAN 部署。

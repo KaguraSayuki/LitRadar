@@ -108,3 +108,77 @@ def test_semanticscholar_uses_the_same_key_semantics(monkeypatch):
 
     monkeypatch.setenv("S2_API_KEY", " s2-key ")
     assert semanticscholar._headers()["x-api-key"] == "s2-key"
+
+
+# ------------------------------------------------------- 花钱阶段的护栏配置
+def test_admin_defaults_are_the_documented_ones(tmp_path):
+    cfg = load_config(tmp_path / "missing.yaml").admin
+
+    assert cfg.guarded_stages == ["rank", "summarize", "all"]
+    assert cfg.cooldown_seconds == 60
+    assert cfg.daily_limit == 3
+
+
+def test_example_config_documents_the_same_defaults():
+    """示例配置里的 admin 段必须与代码默认值一致,否则又是一处漂移。"""
+    example = load_config(Path(__file__).resolve().parents[1] / "config.example.yaml")
+
+    assert example.admin == Config().admin
+
+
+def test_admin_stage_typo_is_rejected(tmp_path):
+    """阶段名拼错会让人以为有护栏、其实没有 —— 必须直接报错。"""
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(
+        {"admin": {"guarded_stages": ["rank", "summarise"]}}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="guarded_stages"):
+        load_config(path)
+
+
+@pytest.mark.parametrize("data", [
+    {"daily_limit": -1},
+    {"cooldown_seconds": -5},
+    {"daily_limit": "three"},
+    {"cooldown_seconds": True},
+])
+def test_admin_limits_must_be_non_negative_ints(tmp_path, data):
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"admin": data}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="非负整数"):
+        load_config(path)
+
+
+def test_unknown_admin_key_is_rejected(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"admin": {"dailly_limit": 3}}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="未知 admin 配置项"):
+        load_config(path)
+
+
+def test_admin_overrides_are_loaded(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"admin": {
+        "guarded_stages": ["Rank", "enrich"],
+        "cooldown_seconds": 0,
+        "daily_limit": 5,
+    }}), encoding="utf-8")
+
+    cfg = load_config(path).admin
+
+    assert cfg.guarded_stages == ["rank", "enrich"]   # 大小写被归一
+    assert cfg.cooldown_seconds == 0 and cfg.daily_limit == 5
+
+
+def test_is_loopback():
+    from litradar.config import AppConfig
+
+    assert AppConfig(host="127.0.0.1").is_loopback
+    assert AppConfig(host="localhost").is_loopback
+    assert AppConfig(host="::1").is_loopback
+    # 空串在 uvicorn 里等于绑全部网卡,不能算本机
+    assert not AppConfig(host="").is_loopback
+    assert not AppConfig(host="0.0.0.0").is_loopback
+    assert not AppConfig(host="192.168.1.5").is_loopback

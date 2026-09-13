@@ -198,6 +198,61 @@ def _journal_rank_line(cfg) -> tuple[str, str, str]:
             "影响因子/中科院分区不会显示;不配也能正常跑,只是缺这些标签")
 
 
+def _write_env_value(path, name: str, value: str | None) -> None:
+    """在 .env 里写入或删除一个变量,其余行原样保留。"""
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    out: list[str] = []
+    written = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(f"{name}=") or stripped == name:
+            if value is not None and not written:
+                out.append(f"{name}={value}")
+                written = True
+            continue                       # value=None 时等于删掉这一行
+        out.append(line)
+    if value is not None and not written:
+        out.append(f"{name}={value}")
+    path.write_text("\n".join(out).rstrip("\n") + "\n", encoding="utf-8")
+    if os.name != "nt":
+        try:
+            path.chmod(0o600)              # .env 里有密钥,写完收紧权限
+        except OSError:
+            pass
+
+
+def cmd_admin_password(cfg, args):
+    """设置 / 清除花钱阶段的管理员密码(只把 PBKDF2 哈希写进 .env)。"""
+    from . import passwords
+    from .config import ROOT
+
+    env_path = ROOT / ".env"
+    name = cfg.app.admin_password_env
+
+    if args.clear:
+        _write_env_value(env_path, name, None)
+        print(f"已从 {env_path} 删除 {name};重启服务后花钱阶段不再要密码。")
+        return 0
+
+    import getpass
+
+    first = getpass.getpass("新密码(输入不回显): ")
+    if len(first) < passwords.MIN_PASSWORD_LENGTH:
+        print(f"错误:密码至少 {passwords.MIN_PASSWORD_LENGTH} 位。", file=sys.stderr)
+        return 1
+    if first != getpass.getpass("再输一次: "):
+        print("错误:两次输入不一致。", file=sys.stderr)
+        return 1
+
+    _write_env_value(env_path, name, passwords.hash_password(first))
+    print(f"已把 {name} 的哈希写入 {env_path}(只存哈希,不存明文)。")
+    stages = "、".join(cfg.admin.guarded_stages) or "(空)"
+    print(f"受保护阶段:{stages}"
+          f"(冷却 {cfg.admin.cooldown_seconds}s,每日上限 {cfg.admin.daily_limit} 次)")
+    print("注意:改密码需要重启服务才生效;首次设置无需重启。")
+    return 0
+
+
 def cmd_check(cfg, args):
     """体检:配置 / 密钥 / 数据库 / 网络 / LLM 连通性。
 
@@ -261,7 +316,7 @@ def cmd_check(cfg, args):
     line(*_journal_rank_line(cfg))
 
     # 绑定地址与口令:没有账号体系,只看"是否暴露到局域网"
-    if cfg.app.host in ("127.0.0.1", "localhost"):
+    if cfg.app.is_loopback:
         line(OK, "仅绑本机", f"{cfg.app.host}:{cfg.app.port} · 不设口令也安全")
         if cfg.app.token:
             line(OK, "接口口令已设置", "本机访问也需要 ?k=<token>")
@@ -271,9 +326,29 @@ def cmd_check(cfg, args):
             line(OK, "接口口令已设置", "访问时带 ?k=<token>")
         else:
             line(BAD, "暴露到局域网但未设口令",
-                 "同网段任何人都能调 /admin/run/* 花掉你的 DeepSeek 额度。"
-                 "建议设 LITRADAR_TOKEN")
-            problems.append("绑 0.0.0.0 但未设 LITRADAR_TOKEN")
+                 "手动触发接口现在会直接拒绝(fail closed);"
+                 f"请设 {cfg.app.token_env},或把 app.host 改回 127.0.0.1")
+            problems.append(f"绑了 {cfg.app.host} 但未设 {cfg.app.token_env}")
+
+    # 花钱阶段(默认 rank / summarize / all)的护栏
+    guarded = "、".join(cfg.admin.guarded_stages)
+    if not cfg.admin.guarded_stages:
+        line(WARN, "花钱阶段没有护栏", "admin.guarded_stages 为空,密码与频率限制都不生效")
+    else:
+        if cfg.app.admin_password_hash:
+            line(OK, f"{cfg.app.admin_password_env} 已设置",
+                 f"运行 {guarded} 前要再输一次密码")
+        else:
+            line(WARN, f"{cfg.app.admin_password_env} 未设置",
+                 f"只要拿到接口口令就能运行 {guarded} 烧 DeepSeek 额度;"
+                 " 用 litradar admin-password 设置")
+        limits = []
+        if cfg.admin.cooldown_seconds:
+            limits.append(f"冷却 {cfg.admin.cooldown_seconds}s")
+        if cfg.admin.daily_limit:
+            limits.append(f"每阶段每日上限 {cfg.admin.daily_limit} 次")
+        line(OK if limits else WARN, f"{guarded} 的频率限制",
+             "、".join(limits) if limits else "冷却与每日上限都是 0(不限制)")
 
     print("\n【3】检索词与偏好")
     prof = load_interests(cfg)
@@ -457,6 +532,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("stats", help="查看统计").set_defaults(func=cmd_stats)
     sub.add_parser("mail-test", help="只读测试 IMAP 邮件接入").set_defaults(func=cmd_mail_test)
+    sp = sub.add_parser("admin-password",
+                        help="设置/清除花钱阶段的管理员密码(只存哈希)")
+    sp.add_argument("--clear", action="store_true", help="删除已设置的密码")
+    sp.set_defaults(func=cmd_admin_password)
     sub.add_parser("check", help="体检:配置/密钥/数据库/网络/LLM 连通性").set_defaults(func=cmd_check)
     return p
 

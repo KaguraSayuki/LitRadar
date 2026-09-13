@@ -112,6 +112,18 @@ async function litradarRun(stage, btn) {
     // 不带 days —— 服务端统一取 config 里的 app.pipeline_window_days。
     // 写死 30 天会让抓取(180 天)回来的条目永远进不了排序器。
     var r = await fetch('/admin/run/' + stage, { method: 'POST' });
+    // 花钱阶段(rank / summarize / all)另要一次密码。服务端用这个头区分
+    // "该弹密码框"和"URL 里的 token 不对" —— 两者都是 401。
+    // 密码只活在这一次调用里,不写 localStorage / cookie,用完即忘。
+    if (r.status === 401 && r.headers.get('X-Admin-Password-Required')) {
+      var pw = window.prompt('「' + stage + '」会消耗 DeepSeek 额度,请输入管理员密码:');
+      if (pw) {
+        btn.textContent = '验证中…';
+        r = await fetch('/admin/run/' + stage, {
+          method: 'POST', headers: { 'X-Admin-Password': pw },
+        });
+      }
+    }
     var text = await r.text();
     try { text = JSON.stringify(JSON.parse(text), null, 2); } catch (e) { /* 不是 JSON 就原样显示 */ }
     if (out) out.textContent = text;
