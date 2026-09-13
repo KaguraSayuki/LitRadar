@@ -623,3 +623,33 @@ h2 small { font-weight: 400; color: var(--ink-3); font-size: 13px; margin-left: 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
+
+/* 订阅组切换:只在有多个组时出现(见 base.html)。横向可滚,组多了也不会把
+   顶栏挤坏;停用的组用删除线标出来,免得以为它还在采。 */
+.groupbar {
+  display: flex;
+  gap: .25rem;
+  overflow-x: auto;
+  max-width: 46vw;
+  scrollbar-width: thin;
+}
+.groupbar__item {
+  padding: .25rem .6rem;
+  border-radius: 999px;
+  font-size: .85rem;
+  line-height: 1.4;
+  white-space: nowrap;
+  color: inherit;
+  opacity: .65;
+  text-decoration: none;
+}
+.groupbar__item:hover { opacity: 1; }
+.groupbar__item.is-on {
+  opacity: 1;
+  font-weight: 600;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+.groupbar__item.is-off { text-decoration: line-through; }
+@media (max-width: 640px) {
+  .groupbar { max-width: 100%; }
+}

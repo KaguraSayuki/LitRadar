@@ -32,6 +32,9 @@ def _add(conn, title: str, *, kind: str = "paper") -> int:
         "title": title, "title_norm": title.lower(), "published_at": "2026-09-01",
         "source": "test",
     })
+    # 收件箱只放本组成员;真实链路里由 pipeline._store(group_id=...) 记
+    db.add_to_group(conn, db.ensure_group(conn, db.DEFAULT_GROUP_SLUG,
+                                         name=db.DEFAULT_GROUP_NAME), iid)
     return iid
 
 

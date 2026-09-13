@@ -137,6 +137,9 @@ def _add_item(cfg, title: str = "T") -> int:
         "kind": "paper", "dedup_key": f"doi:10.1/{title}", "doi": f"10.1/{title}",
         "title": title, "title_norm": title.lower(), "source": "test",
     })
+    # 收件箱只放本组成员;真实链路里由 pipeline._store(group_id=...) 记
+    db.add_to_group(conn, db.ensure_group(conn, db.DEFAULT_GROUP_SLUG,
+                                         name=db.DEFAULT_GROUP_NAME), iid)
     conn.commit()
     conn.close()
     return iid
@@ -326,6 +329,8 @@ def test_兜底分只在_LLM_可用时才标(client, monkeypatch):
         "published_at": "2026-09-01", "source": "test"})
     db.save_score(conn, iid, rule_score=133.0, coarse_score=100.0,
                   final_score=12.4)          # llm_score 刻意留空
+    db.add_to_group(conn, db.ensure_group(conn, db.DEFAULT_GROUP_SLUG,
+                                         name=db.DEFAULT_GROUP_NAME), iid)
     conn.commit()
 
     def _flag(rows, _conn):
