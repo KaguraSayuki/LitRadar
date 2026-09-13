@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -205,9 +206,14 @@ def cmd_check(cfg, args):
     print("\n【2】密钥与环境变量 (.env)")
     env_path = ROOT / ".env"
     if env_path.exists():
-        mode = oct(env_path.stat().st_mode)[-3:]
-        line(OK if mode == "600" else WARN, ".env", f"权限 {mode}" +
-             ("" if mode == "600" else "  ← 建议 chmod 600 .env"))
+        if os.name == "nt":
+            # Windows 的 st_mode 不反映 ACL,chmod 也只能切换只读位。在这里
+            # 按 600 判断会报一个用户无法修复的告警,所以只确认存在。
+            line(OK, ".env", "已存在(Windows 权限由 ACL 控制,请勿共享该文件)")
+        else:
+            mode = oct(env_path.stat().st_mode)[-3:]
+            line(OK if mode == "600" else WARN, ".env", f"权限 {mode}" +
+                 ("" if mode == "600" else "  ← 建议 chmod 600 .env"))
     else:
         line(WARN, ".env 不存在", "复制 .env.example 并填写")
         problems.append("缺少 .env")
@@ -433,7 +439,26 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _configure_console() -> None:
+    """让中文输出在 Windows 上被重定向时也不炸。
+
+    Windows 控制台本身走 UTF-8(PEP 528),但一旦输出被重定向到文件或管道
+    (任务计划、``> log.txt``),Python 会退回 ANSI 代码页 —— 英文系统是
+    cp1252,打印中文直接 UnicodeEncodeError。这里统一按 UTF-8 输出,并把
+    编码错误降级为替换字符,宁可少一个词也不要整条命令崩掉。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:          # 被 pytest 等替换过的流
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _configure_console()
     args = build_parser().parse_args(argv)
     cfg = load_config(args.config)
     # --days 缺省时统一取配置,避免"定时任务 200 天、手工跑 30 天"这种不一致
