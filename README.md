@@ -42,8 +42,10 @@ Crossref 关键词检索（可选）───┘    (SQLite)    └─ 排序：
 
 ## 快速开始
 
-环境要求：Python ≥ 3.11。Linux / macOS / Windows 均可运行；下面用 POSIX 路径举例，
-Windows 把 `.venv/bin/` 换成 `.venv\Scripts\`（`litradar` → `litradar.exe`）。
+环境要求：Python ≥ 3.11。Linux / macOS / Windows 都能运行，差别只在虚拟环境的可执行
+文件目录（Windows 是 `Scripts\`，POSIX 是 `bin/`）和几个命令名，下面分开给。
+
+### Linux / macOS
 
 ```bash
 git clone https://github.com/KaguraSayuki/LitRadar.git
@@ -56,7 +58,7 @@ python3 -m venv .venv
 # 2. 配置（三个文件均不入库，仅提交对应的 .example）
 cp config.example.yaml   config.yaml
 cp interests.example.yaml interests.yaml
-cp .env.example          .env && chmod 600 .env      # Windows 去掉 chmod，见下方说明
+cp .env.example          .env && chmod 600 .env
 #    编辑 .env：至少填写 DEEPSEEK_API_KEY；邮件接入需 IMAP_PASSWORD
 
 # 3. 初始化数据库
@@ -68,6 +70,46 @@ cp .env.example          .env && chmod 600 .env      # Windows 去掉 chmod，�
 # 5. 启动 Web 服务
 .venv/bin/uvicorn litradar.web.app:app --host 127.0.0.1 --port 8090
 ```
+
+### Windows（PowerShell）
+
+Windows 上没有 `python3` / `cp` / `chmod`，虚拟环境的可执行文件也在 `Scripts\` 而不是
+`bin/`；照抄下面这份即可：
+
+```powershell
+git clone https://github.com/KaguraSayuki/LitRadar.git
+cd LitRadar
+
+# 1. 安装（`-e .` 末尾那个点是"当前目录"，别漏）
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -e .
+
+# 2. 配置
+Copy-Item config.example.yaml    config.yaml
+Copy-Item interests.example.yaml interests.yaml
+Copy-Item .env.example           .env
+#    编辑 .env：至少填写 DEEPSEEK_API_KEY；邮件接入需 IMAP_PASSWORD
+
+# 3. 初始化数据库
+.venv\Scripts\litradar.exe init-db
+
+# 4. 运行完整流水线（采集 → 富化 → 排序 → 摘要）
+.venv\Scripts\litradar.exe run
+
+# 5. 启动 Web 服务
+.venv\Scripts\python.exe -m uvicorn litradar.web.app:app --host 127.0.0.1 --port 8090
+```
+
+> 想用激活也可以：`.venv\Scripts\Activate.ps1`，之后直接敲 `litradar` / `python`。
+> 若报 `running scripts is disabled on this system`，先在当前窗口执行
+> `Set-ExecutionPolicy -Scope Process RemoteSigned`。上面那种"写全路径"的写法
+> 不需要激活，也就不会撞到执行策略。
+>
+> 虚拟环境目录名可以自己取（有人习惯就叫 `venv`），但下文一律按 `.venv` 写；
+> 换了名字记得把命令里的路径一起替换。
+>
+> 另外，下文各处的 `litradar xxx` 都按"已激活虚拟环境"来写。没激活就把前缀补全：
+> Windows 用 `.venv\Scripts\litradar.exe xxx`，Linux / macOS 用 `.venv/bin/litradar xxx`。
 
 浏览器访问 `http://127.0.0.1:8090`。首次使用建议先运行 `litradar check`
 体检配置、密钥、数据库与各 API 连通性。
@@ -304,7 +346,7 @@ Caddy/nginx），不要直接把服务绑到 `0.0.0.0`。
 | Crossref 摘要覆盖不全 | ACS 系期刊常缺摘要，故以 Semantic Scholar 为摘要主力 |
 | 数字核验非完备 | 可标记多数数字不一致，但不保证捕获全部幻觉 |
 | 不含专利与预印本 | 现有数据源均不提供；数据模型已预留 `item.kind` 维度供将来扩展 |
-| Windows 支持未经实机验证 | 代码已按平台分流（锁用 `msvcrt`、控制台固定 UTF-8、跳过 POSIX 权限检查），并有模拟 Windows 分支的测试，但尚未在真实 Windows 上跑过完整流水线 |
+| Windows 支持仅部分实机验证 | 已在真实 Windows 上验证：安装、`pip install -e .`、Web 服务正常启动；锁的 `msvcrt` 分支、任务计划程序、完整流水线尚未在实机跑过，只有模拟测试覆盖 |
 
 ## 目录结构
 
