@@ -1177,6 +1177,37 @@ def save_score(conn: sqlite3.Connection, item_id: int, *,
     )
 
 
+def save_group_relevance(conn: sqlite3.Connection, group_id: int, item_id: int,
+                         relevance: str | None, model: str) -> None:
+    """把"对研究的用处"这一行按组存下。
+
+    摘要有意只在这一点上分方向:问题 / 方法 / 关键结果 / 局限是通用的,按组
+    重算会把 LLM 成本乘上组数,所以那些字段一份共享(见 summary 表)。
+    """
+    conn.execute(
+        """INSERT INTO summary_group (group_id, item_id, relevance, model, created_at)
+           VALUES (?,?,?,?,?)
+           ON CONFLICT(group_id, item_id) DO UPDATE SET
+             relevance=excluded.relevance, model=excluded.model,
+             created_at=excluded.created_at""",
+        (group_id, item_id, relevance, model, now()),
+    )
+
+
+def clear_group_relevance(conn: sqlite3.Connection, item_id: int, *,
+                          keep_group_id: int | None = None) -> None:
+    """丢掉这条目的按组 relevance。
+
+    原文变了(摘要重做)之后,别的组那一行是基于旧原文写的,必须一起作废 ——
+    否则它们会永远停着不动,而读者看不出那是过期的。
+    """
+    if keep_group_id is None:
+        conn.execute("DELETE FROM summary_group WHERE item_id=?", (item_id,))
+    else:
+        conn.execute("DELETE FROM summary_group WHERE item_id=? AND group_id<>?",
+                     (item_id, keep_group_id))
+
+
 def save_summary(conn: sqlite3.Connection, item_id: int, data: dict, depth: str,
                  model: str, *, abstract_hash: str | None = None) -> None:
     conn.execute(

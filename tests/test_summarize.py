@@ -28,6 +28,9 @@ def _seed(conn, title: str) -> int:
         "abstract": f"abstract of {title}",
         "published_at": datetime.date.today().isoformat(),
     })
+    # 摘要只处理**本组成员**;真实链路里由 pipeline._store(group_id=...) 记
+    db.add_to_group(conn, db.ensure_group(conn, db.DEFAULT_GROUP_SLUG,
+                                         name=db.DEFAULT_GROUP_NAME), iid)
     return iid
 
 
