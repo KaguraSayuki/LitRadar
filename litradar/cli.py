@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from . import db, enrich, pipeline, rank, summarize
-from .config import load_config
+from .config import load_config, read_secret
 from .lock import AlreadyRunning, single_instance
 from .sources import easyscholar, mail, xmol_email
 
@@ -251,7 +251,7 @@ def cmd_check(cfg, args):
     # 可选
     for name, why in [("S2_API_KEY", "Semantic Scholar 限流会宽松很多,建议申请"),
                       ("OPENALEX_API_KEY", "只有开了 sources.openalex_enabled 才需要")]:
-        if os.environ.get(name):
+        if read_secret(name):
             line(OK, f"{name} 已设置")
         else:
             line(WARN, f"{name} 未设置", why)
@@ -353,7 +353,7 @@ def cmd_check(cfg, args):
             problems.append(f"{name} 不可达")
 
     print("\n【6b】Semantic Scholar 配额")
-    s2_key = os.environ.get("S2_API_KEY")
+    s2_key = read_secret("S2_API_KEY")
     if not s2_key:
         line(WARN, "未配 S2_API_KEY",
              "走共享池,约 1 req/s 且容易 429。免费申请能显著改善")

@@ -2,12 +2,11 @@
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 from typing import Any
 
 from . import db, enrich, rank, summarize
-from .config import Config
+from .config import Config, read_secret
 from .normalize import normalize_doi, title_norm
 from .rank import load_interests
 from .sources import crossref_search, mail, openalex_search, semanticscholar, xmol_email
@@ -212,7 +211,7 @@ def _ingest_snowball(conn: sqlite3.Connection, cfg: Config, prof,
     if not cfg.sources.snowball_enabled or not seeds:
         return []
     seeds = seeds[:cfg.sources.snowball_max_seeds]
-    if not os.environ.get("S2_API_KEY"):
+    if not read_secret("S2_API_KEY"):
         stat["snowball_skipped"] = "未设 S2_API_KEY"
         return []
 
@@ -292,7 +291,7 @@ def ingest_keyword_search(cfg: Config, *, verbose: bool = True) -> dict:
         # Semantic Scholar bulk:第三条腿。与 Crossref 互补 —— Crossref 模糊匹配、
         # 召回高噪声大;bulk 是精确 AND、召回低但准确率高。用 DOI 合并。
         if cfg.sources.s2_search_enabled and prof.s2_queries:
-            if not os.environ.get("S2_API_KEY"):
+            if not read_secret("S2_API_KEY"):
                 stat["s2_skipped"] = "未设 S2_API_KEY"
             else:
                 # bulk 只有 year 粒度,没有日期;由 lookback 反推年份区间
@@ -329,7 +328,7 @@ def ingest_keyword_search(cfg: Config, *, verbose: bool = True) -> dict:
                     stat["s2"] += len(got)
                     raw += got
 
-        openalex_key = os.environ.get(cfg.sources.openalex_api_key_env, "")
+        openalex_key = read_secret(cfg.sources.openalex_api_key_env) or ""
         if cfg.sources.openalex_enabled and openalex_key:
             for q in queries:
                 got = openalex_search.search(

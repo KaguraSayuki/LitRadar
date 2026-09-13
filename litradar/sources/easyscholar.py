@@ -31,9 +31,9 @@ Crossref 和 Semantic Scholar 都不提供。之前 LitRadar 的 IF 只能从 X-
 """
 from __future__ import annotations
 
-import os
-
 import requests
+
+from ..config import read_secret
 
 BASE = "https://www.easyscholar.cc/open/getPublicationRank"
 
@@ -63,13 +63,9 @@ def api_key(env_name: str = DEFAULT_KEY_ENV) -> str | None:
 
     以前这里写死 ``EASYSCHOLAR_SECRET_KEY``,于是 config.yaml 里那个
     ``api_key_env`` 形同虚设 —— 改名的用户会看到检查命令说"已设置",
-    实际查询却拿不到密钥。
-
-    顺带去掉首尾空白:``.env`` 里 ``KEY=abc `` 这种尾随空格很常见,带着
-    它去请求只会拿到 40002,却很难看出是空格导致的。
+    实际查询却拿不到密钥。去空白等语义统一在 :func:`config.read_secret`。
     """
-    raw = os.environ.get(env_name or DEFAULT_KEY_ENV)
-    return (raw or "").strip() or None
+    return read_secret(env_name or DEFAULT_KEY_ENV)
 
 
 def available(env_name: str = DEFAULT_KEY_ENV) -> bool:
