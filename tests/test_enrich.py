@@ -256,7 +256,7 @@ def test_别名先按最终目标去重并复用缓存(tmp_path, monkeypatch):
     }
     _seed_journal(cfg, "Short Journal A")
     _seed_journal(cfg, "Short Journal B")
-    monkeypatch.setattr(enrich.easyscholar, "available", lambda: True)
+    monkeypatch.setattr(enrich.easyscholar, "available", lambda env_name=None: True)
     fetch = Mock(return_value={"sci": "Q2"})
     monkeypatch.setattr(enrich.easyscholar, "fetch_rank", fetch)
 
@@ -266,14 +266,14 @@ def test_别名先按最终目标去重并复用缓存(tmp_path, monkeypatch):
     conn.close()
 
     assert fetch.call_count == 1
-    fetch.assert_called_once_with("Canonical Journal")
+    fetch.assert_called_once_with("Canonical Journal", cfg.journal_rank.api_key_env)
 
 
 def test_别名可恢复旧刊名hit0但确认目标无结果后停止(tmp_path, monkeypatch):
     cfg = _journal_cfg(tmp_path)
     cfg.journal_rank.aliases = {"Old Journal Name": "Canonical Journal"}
     _seed_journal(cfg, "Old Journal Name")
-    monkeypatch.setattr(enrich.easyscholar, "available", lambda: True)
+    monkeypatch.setattr(enrich.easyscholar, "available", lambda env_name=None: True)
     fetch = Mock(return_value=None)
     monkeypatch.setattr(enrich.easyscholar, "fetch_rank", fetch)
 
@@ -286,6 +286,6 @@ def test_别名可恢复旧刊名hit0但确认目标无结果后停止(tmp_path,
     conn.close()
 
     assert fetch.call_count == 1
-    assert fetch.call_args.args == ("Canonical Journal",)
+    assert fetch.call_args.args == ("Canonical Journal", cfg.journal_rank.api_key_env)
     assert [(r["journal"], r["hit"]) for r in rows] == [
         ("Canonical Journal", 0), ("Old Journal Name", 0)]

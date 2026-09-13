@@ -139,7 +139,10 @@ def _journal_ranks(conn, cfg: Config, *, verbose: bool = True) -> dict:
     条目/别名会反复消耗 easyScholar 额度。
     """
     stat = {"jr_checked": 0, "jr_found": 0, "jr_missing": 0, "jr_failed": 0}
-    if not cfg.journal_rank.enabled or not easyscholar.available():
+    # 没有密钥就整段跳过:一个请求都不发。期刊等级是可选增强,缺它不该
+    # 让富化报错,但要用户能从 litradar check 看出"这些标签永远不会有"。
+    key_env = cfg.journal_rank.api_key_env
+    if not cfg.journal_rank.enabled or not easyscholar.available(key_env):
         return stat
 
     aliases = {db.norm_journal(k): v
@@ -182,7 +185,7 @@ def _journal_ranks(conn, cfg: Config, *, verbose: bool = True) -> dict:
         # name 已经是最终目标,按该目标请求并缓存。
         stat["jr_checked"] += 1
         try:
-            ranks = easyscholar.fetch_rank(name)
+            ranks = easyscholar.fetch_rank(name, key_env)
         except easyscholar.RankLookupError as exc:
             stat["jr_failed"] += 1
             if verbose:
