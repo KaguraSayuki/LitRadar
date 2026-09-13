@@ -237,7 +237,11 @@ def test_全文检索(tmp_path):
 
 # ------------------------------------------------------------- 反馈闭环
 def _seed(conn, title: str) -> int:
-    """插一条落在时间窗内的论文。"""
+    """插一条落在时间窗内的论文,并记进默认组。
+
+    排序只看**本组成员**,所以直接 upsert 而不记成员关系的条目会被无声忽略
+    —— 真实链路里这一步由 pipeline._store(group_id=...) 完成。
+    """
     import datetime
 
     iid, _ = db.upsert_item(conn, {
@@ -245,6 +249,8 @@ def _seed(conn, title: str) -> int:
         "title": title, "title_norm": title.lower(), "source": "test",
         "published_at": datetime.date.today().isoformat(),
     })
+    db.add_to_group(conn, db.ensure_group(conn, db.DEFAULT_GROUP_SLUG,
+                                         name=db.DEFAULT_GROUP_NAME), iid)
     return iid
 
 

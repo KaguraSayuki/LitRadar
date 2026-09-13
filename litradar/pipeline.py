@@ -449,7 +449,13 @@ def ingest_keyword_search(cfg: Config, *, verbose: bool = True,
 
 
 # --------------------------------------------------------------- 编排入口
-def run_all(cfg: Config, *, days: int = 200, verbose: bool = True) -> dict:
+def run_all(cfg: Config, *, days: int = 200, verbose: bool = True,
+            group: Profile | None = None) -> dict:
+    """完整流水线。``group`` 指定时只跑那一个订阅组。
+
+    注意邮件那一阶段是**全局**的:它按 X-MOL 网站上的订阅收信,与分组无关,
+    所以指定 group 时它照常跑(条目仍会记进所有启用的组)。
+    """
     out: dict[str, Any] = {}
     if verbose:
         print("[1/4] 解析 X-MOL 订阅邮件")
@@ -457,7 +463,7 @@ def run_all(cfg: Config, *, days: int = 200, verbose: bool = True) -> dict:
 
     if verbose:
         print("[2/4] 关键词检索(OpenAlex / Crossref)")
-    out["ingest_search"] = ingest_keyword_search(cfg, verbose=verbose)
+    out["ingest_search"] = ingest_keyword_search(cfg, verbose=verbose, group=group)
 
     if verbose:
         print("[3/4] 富化(补摘要/引用数)")
@@ -465,6 +471,6 @@ def run_all(cfg: Config, *, days: int = 200, verbose: bool = True) -> dict:
 
     if verbose:
         print("[4/4] 排序 + 摘要")
-    out["rank"] = rank.run(cfg, days=days, verbose=verbose)
-    out["summarize"] = summarize.run(cfg, days=days, verbose=verbose)
+    out["rank"] = rank.run(cfg, days=days, verbose=verbose, group=group)
+    out["summarize"] = summarize.run(cfg, days=days, verbose=verbose, group=group)
     return out

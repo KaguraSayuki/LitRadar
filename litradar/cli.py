@@ -35,11 +35,25 @@ def cmd_parse(cfg, args):
     return 0
 
 
+def _pick_group(cfg, slug):
+    """把 --group 的 slug 解析成一个 Profile;没给就返回 None(全部启用的组)。"""
+    if not slug:
+        return None
+    from .rank import load_groups
+
+    groups = load_groups(cfg)
+    for group in groups:
+        if group.slug == slug:
+            return group
+    known = "、".join(g.slug for g in groups) or "(无)"
+    raise ValueError(f"未知订阅组 {slug!r};当前有:{known}")
+
+
 def cmd_ingest(cfg, args):
     if args.what in ("mail", "all"):
         print(pipeline.ingest_mail(cfg))
     if args.what in ("search", "all"):
-        print(pipeline.ingest_keyword_search(cfg))
+        print(pipeline.ingest_keyword_search(cfg, group=_pick_group(cfg, args.group)))
     return 0
 
 
@@ -49,19 +63,21 @@ def cmd_enrich(cfg, args):
 
 
 def cmd_rank(cfg, args):
-    print(json.dumps(rank.run(cfg, days=args.days), ensure_ascii=False, indent=2))
+    print(json.dumps(rank.run(cfg, days=args.days, group=_pick_group(cfg, args.group)),
+                     ensure_ascii=False, indent=2))
     return 0
 
 
 def cmd_summarize(cfg, args):
     print(json.dumps(
-        summarize.run(cfg, days=args.days, limit=args.limit, force=args.force),
+        summarize.run(cfg, days=args.days, limit=args.limit, force=args.force,
+                      group=_pick_group(cfg, args.group)),
         ensure_ascii=False, indent=2))
     return 0
 
 
 def cmd_run(cfg, args):
-    out = pipeline.run_all(cfg, days=args.days)
+    out = pipeline.run_all(cfg, days=args.days, group=_pick_group(cfg, args.group))
     print(json.dumps(out, ensure_ascii=False, indent=2))
     return 0
 
@@ -536,6 +552,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="设置/清除花钱阶段的管理员密码(只存哈希)")
     sp.add_argument("--clear", action="store_true", help="删除已设置的密码")
     sp.set_defaults(func=cmd_admin_password)
+    for name in ("ingest", "rank", "summarize", "run"):
+        parser = sub.choices.get(name)
+        if parser is not None and not any(
+                a.dest == "group" for a in parser._actions):
+            parser.add_argument("--group", default=None, metavar="SLUG",
+                                help="只跑这一个订阅组(默认全部启用的组)")
     sub.add_parser("check", help="体检:配置/密钥/数据库/网络/LLM 连通性").set_defaults(func=cmd_check)
     return p
 
