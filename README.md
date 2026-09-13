@@ -217,7 +217,10 @@ DOI 写法不同的条目，保留关联元数据、评分、摘要和反馈；�
 会把这一项单独列出来——缺密钥时给明确告警，而不是让你对着一个全绿的体检结果猜为什么
 卡片上没有分区。密钥变量名可用 `journal_rank.api_key_env` 改名。
 
-完整设计记录与实测数据见 [docs/litradar-design.md](docs/litradar-design.md)。
+- **当前实现**（模块划分、数据流、表结构、不变量、如何加数据源）：
+  [docs/architecture.md](docs/architecture.md)
+- **设计推演记录**（实现前的方案与改动过程，保留原貌）：
+  [docs/litradar-design.md](docs/litradar-design.md)
 
 ## 部署
 
