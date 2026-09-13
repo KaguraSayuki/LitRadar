@@ -366,6 +366,21 @@ def cmd_check(cfg, args):
         line(OK if limits else WARN, f"{guarded} 的频率限制",
              "、".join(limits) if limits else "冷却与每日上限都是 0(不限制)")
 
+    # 订阅组:几个方向、各自的 LLM 精排开关(这是唯一按组花钱的一步)。
+    # 频率限制按**组**记账,所以这里把组名一并列出来。
+    from .rank import load_groups
+    try:
+        groups = load_groups(cfg)
+    except ValueError as e:
+        groups = []
+        line(BAD, "订阅组配置有误", str(e)[:80])
+        problems.append("interests.yaml 的 groups 无法解析")
+    if groups:
+        detail = "、".join(
+            f"{g.name}({'精排开' if g.llm_rank else '精排关'}"
+            f"{'' if g.enabled else '·已停用'})" for g in groups)
+        line(OK, f"订阅组 {len(groups)} 个", detail[:110])
+
     print("\n【3】检索词与偏好")
     prof = load_interests(cfg)
     if not cfg.interests_data:

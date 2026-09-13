@@ -1509,7 +1509,8 @@ def log_run(conn: sqlite3.Connection, stage: str, status: str, stats: Any = None
 
 
 def recent_stage_runs(conn: sqlite3.Connection, stages: Iterable[str],
-                      *, limit: int = 500) -> list[tuple[str, str]]:
+                      *, group_slug: str | None = None,
+                      limit: int = 500) -> list[tuple[str, str]]:
     """最近若干条运行记录的 ``(stage, 结束时间)``,供"冷却 + 每日上限"当账本。
 
     刻意用 run_log 而不是内存计数:进程重启不会把额度计数清零,而且 CLI 与
@@ -1520,12 +1521,19 @@ def recent_stage_runs(conn: sqlite3.Connection, stages: Iterable[str],
     if not names:
         return []
     marks = ", ".join("?" for _ in names)
+    # 按组算账时把 group_slug 为空的记录也算进来:邮件采集与富化是**全局**的
+    # (不按方向跑),它们花的时间/额度属于每个组。只看本组 slug 会让"全局那部分
+    # 工作"在账本上凭空消失。
+    scope, scope_args = "", ()
+    if group_slug is not None:
+        scope = " AND (group_slug = ? OR group_slug IS NULL)"
+        scope_args = (group_slug,)
     rows = conn.execute(
         f"""SELECT stage, COALESCE(finished_at, started_at) AS at FROM run_log
-            WHERE stage IN ({marks})
+            WHERE stage IN ({marks}){scope}
               AND COALESCE(finished_at, started_at) IS NOT NULL
             ORDER BY id DESC LIMIT ?""",
-        (*names, limit),
+        (*names, *scope_args, limit),
     ).fetchall()
     return [(r[0], r[1]) for r in rows]
 

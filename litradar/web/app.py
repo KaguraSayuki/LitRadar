@@ -250,7 +250,8 @@ def require_admin_password(request: Request, cfg: Config) -> None:
         )
 
 
-def require_stage_limits(cfg: Config, stage: str) -> None:
+def require_stage_limits(cfg: Config, stage: str,
+                         group_slug: str | None = None) -> None:
     """冷却 + 每日上限。账本用 run_log,所以 CLI 与定时任务跑的也计入。
 
     口令解决不了"点多少次":误点、写错的循环脚本、泄露的凭据都能反复花钱。
@@ -262,7 +263,7 @@ def require_stage_limits(cfg: Config, stage: str) -> None:
     names = _STAGE_LOG_NAMES.get(stage, (stage,))
     conn = db.Database(cfg.db_file).connect()
     try:
-        rows = db.recent_stage_runs(conn, names)
+        rows = db.recent_stage_runs(conn, names, group_slug=group_slug)
     finally:
         conn.close()
 
@@ -785,9 +786,13 @@ def admin_run(request: Request, stage: str, days: int = 0):
     require_same_origin(request)
     cfg = get_cfg()
     require_exposure_safe(cfg)
+    # 当前组(切换器/`?g=` 决定的那个)。记账与执行要用同一个组,否则"在 A 组
+    # 点了一下"会算到所有组头上,上限自然就不准了。
+    prof = active_group(request, cfg)
+    gslug = prof.slug if prof else None
     if stage in cfg.admin.guarded_stages:
         require_admin_password(request, cfg)
-        require_stage_limits(cfg, stage)
+        require_stage_limits(cfg, stage, gslug)
     # days=0 表示"用配置里的统一窗口"。之前这里默认 30,而抓取窗口是 180+,
     # 导致网页点"排序"只覆盖最近一个月,更早的条目永远是"未评分"。
     if days <= 0:
@@ -797,19 +802,20 @@ def admin_run(request: Request, stage: str, days: int = 0):
     # "批量全部返回空"。双击按钮同理,会并发跑两份。
     try:
         with single_instance(cfg.db_file.parent / "litradar.lock"):
+            # mail 与 enrich 是全局的(不按方向跑),不受当前组影响
             if stage == "mail":
                 out = pipeline.ingest_mail(cfg)
             elif stage == "search":
-                out = pipeline.ingest_keyword_search(cfg)
+                out = pipeline.ingest_keyword_search(cfg, group=prof)
             elif stage == "enrich":
                 from .. import enrich
                 out = enrich.run(cfg)
             elif stage == "rank":
-                out = rank.run(cfg, days=days)
+                out = rank.run(cfg, days=days, group=prof)
             elif stage == "summarize":
-                out = summarize.run(cfg, days=days)
+                out = summarize.run(cfg, days=days, group=prof)
             elif stage == "all":
-                out = pipeline.run_all(cfg, days=days)
+                out = pipeline.run_all(cfg, days=days, group=prof)
             else:
                 raise HTTPException(400, f"未知阶段: {stage}")
     except AlreadyRunning:
