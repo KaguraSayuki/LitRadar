@@ -47,6 +47,24 @@ def _expand(p: str | Path) -> Path:
     return p if p.is_absolute() else (ROOT / p)
 
 
+def read_secret(env_name: str | None) -> str | None:
+    """读取密钥类环境变量:去掉首尾空白,空值一律当作"没设置"。
+
+    所有密钥都走这一个入口,原因有两个:
+
+      * ``.env`` 里 ``KEY=abc `` 这种尾随(或换行前)空白很常见,带着它去
+        请求只会拿到"凭据无效 / 40002",却极难看出是空格造成的;
+      * "已配置"的判断和真正发出去的凭据必须是同一个值。以前各处直接用
+        ``os.environ.get``,只含空白的值会被判成"已设置",而下游要么发出
+        一个带空格的密钥、要么(在 strip 之后)认为没配置 —— 结果是体检说
+        没问题、功能却是空的。
+
+    ``env_name`` 可以来自配置(如 ``llm.api_key_env``);为空即视为未设置。
+    """
+    raw = os.environ.get(env_name) if env_name else None
+    return (raw or "").strip() or None
+
+
 @dataclass
 class MailConfig:
     """邮件接入方式:folder(本地 .eml) / maildir / imap。"""
@@ -66,7 +84,7 @@ class MailConfig:
 
     @property
     def imap_password(self) -> str | None:
-        return os.environ.get(self.imap_password_env)
+        return read_secret(self.imap_password_env)
 
 
 @dataclass
@@ -144,7 +162,7 @@ class LLMConfig:
 
     @property
     def api_key(self) -> str | None:
-        return os.environ.get(self.api_key_env)
+        return read_secret(self.api_key_env)
 
 
 @dataclass
@@ -176,7 +194,7 @@ class AppConfig:
 
     @property
     def token(self) -> str | None:
-        return os.environ.get(self.token_env)
+        return read_secret(self.token_env)
 
 
 @dataclass

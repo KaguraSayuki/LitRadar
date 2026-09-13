@@ -14,6 +14,7 @@ from typing import Any
 
 import requests
 
+from ..config import read_secret
 from ..normalize import normalize_doi
 
 BASE = "https://api.semanticscholar.org/graph/v1"
@@ -43,7 +44,7 @@ _key_state = {"rejected": False, "warned": False}
 
 def _headers() -> dict[str, str]:
     h = {"User-Agent": "LitRadar/0.1 (personal literature radar)"}
-    key = os.environ.get("S2_API_KEY")
+    key = read_secret("S2_API_KEY")
     if key and not _key_state["rejected"]:
         h["x-api-key"] = key
     return h
@@ -55,7 +56,7 @@ def _note_rejected() -> None:
     注意官方状态码语义:401 = 凭据无效;403 = 请求被理解但无权限。
     实测拿到的是 **403**,更可能是 key 审核/激活尚未完成,而非填错。
     """
-    if not os.environ.get("S2_API_KEY") or _key_state["rejected"]:
+    if not read_secret("S2_API_KEY") or _key_state["rejected"]:
         return
     _key_state["rejected"] = True
     if not _key_state["warned"]:
@@ -88,7 +89,7 @@ def fetch_by_doi(doi: str, retries: int = 3, interval: float | None = None) -> d
             )
             if r.status_code == 404:
                 return None
-            if r.status_code == 403 and os.environ.get("S2_API_KEY") \
+            if r.status_code == 403 and read_secret("S2_API_KEY") \
                     and not _key_state["rejected"]:
                 _note_rejected()
                 continue                      # 立刻用匿名头重试
@@ -138,7 +139,7 @@ def fetch_many_by_doi(dois: list[str], retries: int = 3,
                     timeout=60,
                 )
                 # 带 key 却 403 = key 不可用 -> 摘掉 key 立即重试
-                if r.status_code == 403 and os.environ.get("S2_API_KEY") \
+                if r.status_code == 403 and read_secret("S2_API_KEY") \
                         and not _key_state["rejected"]:
                     _note_rejected()
                     continue
@@ -215,7 +216,7 @@ def search(query: str, *, limit: int = 20, year: str | None = None) -> list[dict
 
     仅作兜底;正式召回请用 search_bulk() —— 那个支持语法且单次可拉 1000 篇。
     """
-    if not os.environ.get("S2_API_KEY"):
+    if not read_secret("S2_API_KEY"):
         return []
     params: dict[str, Any] = {"query": query, "limit": min(limit, 100), "fields": FIELDS}
     if year:
@@ -255,7 +256,7 @@ def search_bulk(query: str, *, year: str | None = None, since: str | None = None
     与 Crossref 的分工:Crossref 模糊匹配、召回高但噪声大;bulk 是精确 AND、
     召回低但准确率高。两者互补,不是替换关系。
     """
-    if not os.environ.get("S2_API_KEY"):
+    if not read_secret("S2_API_KEY"):
         return []
     interval = MIN_INTERVAL if interval is None else interval
     out: list[dict] = []
@@ -345,7 +346,7 @@ def fetch_citations(paper_ref: str, *, year: str | None = None,
     单种子最多只要 ``limit`` 条(默认 100)。引用上百条的基础文献不少,
     往下翻页只会把噪声一起拉进来 —— 精确率靠调用方的共被引闸门保证。
     """
-    if not os.environ.get("S2_API_KEY"):
+    if not read_secret("S2_API_KEY"):
         return []
     interval = MIN_INTERVAL if interval is None else interval
     out: list[dict] = []
