@@ -21,6 +21,12 @@
 | 6 | 推送邮件周报 | 用户要局域网网页 | 全部改为 Web 界面,无邮件推送 |
 | 7 | HTMX | 为减少依赖 | 改为**原生 fetch**,零前端依赖 |
 | 8 | 专利监控(SciFinder) | SciFinder 移除后无专利源 | **已砍掉**。所有现有数据源都不含专利,`/patents` 页面与导航已移除;要接需先解决专利族去重与 18 个月公开延迟 |
+| 9 | `auth.enabled` + `password_hash`(用 `litradar hash-password` 生成)+ `/login` 页面 | 未实现账号体系 | 改为 `LITRADAR_TOKEN` 接口口令(访问带 `?k=`);默认只绑回环地址,不设口令也安全。**`hash-password` 命令不存在** |
+| 10 | 排序拆成 `rules.py` / `coarse.py` / `llm_rerank.py`,另有 `notify.py` 提醒与 `epo.py` EPO OPS 客户端 | 三阶段合并在单个 `rank.py`;提醒与 EPO 均未实现 | `openalex.py` / `crossref.py` 实际是 `sources/openalex_search.py`、`sources/crossref_search.py` |
+| 11 | 画像存 `profiles/default.yaml` | 改为项目根的 `interests.yaml`,网页可在线编辑并自动留备份 | |
+| 12 | `scripts/seed_demo.py` 灌 mock 数据 | **从未创建** | 测试改用 pytest fixture 与真实 `.eml` 样本 |
+| 13 | `docs/COMPLIANCE.md` 记录合规边界 | **未创建** | 边界写在 README「安全与合规」一节 |
+| 14 | `app.host: "0.0.0.0"` + `port: 8080`;`.env` 含 `EPO_KEY` / `EPO_SECRET` | 默认只绑 `127.0.0.1:8090`;EPO 未接入 | 绑 `0.0.0.0` 会绕过 nginx 的 TLS 与口令保护,**勿照抄**;实际密钥清单见 `.env.example` |
 
 保留不变的核心设计:三阶段排序漏斗(规则 → BM25 → LLM)、SQLite 数据模型、
 期刊缩写归一匹配、数字核验防幻觉、systemd 调度、单用户 LAN 部署。
@@ -70,10 +76,10 @@
 ### 2.2 合规检查清单(上线前逐条确认)
 
 - [ ] 服务绑定 `0.0.0.0` 但路由器未做端口转发,公网不可达
-- [ ] 已启用口令认证(`auth.enabled: true`)
+- [ ] 已启用接口口令(`LITRADAR_TOKEN`,访问带 `?k=`;原稿写的 `auth.enabled` 未实现)
 - [ ] 未实现任何形态的批量导出功能
 - [ ] 未存储 SciFinder 原始摘要全文,仅存题录 + 自生成摘要 + 跳转链接
-- [ ] `docs/COMPLIANCE.md` 已写明上述边界,并在 README 顶部引用
+- [ ] 合规边界已在 README「安全与合规」写明(原计划的 `docs/COMPLIANCE.md` 未创建)
 
 ### 2.3 待与图书馆确认的三件事
 
@@ -564,6 +570,10 @@ def rule_filter(items, profile) -> list[Item]:
 
 ## 8. 配置文件
 
+> 下面是设计稿的字段划分。实际可用字段以 `config.example.yaml` 为准:没有 `auth`
+> 段,`app.host` / `app.port` 默认是回环地址与 8090,密钥一律只从环境变量读
+> (见 `.env.example`)。
+
 ### 8.1 `config.yaml`
 
 ```yaml
@@ -768,6 +778,11 @@ litradar/
 
 ## 10. 部署
 
+> **本节保留设计原稿,不要照抄。** 可执行的安装与部署步骤在 README 的「部署」一节
+> (含 macOS launchd 与 Windows 任务计划的等价方案),单元文件以 `deploy/` 为准。
+> 10.1 的 `0.0.0.0:8080` 会绕过 nginx 的 TLS 与口令保护;10.3 的原稿命令里
+> `hash-password` 不存在、`seed_demo.py` 从未创建。差异汇总见文首修订记录。
+
 ### 10.1 systemd unit
 
 `deploy/litradar-web.service`
@@ -814,18 +829,34 @@ EPO_SECRET=xxxx
 
 ### 10.3 启动步骤
 
+原稿里的 `litradar hash-password`(无此命令)与 `scripts/seed_demo.py`(从未创建)
+已删除;口令改由 `LITRADAR_TOKEN` 承担,演示数据改用 pytest fixture。可执行的步骤
+以 README 为准,当前等价命令是:
+
 ```bash
 python -m venv .venv && .venv/bin/pip install -e .
 cp config.example.yaml config.yaml
+cp interests.example.yaml interests.yaml
+cp .env.example .env && chmod 600 .env
+.venv/bin/litradar check        # 先体检:配置 / 密钥 / 数据库 / 网络 / LLM
 .venv/bin/litradar init-db
-.venv/bin/litradar hash-password          # 写入 config.yaml
-.venv/bin/python scripts/seed_demo.py     # 灌 mock 数据
-sudo cp deploy/*.service deploy/*.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now litradar-web litradar-daily.timer
+.venv/bin/litradar run
+.venv/bin/uvicorn litradar.web.app:app --host 127.0.0.1 --port 8090
 ```
 
-访问:`http://<局域网IP>:8080`
+systemd 单元必须以**模板名**安装(原稿写的 `litradar-web` / `litradar-daily.timer`
+已被 systemd 拒绝:`%i` 为空):
+
+```bash
+sudo cp deploy/litradar-web.service    /etc/systemd/system/litradar@.service
+sudo cp deploy/litradar-daily@.service /etc/systemd/system/
+sudo cp deploy/litradar-daily@.timer   /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now litradar@$(whoami).service litradar-daily@$(whoami).timer
+```
+
+访问:`http://127.0.0.1:8090`(原稿写的 `http://<局域网IP>:8080` 已改为只绑回环,
+局域网访问经反向代理,见 `deploy/litradar-nginx.conf`)
 
 ---
 
