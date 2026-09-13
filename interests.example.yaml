@@ -5,6 +5,36 @@
 # 真实的 interests.yaml 已在 .gitignore 中排除,不会进版本库。
 #
 # 下面每个字段都会被代码实际读取;用不到的可以留空列表。
+#
+# ── 多方向(订阅组) ─────────────────────────────────────────────────────────
+# 本文件默认是**单方向**格式:整份文件就是一组,对应的组 slug 固定为 default。
+# 想同时跟多个方向,就把整份文件换成 groups: 形态 —— 每组一套检索词、关键词、
+# 期刊白名单与排序偏好。规则过滤与 BM25 每组各算(本地计算,不花钱);只有
+# LLM 精排是按组花钱的,所以它可以用 llm_rank 单独关掉。
+#
+# groups:
+#   - slug: organic          # 稳定标识:改名不要改它,否则等于换了一个组
+#     name: 有机合成方法学    # 省略 slug 时从 name 派生
+#     direction: >
+#       这一组的研究方向描述。
+#     search_queries:
+#       - '"N-H insertion" diazo aniline asymmetric'
+#     s2_queries:
+#       - '"N-H insertion" + diazo + aniline'
+#     keywords:
+#       core: [metal carbene]
+#       bonus: [enantioselective]
+#     journals:
+#       core: [Organic Letters]
+#     llm_rank: true         # 本组是否跑 LLM 精排(花钱开关)
+#     enabled: true          # false = 临时停掉这个方向
+#   - slug: materials
+#     name: 材料化学
+#     direction: >
+#       另一组的方向描述。
+#
+# ⚠️ 用了 groups: 之后,同一层就不要再写单方向字段(direction / keywords / …),
+#    校验会直接报错 —— 两者混写无法判断哪个生效。
 # ============================================================================
 
 # 研究方向(中文可读,会拼进 LLM 精排与摘要的 prompt)
