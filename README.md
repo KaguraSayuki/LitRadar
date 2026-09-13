@@ -42,7 +42,8 @@ Crossref 关键词检索（可选）───┘    (SQLite)    └─ 排序：
 
 ## 快速开始
 
-环境要求：Python ≥ 3.11。
+环境要求：Python ≥ 3.11。Linux / macOS / Windows 均可运行；下面用 POSIX 路径举例，
+Windows 把 `.venv/bin/` 换成 `.venv\Scripts\`（`litradar` → `litradar.exe`）。
 
 ```bash
 git clone https://github.com/KaguraSayuki/LitRadar.git
@@ -55,7 +56,7 @@ python3 -m venv .venv
 # 2. 配置（三个文件均不入库，仅提交对应的 .example）
 cp config.example.yaml   config.yaml
 cp interests.example.yaml interests.yaml
-cp .env.example          .env && chmod 600 .env
+cp .env.example          .env && chmod 600 .env      # Windows 去掉 chmod，见下方说明
 #    编辑 .env：至少填写 DEEPSEEK_API_KEY；邮件接入需 IMAP_PASSWORD
 
 # 3. 初始化数据库
@@ -70,6 +71,10 @@ cp .env.example          .env && chmod 600 .env
 
 浏览器访问 `http://127.0.0.1:8090`。首次使用建议先运行 `litradar check`
 体检配置、密钥、数据库与各 API 连通性。
+
+`.env` 的权限在不同平台上含义不同：POSIX 上请保持 `chmod 600`（`litradar check`
+会检查）；Windows 上 `chmod` 只能切换只读位，实际由文件 ACL 决定，请通过资源管理器
+或 `icacls .env /inheritance:r /grant:r "%USERNAME%:R"` 限制访问。
 
 ## 配置说明
 
@@ -167,7 +172,14 @@ DOI 写法不同的条目，保留关联元数据、评分、摘要和反馈；�
 
 完整设计记录与实测数据见 [docs/litradar-design.md](docs/litradar-design.md)。
 
-## 部署（systemd + nginx）
+## 部署
+
+`deploy/` 里的单元文件与 nginx 示例是 **Linux/systemd 专用**，其中的项目路径需要按你的
+实际部署目录改写；macOS 与 Windows 请用下面各自的等价方案。三者的共同点是：
+Web 服务只绑 `127.0.0.1:8090`，每日流水线在固定时间跑 `litradar run`
+（时间窗来自 `config.yaml` 的 `app.pipeline_window_days`，不要在调度器里另设窗口）。
+
+### Linux（systemd + nginx）
 
 `deploy/` 提供 systemd 模板单元（`%i` 为运行用户，单元文件不含具体用户名）与 nginx
 反代示例：
@@ -191,6 +203,82 @@ journalctl -u litradar@$(whoami).service -f
 应用默认仅绑定 `127.0.0.1:8090`；局域网访问建议经 nginx 反向代理
 （见 `deploy/litradar-nginx.conf`）。
 
+### macOS（launchd）
+
+`~/Library/LaunchAgents/com.litradar.daily.plist`：
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.litradar.daily</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/你的用户名/LitRadar/.venv/bin/litradar</string>
+    <string>run</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/你的用户名/LitRadar</string>
+  <key>StandardOutPath</key><string>/Users/你的用户名/LitRadar/data/launchd.log</string>
+  <key>StandardErrorPath</key><string>/Users/你的用户名/LitRadar/data/launchd.err</string>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>7</integer>
+    <key>Minute</key><integer>5</integer></dict>
+</dict></plist>
+```
+
+```bash
+launchctl load  ~/Library/LaunchAgents/com.litradar.daily.plist
+launchctl start com.litradar.daily          # 立刻手动跑一次
+launchctl unload ~/Library/LaunchAgents/com.litradar.daily.plist
+```
+
+Web 服务同样可以用 launchd 常驻（把 `ProgramArguments` 换成
+`.venv/bin/uvicorn`、`litradar.web.app:app`、`--host`、`127.0.0.1`、`--port`、`8090`，
+并加 `<key>KeepAlive</key><true/>`）。macOS 的 `launchd` 在进程重载时会自动重启，
+`WorkingDirectory` 必须写在项目根，否则 `config.yaml` 找不到。
+
+### Windows（任务计划程序）
+
+用 PowerShell 的 `*-ScheduledTask` cmdlet 注册比 `schtasks /TR` 少一层引号转义，
+且能直接指定工作目录（**必须指定**，否则读不到 `config.yaml`）：
+
+```powershell
+# Web 服务:登录时启动,只绑回环地址
+$web = New-ScheduledTaskAction -Execute "C:\LitRadar\.venv\Scripts\python.exe" `
+  -Argument "-m uvicorn litradar.web.app:app --host 127.0.0.1 --port 8090" `
+  -WorkingDirectory "C:\LitRadar"
+Register-ScheduledTask -TaskName "LitRadarWeb" -Action $web `
+  -Trigger (New-ScheduledTaskTrigger -AtLogOn) -RunLevel Limited
+
+# 每日流水线:每天 07:05
+$daily = New-ScheduledTaskAction -Execute "C:\LitRadar\.venv\Scripts\litradar.exe" `
+  -Argument "run" -WorkingDirectory "C:\LitRadar"
+Register-ScheduledTask -TaskName "LitRadarDaily" -Action $daily `
+  -Trigger (New-ScheduledTaskTrigger -Daily -At 07:05) -RunLevel Limited
+
+Start-ScheduledTask      -TaskName "LitRadarDaily"   # 立刻跑一次
+Get-ScheduledTaskInfo    -TaskName "LitRadarDaily"   # 上次结果 / 下次运行时间
+Unregister-ScheduledTask -TaskName "LitRadarDaily" -Confirm:$false
+```
+
+不传 `-User` / `-Password` 时任务默认**只在当前用户登录后**才会运行；要完全无人
+值守，需要补上凭据，或把 Web 服务注册成 Windows 服务（例如用 NSSM 包装
+`.venv\Scripts\python.exe -m uvicorn ...`）。
+
+关于 Windows 的两点实测注意：
+
+- **控制台编码**：任务计划把输出重定向时，Python 会退回 ANSI 代码页（英文系统
+  cp1252），中文日志会抛 `UnicodeEncodeError`。`litradar` 已在入口把标准输出/错误
+  固定为 UTF-8 并把编码错误降级为替换字符；若你自己写包装脚本，建议同时设
+  `PYTHONUTF8=1`。
+- **单实例锁**：Windows 上用的是 `msvcrt` 字节范围锁，POSIX 上是 `fcntl.flock`，
+  两者都由系统在进程结束时释放，所以任务被强杀不会留下需要手工清理的死锁。
+  两个平台都以 `data/litradar.lock` 为同一把锁，Web 按钮与定时任务因此不会互相
+  抢 API 限流。
+
+局域网访问仍然建议在前面放一层反向代理（Windows 可用 Caddy/IIS，macOS 可用
+Caddy/nginx），不要直接把服务绑到 `0.0.0.0`。
+
 ## 安全与合规
 
 - 本项目**不抓取 X-MOL 网站**（其 `robots.txt` 禁止爬取检索页），仅解析用户自己
@@ -199,7 +287,7 @@ journalctl -u litradar@$(whoami).service -f
   应设置 `LITRADAR_TOKEN` 接口口令（访问时带 `?k=<token>`），否则同网段任何人
   都能触发 `/admin/run/*` 消耗你的 LLM 额度
 - 不建议将服务暴露于公网：订阅邮件内容面向订阅者本人，公网暴露构成对非授权用户的再分发
-- 密钥仅通过环境变量传入（`.env`，建议权限 600），不写入配置文件；
+- 密钥仅通过环境变量传入（`.env`，POSIX 建议权限 600，Windows 用 ACL 限制），不写入配置文件；
   `.env`、`config.yaml`、`interests.yaml`、`data/` 均已被 `.gitignore` 排除
 
 ## 已知限制
@@ -211,6 +299,7 @@ journalctl -u litradar@$(whoami).service -f
 | Crossref 摘要覆盖不全 | ACS 系期刊常缺摘要，故以 Semantic Scholar 为摘要主力 |
 | 数字核验非完备 | 可标记多数数字不一致，但不保证捕获全部幻觉 |
 | 不含专利与预印本 | 现有数据源均不提供；数据模型已预留 `item.kind` 维度供将来扩展 |
+| Windows 支持未经实机验证 | 代码已按平台分流（锁用 `msvcrt`、控制台固定 UTF-8、跳过 POSIX 权限检查），并有模拟 Windows 分支的测试，但尚未在真实 Windows 上跑过完整流水线 |
 
 ## 目录结构
 
@@ -239,7 +328,7 @@ litradar/
 │   └── web/                    FastAPI + Jinja2（无前端构建）
 ├── config.example.yaml         运行配置示例
 ├── interests.example.yaml      研究画像示例
-├── deploy/                     systemd 单元与 nginx 配置
+├── deploy/                     systemd 单元与 nginx 配置（Linux 专用）
 ├── docs/                       设计文档与 API Key 申请材料
 ├── fixtures/                   邮件解析回归样本（真实 .eml）
 └── tests/                      单元与回归测试（pytest）
