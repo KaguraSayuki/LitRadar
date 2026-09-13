@@ -250,6 +250,9 @@ class Profile:
     journals_core: list[str]
     journals_ok: list[str]
     authors_watch: list[str]
+    # 刊名 → ISSN 列表。挂在**组自己**身上:多组各有一份白名单,不能共用整份
+    # interests_data 里的那一张表。(必须排在必填字段之后,dataclass 的规矩。)
+    journal_issns: dict[str, list[str]] = field(default_factory=dict)
     search_query: str = ""
     search_queries: list[str] = field(default_factory=list)
     # Semantic Scholar bulk 端点的检索词。**必须用查询语法**(+ = AND,| = OR,
@@ -292,6 +295,8 @@ class Profile:
             boost_topics=kw.get("boost_topics") or [],
             journals_core=jr.get("core") or [],
             journals_ok=jr.get("ok") or [],
+            journal_issns={str(k): [str(x) for x in (v or [])]
+                           for k, v in (jr.get("issn") or {}).items()},
             authors_watch=d.get("authors_watch") or [],
             search_query=(d.get("search_query") or "").strip(),
             search_queries=multi,

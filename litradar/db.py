@@ -118,20 +118,22 @@ CREATE TABLE IF NOT EXISTS journal_rank (
 -- 只被那失败种子引用的论文就永远凑不够票。落表之后,共被引是在
 -- 全部种子、全部历史轮次上统计的,单次失败不再影响判断。
 CREATE TABLE IF NOT EXISTS seed_cite (
+    group_id   INTEGER NOT NULL REFERENCES interest_group(id) ON DELETE CASCADE,
     seed_doi   TEXT NOT NULL,        -- 引用方引用了哪个种子
     citing_doi TEXT NOT NULL,        -- 引用方
     item_json  TEXT,                 -- 引用方元数据,凑够票时直接入库,不再查一次
     first_seen TEXT,
-    PRIMARY KEY (seed_doi, citing_doi)
+    PRIMARY KEY (group_id, seed_doi, citing_doi)
 );
-CREATE INDEX IF NOT EXISTS idx_seed_cite_citing ON seed_cite(citing_doi);
 
 -- 每个种子上次刷新时间。挑最久没查的先查,轮着来。
 CREATE TABLE IF NOT EXISTS seed_query (
-    seed_doi   TEXT PRIMARY KEY,
+    group_id   INTEGER NOT NULL REFERENCES interest_group(id) ON DELETE CASCADE,
+    seed_doi   TEXT NOT NULL,
     queried_at TEXT,
     n_cites    INTEGER DEFAULT 0,
-    status     TEXT                  -- ok / failed
+    status     TEXT,                 -- ok / failed
+    PRIMARY KEY (group_id, seed_doi)
 );
 
 -- 订阅组:一个研究方向一组。slug 是稳定标识(改名/改方向不动它),id 在库内
@@ -711,15 +713,67 @@ def group_id(conn: sqlite3.Connection, slug: str | None) -> int | None:
     return int(row["id"]) if row else None
 
 
+def _migrate_v6(conn: sqlite3.Connection) -> None:
+    """滚雪球的引用关系按组存放。
+
+    以前 seed_cite / seed_query 是全局的:两个方向各自的种子混在一起统计
+    共被引,于是"A 方向的候选"会被算成"也被 B 的种子引过",票数虚高。
+    老数据全部归默认组 —— 它们本来就来自那份单方向配置。
+    """
+    default_id = ensure_group(conn, DEFAULT_GROUP_SLUG, name=DEFAULT_GROUP_NAME)
+
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(seed_cite)")}
+    if cols and "group_id" not in cols:
+        conn.executescript(f"""
+            CREATE TABLE seed_cite_v6 (
+                group_id   INTEGER NOT NULL
+                           REFERENCES interest_group(id) ON DELETE CASCADE,
+                seed_doi   TEXT NOT NULL,
+                citing_doi TEXT NOT NULL,
+                item_json  TEXT,
+                first_seen TEXT,
+                PRIMARY KEY (group_id, seed_doi, citing_doi)
+            );
+            INSERT INTO seed_cite_v6
+                (group_id, seed_doi, citing_doi, item_json, first_seen)
+                SELECT {default_id}, seed_doi, citing_doi, item_json, first_seen
+                  FROM seed_cite;
+            DROP TABLE seed_cite;
+            ALTER TABLE seed_cite_v6 RENAME TO seed_cite;
+        """)
+
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(seed_query)")}
+    if cols and "group_id" not in cols:
+        conn.executescript(f"""
+            CREATE TABLE seed_query_v6 (
+                group_id   INTEGER NOT NULL
+                           REFERENCES interest_group(id) ON DELETE CASCADE,
+                seed_doi   TEXT NOT NULL,
+                queried_at TEXT,
+                n_cites    INTEGER DEFAULT 0,
+                status     TEXT,
+                PRIMARY KEY (group_id, seed_doi)
+            );
+            INSERT INTO seed_query_v6
+                (group_id, seed_doi, queried_at, n_cites, status)
+                SELECT {default_id}, seed_doi, queried_at, n_cites, status
+                  FROM seed_query;
+            DROP TABLE seed_query;
+            ALTER TABLE seed_query_v6 RENAME TO seed_query;
+        """)
+
+
 # 迁移步骤按版本排列:下标 + 1 = 跑完这步之后的 user_version。
 # 加新迁移就在末尾追加一个函数,**同时把 SCHEMA 改成最新结构** ——
 # 新库只建 SCHEMA、不走这里。
-_MIGRATIONS = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5]
+_MIGRATIONS = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5,
+               _migrate_v6]
 SCHEMA_VERSION = len(_MIGRATIONS)
 
 # 只能在迁移之后建的索引(见 Database.init 的注释)。
 POST_MIGRATION_INDEXES = """
 CREATE INDEX IF NOT EXISTS idx_score_final ON score(group_id, final_score DESC);
+CREATE INDEX IF NOT EXISTS idx_seed_cite_citing ON seed_cite(group_id, citing_doi);
 """
 
 # 老库升级时,所有历史条目都归到这个组名下 —— 这样收件箱不会因为分组功能
@@ -1226,7 +1280,7 @@ def save_journal_rank(conn: sqlite3.Connection, journal: str,
 
 
 def pick_seeds_to_query(conn: sqlite3.Connection, seeds: list[str],
-                        k: int) -> list[str]:
+                        k: int, *, group_id: int | None = None) -> list[str]:
     """挑最久没刷新的 k 个种子。从没查过的排最前。
 
     为什么轮着查而不是一次全查:S2 免费 key 名义上 1 req/s,实际突发很容易
@@ -1235,16 +1289,22 @@ def pick_seeds_to_query(conn: sqlite3.Connection, seeds: list[str],
     """
     if k <= 0 or not seeds:
         return []
+    gid = _read_group_id(conn, None) if group_id is None else group_id
     order = {s: i for i, s in enumerate(seeds)}
     rows = {r["seed_doi"]: r["queried_at"] for r in conn.execute(
-        "SELECT seed_doi, queried_at FROM seed_query")}
+        "SELECT seed_doi, queried_at FROM seed_query WHERE group_id=?", (gid,))}
     # 没查过的排最前(空串最小),其次按时间从早到晚
     return sorted(seeds, key=lambda s: (rows.get(s) or "", order[s]))[:k]
 
 
 def save_seed_cites(conn: sqlite3.Connection, seed_doi: str,
-                    items: list[dict]) -> int:
-    """记录"这些论文引用了这个种子"。返回写入条数。"""
+                    items: list[dict], *, group_id: int | None = None) -> int:
+    """记录"这些论文引用了这个种子"(属于某个组)。返回写入条数。
+
+    ``group_id`` 缺省落默认组 —— 与 save_score / set_excluded 同一套语义,
+    单组调用点不必显式传。
+    """
+    group_id = _write_group_id(conn) if group_id is None else group_id
     seed_doi = normalize_doi(seed_doi) or seed_doi
     stamp = now()
     n = 0
@@ -1253,38 +1313,48 @@ def save_seed_cites(conn: sqlite3.Connection, seed_doi: str,
         if not doi:
             continue
         cur = conn.execute(
-            """INSERT OR IGNORE INTO seed_cite (seed_doi, citing_doi, item_json, first_seen)
-               VALUES (?,?,?,?)""",
-            (seed_doi, doi, json.dumps(it, ensure_ascii=False), stamp))
+            """INSERT OR IGNORE INTO seed_cite
+               (group_id, seed_doi, citing_doi, item_json, first_seen)
+               VALUES (?,?,?,?,?)""",
+            (group_id, seed_doi, doi, json.dumps(it, ensure_ascii=False), stamp))
         n += cur.rowcount
     return n
 
 
 def mark_seed_queried(conn: sqlite3.Connection, seed_doi: str,
-                      n_cites: int, status: str = "ok") -> None:
+                      n_cites: int, *, group_id: int | None = None,
+                      status: str = "ok") -> None:
+    group_id = _write_group_id(conn) if group_id is None else group_id
     conn.execute(
-        """INSERT INTO seed_query (seed_doi, queried_at, n_cites, status)
-           VALUES (?,?,?,?)
-           ON CONFLICT(seed_doi) DO UPDATE SET
+        """INSERT INTO seed_query (group_id, seed_doi, queried_at, n_cites, status)
+           VALUES (?,?,?,?,?)
+           ON CONFLICT(group_id, seed_doi) DO UPDATE SET
              queried_at=excluded.queried_at, n_cites=excluded.n_cites,
              status=excluded.status""",
-        (seed_doi, now(), n_cites, status))
+        (group_id, seed_doi, now(), n_cites, status))
 
 
-def cocited_items(conn: sqlite3.Connection, min_seeds: int) -> list[dict]:
-    """共被引达到门槛、且**还不在库里**的候选。
+def cocited_items(conn: sqlite3.Connection, min_seeds: int, *,
+                  group_id: int | None = None) -> list[dict]:
+    """共被引达到门槛、且**还没进这个组**的候选。
 
-    过滤在库的:这些论文每轮都会被重新算出来,不去掉就会反复走一遍入库路径。
+    只统计**本组的种子**:两个方向混在一起算,A 的候选会因为"也被 B 的种子
+    引过"而票数虚高。过滤的是"已在本组"而不是"已在库里" —— 被 A 组先捞到
+    的论文,对 B 组仍然是合法候选,只是要再记一次 B 组的成员关系。
     """
+    gid = _read_group_id(conn, None) if group_id is None else group_id
     out: list[dict] = []
     for r in conn.execute(
             """SELECT citing_doi, COUNT(DISTINCT seed_doi) n,
                       MAX(item_json) item_json
                FROM seed_cite
-               WHERE citing_doi NOT IN
-                     (SELECT LOWER(doi) FROM item WHERE doi IS NOT NULL)
+               WHERE group_id = ?
+                 AND citing_doi NOT IN
+                     (SELECT LOWER(i.doi) FROM item i
+                        JOIN item_group g ON g.item_id = i.id AND g.group_id = ?
+                       WHERE i.doi IS NOT NULL)
                GROUP BY citing_doi
-               HAVING n >= ?""", (max(1, min_seeds),)):
+               HAVING n >= ?""", (gid, gid, max(1, min_seeds))):
         try:
             item = json.loads(r["item_json"] or "{}")
         except (json.JSONDecodeError, TypeError):
@@ -1295,6 +1365,22 @@ def cocited_items(conn: sqlite3.Connection, min_seeds: int) -> list[dict]:
         item["source_ref"] = f"cocite:{r['n']}"
         out.append(item)
     return out
+
+
+def add_to_group(conn: sqlite3.Connection, group_id: int, item_id: int) -> None:
+    """把条目记进某个组。已存在就什么都不做(保留最早一次的 first_seen)。"""
+    conn.execute(
+        """INSERT OR IGNORE INTO item_group (group_id, item_id, first_seen)
+           VALUES (?,?,?)""",
+        (group_id, item_id, now()))
+
+
+def item_group_ids(conn: sqlite3.Connection, item_id: int) -> list[str]:
+    """这篇属于哪些组(slug)。详情页要显示"它从哪来"。"""
+    return [r[0] for r in conn.execute(
+        """SELECT g.slug FROM item_group ig
+             JOIN interest_group g ON g.id = ig.group_id
+            WHERE ig.item_id = ? ORDER BY g.position, g.id""", (item_id,))]
 
 
 def starred_ids(conn: sqlite3.Connection) -> set[int]:
