@@ -45,6 +45,9 @@ CODE_BAD_KEY = 40002
 CODE_NO_NAME = 40004
 CODE_NO_KEY = 40005
 
+# config.yaml 的 journal_rank.api_key_env 可以改成别的名字,这里只是默认值。
+DEFAULT_KEY_ENV = "EASYSCHOLAR_SECRET_KEY"
+
 
 class RankLookupError(RuntimeError):
     """easyScholar 本次查询失败,结果不能写成永久的负缓存。
@@ -55,12 +58,22 @@ class RankLookupError(RuntimeError):
     """
 
 
-def api_key() -> str | None:
-    return os.environ.get("EASYSCHOLAR_SECRET_KEY") or None
+def api_key(env_name: str = DEFAULT_KEY_ENV) -> str | None:
+    """读密钥;``env_name`` 由调用方从 ``journal_rank.api_key_env`` 传入。
+
+    以前这里写死 ``EASYSCHOLAR_SECRET_KEY``,于是 config.yaml 里那个
+    ``api_key_env`` 形同虚设 —— 改名的用户会看到检查命令说"已设置",
+    实际查询却拿不到密钥。
+
+    顺带去掉首尾空白:``.env`` 里 ``KEY=abc `` 这种尾随空格很常见,带着
+    它去请求只会拿到 40002,却很难看出是空格导致的。
+    """
+    raw = os.environ.get(env_name or DEFAULT_KEY_ENV)
+    return (raw or "").strip() or None
 
 
-def available() -> bool:
-    return bool(api_key())
+def available(env_name: str = DEFAULT_KEY_ENV) -> bool:
+    return bool(api_key(env_name))
 
 
 def _pick(data: dict) -> dict[str, str]:
@@ -82,14 +95,14 @@ def _pick(data: dict) -> dict[str, str]:
     return {k: str(v) for k, v in ranks.items() if v not in (None, "", [])}
 
 
-def fetch_rank(journal: str) -> dict[str, str] | None:
+def fetch_rank(journal: str, env_name: str = DEFAULT_KEY_ENV) -> dict[str, str] | None:
     """按刊名查等级。返回 {字段: 值};``None`` 表示成功但没有等级记录。
 
     网络、认证、HTTP 或响应协议失败抛出 :class:`RankLookupError`。期刊等级
     是可选数据,调用方应捕获这个异常并跳过本次缓存,而不是把临时故障记成
     ``hit=0``。
     """
-    key = api_key()
+    key = api_key(env_name)
     name = (journal or "").strip()
     # 这两种情况不会发请求。调用方在进入本函数前也会检查 available() 和
     # 非空刊名,保留 None 便于直接调用者处理本地无效输入。

@@ -170,6 +170,11 @@ DOI 写法不同的条目，保留关联元数据、评分、摘要和反馈；�
 展示字段与标签压缩规则（`化学1区` → `化1`）在
 `config.yaml` 的 `journal_rank` 段配置；刊名在入库时统一清洗（HTML 实体、换行符）。
 
+这一项**可选**：不配 `EASYSCHOLAR_SECRET_KEY`（见 `.env.example`）就整段跳过，一个请求
+都不发，卡片上只是没有影响因子/分区标签，其余流程照常，不会报错。所以 `litradar check`
+会把这一项单独列出来——缺密钥时给明确告警，而不是让你对着一个全绿的体检结果猜为什么
+卡片上没有分区。密钥变量名可用 `journal_rank.api_key_env` 改名。
+
 完整设计记录与实测数据见 [docs/litradar-design.md](docs/litradar-design.md)。
 
 ## 部署

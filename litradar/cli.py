@@ -10,7 +10,7 @@ from pathlib import Path
 from . import db, enrich, pipeline, rank, summarize
 from .config import load_config
 from .lock import AlreadyRunning, single_instance
-from .sources import mail, xmol_email
+from .sources import easyscholar, mail, xmol_email
 
 
 def _lock_path(cfg):
@@ -179,6 +179,25 @@ def cmd_mail_test(cfg, args):
 OK, BAD, WARN = "✅", "❌", "⚠️ "
 
 
+def _journal_rank_line(cfg) -> tuple[str, str, str]:
+    """期刊等级密钥的体检结论 ``(mark, label, detail)``。
+
+    这里刻意不把"没配密钥"算成 problem:期刊等级是可选增强,不配也能跑完
+    整条流水线。但必须显式说清后果 —— 以前这一项压根不检查,缺密钥时体检
+    全绿,而卡片上的影响因子/分区永远是空的,用户无从判断是接口挂了还是
+    自己没配。
+    """
+    env_name = cfg.journal_rank.api_key_env or easyscholar.DEFAULT_KEY_ENV
+    if not cfg.journal_rank.enabled:
+        return OK, "期刊等级已关闭", "journal_rank.enabled = false"
+    # 直接问客户端,而不是自己 os.environ.get:否则"只有空格"这种值会让
+    # check 报已设置、而 enrich 认为没有密钥,又是一次"体检说没问题"的误导。
+    if easyscholar.api_key(env_name):
+        return OK, f"{env_name} 已设置", "查询结果会缓存进 journal_rank 表"
+    return (WARN, f"{env_name} 未设置",
+            "影响因子/中科院分区不会显示;不配也能正常跑,只是缺这些标签")
+
+
 def cmd_check(cfg, args):
     """体检:配置 / 密钥 / 数据库 / 网络 / LLM 连通性。
 
@@ -230,13 +249,16 @@ def cmd_check(cfg, args):
         problems.append(f"{cfg.llm.api_key_env} 未设置")
 
     # 可选
-    import os as _os
     for name, why in [("S2_API_KEY", "Semantic Scholar 限流会宽松很多,建议申请"),
                       ("OPENALEX_API_KEY", "只有开了 sources.openalex_enabled 才需要")]:
-        if _os.environ.get(name):
+        if os.environ.get(name):
             line(OK, f"{name} 已设置")
         else:
             line(WARN, f"{name} 未设置", why)
+
+    # 期刊等级同样可选,但缺密钥时是"静默降级":卡片上永远不会有影响因子/
+    # 分区标签,而且富化统计全是 0,不主动说一句用户根本看不出哪里不对。
+    line(*_journal_rank_line(cfg))
 
     # 绑定地址与口令:没有账号体系,只看"是否暴露到局域网"
     if cfg.app.host in ("127.0.0.1", "localhost"):
@@ -331,7 +353,7 @@ def cmd_check(cfg, args):
             problems.append(f"{name} 不可达")
 
     print("\n【6b】Semantic Scholar 配额")
-    s2_key = _os.environ.get("S2_API_KEY")
+    s2_key = os.environ.get("S2_API_KEY")
     if not s2_key:
         line(WARN, "未配 S2_API_KEY",
              "走共享池,约 1 req/s 且容易 429。免费申请能显著改善")
