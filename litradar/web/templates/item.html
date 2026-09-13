@@ -24,6 +24,8 @@
       {% if it['impact_factor'] %}<span class="tag tag--if">IF {{ it['impact_factor'] }}</span>{% endif %}
       {{ source_tag(it) }}
       {% if it['depth'] %}<span class="tag">{{ '深度摘要' if it['depth'] == 'deep' else '一句话摘要' }}</span>{% endif %}
+      {# 它属于哪些订阅组 —— 分组之后,"这条从哪来"不再显而易见 #}
+      {% if it.get('groups') %}<span class="tag" title="这条文献所属的订阅组">订阅组 {{ it['groups']|join(' · ') }}</span>{% endif %}
       {% if it['is_oa'] %}<span class="tag tag--oa">开放获取</span>{% endif %}
       {% for t in it['rank_tags'] %}<span class="tag tag--rank" title="期刊等级(easyScholar)">{{ t }}</span>{% endfor %}
     </div>

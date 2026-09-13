@@ -31,6 +31,19 @@
     {% endfor %}
   </nav>
   <span class="topbar__spacer"></span>
+  {# 订阅组切换。只有一个组时不显示 —— 绝大多数人是单方向,不必给一个没有
+     选择的选择器。链接整段替换查询串:换组就是换一套视图,带着旧筛选条件
+     反而让人以为筛选还在生效。 #}
+  {% if groups and groups|length > 1 %}
+  <nav class="groupbar" aria-label="订阅组">
+    {% for gr in groups %}
+      <a href="?g={{ gr.slug }}"
+         class="groupbar__item{{ ' is-on' if group and gr.slug == group.slug else '' }}{{ ' is-off' if not gr.enabled }}"
+         {% if group and gr.slug == group.slug %}aria-current="true"{% endif %}
+         title="{{ gr.name }}{{ '(已停用)' if not gr.enabled }}">{{ gr.name }}</a>
+    {% endfor %}
+  </nav>
+  {% endif %}
   <button type="button" class="iconbtn theme-toggle" onclick="litradarToggleTheme()" title="切换浅色 / 深色" aria-label="切换浅色 / 深色">
     {{ icon('moon', 'icon-moon') }}{{ icon('sun', 'icon-sun') }}
   </button>

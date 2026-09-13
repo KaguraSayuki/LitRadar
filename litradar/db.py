@@ -1013,10 +1013,16 @@ def _group_joins() -> str:
 
 
 def _item_filters(*, kind: str | None, state: str | None,
-                  min_score: float | None, since: str | None) -> tuple[list[str], list]:
+                  min_score: float | None, since: str | None,
+                  group_id: int | None = None) -> tuple[list[str], list]:
     """get_items 与 count_items 共用同一套筛选条件,防止两处写法漂移
     (漂移会导致分页总数和实际列表对不上)。"""
     where, params = ["1=1"], []
+    if group_id is not None and group_id >= 0:
+        # 收件箱只放**本组的条目**。不按组成员过滤的话,一个组会看到全库
+        # (只是别的组的条目没有分数),分组就白做了。
+        where.append("i.id IN (SELECT item_id FROM item_group WHERE group_id = ?)")
+        params.append(group_id)
     if kind:
         where.append("i.kind = ?")
         params.append(kind)
@@ -1064,9 +1070,9 @@ def count_items(conn: sqlite3.Connection, *, kind: str | None = "paper",
                 state: str | None = None, min_score: float | None = None,
                 since: str | None = None, group_slug: str | None = None) -> int:
     """与 get_items 条件一致的计数,供分页算总页数。"""
-    where, params = _item_filters(kind=kind, state=state,
-                                  min_score=min_score, since=since)
     gid = _read_group_id(conn, group_slug)
+    where, params = _item_filters(kind=kind, state=state,
+                                  min_score=min_score, since=since, group_id=gid)
     sql = f"""
         SELECT COUNT(*) FROM item i
         {_group_joins()}
@@ -1088,9 +1094,9 @@ def get_items(
     order: str = "score",
     group_slug: str | None = None,
 ) -> list[sqlite3.Row]:
-    where, params = _item_filters(kind=kind, state=state,
-                                  min_score=min_score, since=since)
     gid = _read_group_id(conn, group_slug)
+    where, params = _item_filters(kind=kind, state=state,
+                                  min_score=min_score, since=since, group_id=gid)
 
     order_sql = {
         "score": "COALESCE(sc.final_score,-1) DESC, i.published_at DESC",
@@ -1135,6 +1141,7 @@ def search_items(conn: sqlite3.Connection, q: str, limit: int = 100,
         LEFT JOIN item_state       s  ON s.item_id  = i.id
         LEFT JOIN item_enrichment  e  ON e.item_id  = i.id
         WHERE item_fts MATCH ?
+          AND i.id IN (SELECT item_id FROM item_group WHERE group_id = ?)
         ORDER BY rank LIMIT ? OFFSET ?
     """
     # FTS5 语法:把裸词包装成前缀查询,避免用户输入特殊字符报错
@@ -1143,7 +1150,7 @@ def search_items(conn: sqlite3.Connection, q: str, limit: int = 100,
         return []
     try:
         return conn.execute(sql, (gid, gid, gid, " ".join(terms),
-                                  limit, offset)).fetchall()
+                                  gid, limit, offset)).fetchall()
     except sqlite3.OperationalError:
         return []
 
@@ -1522,31 +1529,55 @@ def recent_stage_runs(conn: sqlite3.Connection, stages: Iterable[str],
     ).fetchall()
     return [(r[0], r[1]) for r in rows]
 
+def stats(conn: sqlite3.Connection, *, group_slug: str | None = None) -> dict[str, Any]:
+    """统计。``group_slug`` 给了就把**条目口径**的读数限定在该组。
 
-def stats(conn: sqlite3.Connection) -> dict[str, Any]:
+    注意哪些按组、哪些是全局的:条目数 / 未读 / 收藏 / 忽略 / 期刊命中率属于
+    "这一组的库";而反馈动作与运行记录是**操作日志**,跨组看才有意义(花费账本
+    尤其如此)。模板里也是这么标注的。
+    """
+    gid = _read_group_id(conn, group_slug) if group_slug is not None else None
+    args: tuple = (gid,) if gid is not None else ()
+    scope = " AND i.id IN (SELECT item_id FROM item_group WHERE group_id = ?)" \
+        if gid is not None else ""
+    gscore = " AND sc.group_id = ?" if gid is not None else ""
+
     def one(sql: str, *a):
         r = conn.execute(sql, a).fetchone()
         return r[0] if r else 0
 
     return {
-        "items": one("SELECT COUNT(*) FROM item"),
-        "papers": one("SELECT COUNT(*) FROM item WHERE kind='paper'"),
+        "group": group_slug,
+        "items": one(f"SELECT COUNT(*) FROM item i WHERE 1=1{scope}", *args),
+        "papers": one(f"SELECT COUNT(*) FROM item i WHERE i.kind='paper'{scope}", *args),
         # "未读"必须和首页页签同一口径(排除 ignored / excluded、只数 paper),
         # 否则统计页和首页给出两个对不上的数字。
-        "new": count_items(conn, kind="paper", state="new"),
+        "new": count_items(conn, kind="paper", state="new", group_slug=group_slug),
+        # starred 是全局的(对"这篇文献"的判断);ignored 是按组的
         "starred": one("SELECT COUNT(*) FROM item_state WHERE starred=1"),
-        "ignored": one("SELECT COUNT(*) FROM item_state WHERE ignored=1"),
-        "summaries": one("SELECT COUNT(*) FROM summary"),
-        "scored": one("SELECT COUNT(*) FROM score"),
+        "ignored": one(
+            "SELECT COUNT(*) FROM group_state WHERE ignored=1"
+            + (" AND group_id=?" if gid is not None else ""), *args),
+        "summaries": one(
+            f"""SELECT COUNT(*) FROM summary su
+                 JOIN item i ON i.id = su.item_id WHERE 1=1{scope}""", *args),
+        "scored": one(
+            f"""SELECT COUNT(*) FROM score sc
+                 JOIN item i ON i.id = sc.item_id
+                WHERE 1=1{scope}{gscore}""", *args, *args),
         "by_source": [dict(r) for r in conn.execute(
-            "SELECT source, COUNT(*) n FROM item GROUP BY source ORDER BY n DESC")],
+            f"""SELECT i.source, COUNT(*) n FROM item i
+                 WHERE 1=1{scope} GROUP BY i.source ORDER BY n DESC""", args)],
         "by_journal": [dict(r) for r in conn.execute(
-            """SELECT journal, COUNT(*) n, ROUND(AVG(sc.final_score),1) avg_score
-               FROM item i LEFT JOIN score sc ON sc.item_id=i.id
-               WHERE journal IS NOT NULL GROUP BY journal ORDER BY n DESC LIMIT 15""")],
+            f"""SELECT i.journal, COUNT(*) n, ROUND(AVG(sc.final_score),1) avg_score
+                FROM item i
+                LEFT JOIN score sc ON sc.item_id = i.id{gscore}
+                WHERE i.journal IS NOT NULL{scope}
+                GROUP BY i.journal ORDER BY n DESC LIMIT 15""", (*args, *args))],
+        # 反馈与运行记录是操作日志:跨组看才有意义(花费账本尤其如此)
         "feedback": [dict(r) for r in conn.execute(
             "SELECT action, COUNT(*) n FROM feedback GROUP BY action ORDER BY n DESC")],
         "last_runs": [dict(r) for r in conn.execute(
-            """SELECT stage, status, finished_at, stats FROM run_log
+            """SELECT stage, status, finished_at, stats, group_slug FROM run_log
                ORDER BY id DESC LIMIT 8""")],
     }

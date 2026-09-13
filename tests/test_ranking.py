@@ -223,13 +223,18 @@ def test_全文检索(tmp_path):
     database = db.Database(tmp_path / "t.db")
     database.init()
     conn = database.connect()
-    db.upsert_item(conn, {"kind": "paper", "dedup_key": "doi:10.1/a", "doi": "10.1/a",
-                          "title": "Photochemical reaction of nanoparticle esters",
-                          "title_norm": "photochemical reaction", "abstract": "azides",
-                          "source": "a"})
-    db.upsert_item(conn, {"kind": "paper", "dedup_key": "doi:10.1/b", "doi": "10.1/b",
-                          "title": "Polymer chemistry", "title_norm": "polymer",
-                          "source": "a"})
+    gid = db.ensure_group(conn, db.DEFAULT_GROUP_SLUG, name=db.DEFAULT_GROUP_NAME)
+    for data in (
+            {"kind": "paper", "dedup_key": "doi:10.1/a", "doi": "10.1/a",
+             "title": "Photochemical reaction of nanoparticle esters",
+             "title_norm": "photochemical reaction", "abstract": "azides",
+             "source": "a"},
+            {"kind": "paper", "dedup_key": "doi:10.1/b", "doi": "10.1/b",
+             "title": "Polymer chemistry", "title_norm": "polymer",
+             "source": "a"}):
+        iid, _ = db.upsert_item(conn, data)
+        db.add_to_group(conn, gid, iid)      # 检索也只搜本组成员
+    conn.commit()
     assert len(db.search_items(conn, "nanoparticle")) == 1
     assert len(db.search_items(conn, "polymer")) == 1
     assert db.search_items(conn, "不存在的词xyz") == []

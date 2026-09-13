@@ -20,7 +20,7 @@ from ..config import Config, load_config
 from ..lock import AlreadyRunning, single_instance
 from ..normalize import days_ago
 from ..passwords import verify_password
-from ..rank import load_interests, validate_interests
+from ..rank import load_groups, load_interests, validate_interests
 
 HERE = Path(__file__).resolve().parent
 
@@ -310,6 +310,34 @@ def require_stage_limits(cfg: Config, stage: str) -> None:
 # 记住口令用的 cookie 名。这不是"登录会话",只是省得每次点链接都重带 ?k=。
 COOKIE_NAME = "litradar_k"
 
+# 记住"上次看的是哪个订阅组"。与口令 cookie 分开:它不是凭据,只是个视图偏好。
+GROUP_COOKIE = "litradar_g"
+
+
+def ui_groups(cfg: Config) -> list[Profile]:
+    """给界面用的组列表。配置坏了不该让页面 500 —— 退回空表。"""
+    try:
+        return load_groups(cfg)
+    except ValueError:
+        return []
+
+
+def active_group(request: Request, cfg: Config) -> Profile | None:
+    """当前查看的订阅组:``?g=slug`` > cookie > 第一个启用的组。
+
+    没有组(配置为空且默认组也建不出来)时返回 None,调用方按"不分组"处理。
+    """
+    groups = ui_groups(cfg)
+    if not groups:
+        return None
+    wanted = (request.query_params.get("g")
+              or request.cookies.get(GROUP_COOKIE) or "").strip()
+    for g in groups:
+        if g.slug == wanted:
+            return g
+    enabled = [g for g in groups if g.enabled]
+    return (enabled or groups)[0]
+
 
 @app.middleware("http")
 async def remember_token(request: Request, call_next):
@@ -324,14 +352,23 @@ async def remember_token(request: Request, call_next):
     if k and expected and hmac.compare_digest(k, expected):
         resp.set_cookie(COOKIE_NAME, k, httponly=True, samesite="lax",
                         max_age=60 * 60 * 24 * 180)
+    # 切组后把选择记下来:页面内的链接不带 ?g=,不记的话点进详情就跳回第一组
+    g = request.query_params.get("g")
+    if g:
+        resp.set_cookie(GROUP_COOKIE, g, httponly=True, samesite="lax",
+                        max_age=60 * 60 * 24 * 180)
     return resp
 
 
 def ctx(request: Request, **kw) -> dict:
     cfg = get_cfg()
+    group = active_group(request, cfg)
     base = {
         "request": request,
         "today": date.today().isoformat(),
+        "groups": ui_groups(cfg),
+        "group": group,
+        "group_slug": group.slug if group else None,
         # 让模板能判断"没评分"到底是没配 key,还是只是被规则过滤了
         "llm_ready": bool(cfg.llm.enabled and cfg.llm.api_key),
         "static_v": _static_version(),
@@ -448,10 +485,12 @@ def _page_params(**kw) -> str:
 def inbox(request: Request, state: str = "new", kind: str = "paper",
           min_score: float = 0.0, page: int = 1):
     require_token(request)
+    g = active_group(request, get_cfg())
     conn = _conn()
     try:
+        gslug = g.slug if g else None
         filt = dict(kind=kind, state=None if state == "all" else state,
-                    min_score=min_score or None)
+                    min_score=min_score or None, group_slug=gslug)
         total_filtered = db.count_items(conn, **filt)
         pages = max(1, -(-total_filtered // PER_PAGE))     # 向上取整
         page = min(max(1, page), pages)                     # 越界就夹到有效范围
@@ -462,10 +501,13 @@ def inbox(request: Request, state: str = "new", kind: str = "paper",
         # 收藏/不感兴趣是独立清单,分母就是它们自己;
         # 未读/已读/全部共享同一个分母 —— 仍在考虑范围内的那批。
         scope = state if state in ("starred", "ignored") else None
-        total_lib = db.count_items(conn, kind=kind, state=scope)
+        total_lib = db.count_items(conn, kind=kind, state=scope, group_slug=gslug)
         # 收藏夹有多少条 —— 放在标签上,不然用户不知道值不值得点进去
-        starred_total = db.count_items(conn, kind=kind, state="starred")
-        ignored_total = db.count_items(conn, kind=kind, state="ignored")
+        # (收藏是全局的,所以这里不按组;忽略是按组的)
+        starred_total = db.count_items(conn, kind=kind, state="starred",
+                                       group_slug=gslug)
+        ignored_total = db.count_items(conn, kind=kind, state="ignored",
+                                       group_slug=gslug)
     finally:
         conn.close()
     return templates.TemplateResponse(request, "inbox.html", ctx(
@@ -481,9 +523,11 @@ def inbox(request: Request, state: str = "new", kind: str = "paper",
 @app.get("/week", response_class=HTMLResponse)
 def week(request: Request):
     require_token(request)
+    g = active_group(request, get_cfg())
     conn = _conn()
     try:
         rows = _decorate(db.get_items(conn, kind="paper", since=days_ago(7),
+                                      group_slug=(g.slug if g else None),
                                       limit=200), conn)
         heads, rest = list(rows[:3]), list(rows[3:])
     finally:
@@ -495,17 +539,20 @@ def week(request: Request):
 @app.get("/search", response_class=HTMLResponse)
 def search(request: Request, q: str = "", page: int = 1):
     require_token(request)
+    g = active_group(request, get_cfg())
     rows, pages, per = [], 1, PER_PAGE + 25      # 检索结果页稍多放一点
     conn = _conn()
     try:
         if q.strip():
             # FTS5 没有便宜的 COUNT,用"多取一条"判断还有没有下一页
-            probe = db.search_items(conn, q, limit=per * page + 1)
+            probe = db.search_items(conn, q, limit=per * page + 1,
+                                    group_slug=(g.slug if g else None))
             total_hits = len(probe)
             pages = max(1, -(-total_hits // per))
             page = min(max(1, page), pages)
             start = (page - 1) * per
-            rows = _decorate(db.search_items(conn, q, limit=per, offset=start), conn)
+            rows = _decorate(db.search_items(conn, q, limit=per, offset=start,
+                                             group_slug=(g.slug if g else None)), conn)
     finally:
         conn.close()
     return templates.TemplateResponse(request, "search.html", ctx(
@@ -516,6 +563,7 @@ def search(request: Request, q: str = "", page: int = 1):
 @app.get("/item/{item_id}", response_class=HTMLResponse)
 def item_detail(request: Request, item_id: int):
     require_token(request)
+    g = active_group(request, get_cfg())
     conn = _conn()
     try:
         row = conn.execute(
@@ -535,6 +583,8 @@ def item_detail(request: Request, item_id: int):
         ).fetchone()
         # 在连接还开着的时候挂标签 —— _decorate 要读期刊缓存表
         it = _decorate([row], conn)[0] if row else None
+        if it is not None:
+            it["groups"] = db.item_group_ids(conn, item_id)
     finally:
         conn.close()
     if it is None:
@@ -546,9 +596,10 @@ def item_detail(request: Request, item_id: int):
 @app.get("/stats", response_class=HTMLResponse)
 def stats_page(request: Request):
     require_token(request)
+    g = active_group(request, get_cfg())
     conn = _conn()
     try:
-        s = db.stats(conn)
+        s = db.stats(conn, group_slug=(g.slug if g else None))
     finally:
         conn.close()
     return templates.TemplateResponse(request, "stats.html", ctx(request, s=s, page="stats"))

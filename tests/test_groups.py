@@ -23,16 +23,23 @@ def conn(tmp_path):
     conn.close()
 
 
-def _item(conn, key="10.1/x", title="Catalysis"):
+def _item(conn, key="10.1/x", title="Catalysis", *, groups=None):
+    """插一条并记进指定组(默认进默认组)。
+
+    收件箱与排序都只看**本组成员**,不记成员关系的条目在读取侧等于不存在。
+    """
     iid, _ = db.upsert_item(conn, {**ITEM, "dedup_key": f"doi:{key}",
                                    "doi": key, "title": title,
                                    "title_norm": title.lower()})
+    slugs = ["default"] if groups is None else groups
+    for slug in slugs:
+        db.add_to_group(conn, db.ensure_group(conn, slug), iid)
     return iid
 
 
 # --------------------------------------------------------------- 分值按组
 def test_同一篇在两个组里分值互不影响(conn):
-    iid = _item(conn)
+    iid = _item(conn, groups=["a", "b"])
     a = db.ensure_group(conn, "a", name="A")
     b = db.ensure_group(conn, "b", name="B")
     db.save_score(conn, iid, group_id=a, final_score=10.0)
@@ -48,7 +55,7 @@ def test_同一篇在两个组里分值互不影响(conn):
 
 
 def test_组内排序与条数按组(conn):
-    iid1, iid2 = _item(conn, "10.1/a", "Alpha"), _item(conn, "10.1/b", "Beta")
+    iid1, iid2 = _item(conn, "10.1/a", "Alpha", groups=["a"]), _item(conn, "10.1/b", "Beta", groups=["a"])
     a = db.ensure_group(conn, "a")
     db.save_score(conn, iid1, group_id=a, final_score=1.0)
     db.save_score(conn, iid2, group_id=a, final_score=99.0)
@@ -75,7 +82,7 @@ def test_未知组不会报错只是查不到分(conn):
 
 # ------------------------------------------------- 忽略按组、收藏全局
 def test_忽略按组隔离(conn):
-    iid = _item(conn)
+    iid = _item(conn, groups=["a", "b"])
     db.ensure_group(conn, "a")
     db.ensure_group(conn, "b")
     db.set_action(conn, iid, "ignore", group_slug="a")
@@ -88,7 +95,7 @@ def test_忽略按组隔离(conn):
 
 
 def test_取消忽略只影响本组(conn):
-    iid = _item(conn)
+    iid = _item(conn, groups=["a", "b"])
     db.ensure_group(conn, "a")
     db.ensure_group(conn, "b")
     db.set_action(conn, iid, "ignore", group_slug="a")
@@ -101,7 +108,7 @@ def test_取消忽略只影响本组(conn):
 
 
 def test_收藏是全局的(conn):
-    iid = _item(conn)
+    iid = _item(conn, groups=["a", "b"])
     db.ensure_group(conn, "a")
     db.ensure_group(conn, "b")
     db.set_action(conn, iid, "star", group_slug="a")
@@ -113,7 +120,7 @@ def test_收藏是全局的(conn):
 
 
 def test_规则排除按组(conn):
-    iid = _item(conn)
+    iid = _item(conn, groups=["a", "b"])
     db.ensure_group(conn, "a")
     db.ensure_group(conn, "b")
     db.set_excluded(conn, [iid], True, group_slug="a")
