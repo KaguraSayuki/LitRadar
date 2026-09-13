@@ -9,7 +9,7 @@ import sqlite3
 from . import db
 from .config import Config
 from .llm import DeepSeek, LLMError
-from .rank import Profile, load_interests
+from .rank import Profile, load_enabled_groups, load_groups, load_interests
 
 SUMMARY_SYSTEM = "你是严谨的化学文献助手,只输出 JSON,绝不编造数据。"
 
@@ -63,6 +63,52 @@ title_zh 是**翻译**,不要重写或添加原文没有的内容。
 
 只输出 JSON:
 {{"items":[{{"id":1,"title_zh":"中文标题","one_liner":"一句话结论,不超过40字"}}]}}"""
+
+RELEVANCE_SYSTEM = "你是化学文献助手,只输出 JSON,不编造。"
+
+# 只有"对研究的用处"与方向有关,所以已经算过中性摘要的条目,换一个组时
+# 只需要补这一行 —— 不必把问题/方法/结果/局限整套重算一遍。
+RELEVANCE_PROMPT = """判断这篇化学文献对用户的研究方向有什么用。
+
+【题录】
+标题(英文):{title}
+摘要原文:{abstract}
+
+【用户研究方向】
+{direction}
+
+要求:
+1. 只输出 JSON,一个字段:{{"relevance":"1-2 句"}}
+2. 说明这篇工作对这个方向有什么用;关系不大就直说,不要硬找关系
+3. 不要编造摘要原文里没有的数据
+4. 用中文,专业术语保留英文原词"""
+
+
+def summarize_relevance(rows: list[sqlite3.Row], prof: Profile,
+                        llm: DeepSeek) -> dict[int, str]:
+    """只补"对研究的用处"这一行。返回 {item_id: relevance}。
+
+    整条摘要的中性部分已经算过了,换组重算整套会白花 LLM 的钱。
+    """
+    out: dict[int, str] = {}
+    for row in rows:
+        prompt = RELEVANCE_PROMPT.format(
+            title=row["title"],
+            abstract=(row["abstract"] or "")[:2000] or "(无摘要,只有标题)",
+            direction=prof.direction[:300],
+        )
+        try:
+            data = llm.json(RELEVANCE_SYSTEM, prompt, max_tokens=300)
+        except LLMError as e:
+            if len(rows) == 1:
+                raise
+            print(f"  [warn] relevance 失败 #{row['id']}: {e}")
+            continue
+        text = str(data.get("relevance") or "").strip()
+        if text:
+            out[int(row["id"])] = text
+    return out
+
 
 _NUM_RE = re.compile(r"\d+(?:\.\d+)?")
 _FIELDS = ("one_liner", "problem", "method", "key_results", "limitation", "relevance")
@@ -145,26 +191,19 @@ def summarize_brief(rows: list[sqlite3.Row], llm: DeepSeek) -> dict[int, dict]:
     return out
 
 
-def run(cfg: Config, *, limit: int = 200, days: int = 30, verbose: bool = True,
-        force: bool = False, group: Profile | None = None) -> dict:
-    """生成中文摘要。默认覆盖窗口内**全部**条目,而不仅是前几名。
+def _summarize_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
+                     group_id: int, llm: DeepSeek, *, limit: int, days: int,
+                     verbose: bool, force: bool) -> dict:
+    """**一个组**的摘要。
 
-    ``group`` 决定摘要按**哪个方向**来写(方向的描述会进 prompt,"对研究的
-    用处"这一行因此是方向相关的)。不给就用第一个启用的组。
-
-    注意:摘要里只有 ``relevance`` 与方向有关,其余字段(问题 / 方法 / 关键结果 /
-    局限)是通用的 —— 整条摘要按组重算会把 LLM 成本乘上组数,所以中性的部分
-    仍然一份共享(按组的 relevance 落在 summary_group,见 db 的注释)。
+    两条路,分开算账:
+      A. 中性摘要缺失或原文变了 → 整条重做(用本组的方向写 relevance);
+      B. 中性摘要还新鲜、但本组还没有 relevance → **只补那一行**。
+    只有深度摘要有 relevance(简要摘要本来就只有标题+一句话),所以 B 只挑
+    depth='deep' 的条目 —— 否则简要摘要的条目会被每轮重复挑出来。
     """
-    prof = group or load_interests(cfg)
-    llm = DeepSeek(cfg.llm)
-    stat: dict = {"deep": 0, "brief": 0, "brief_failed": 0, "skipped": 0}
-    if not llm.available:
-        return {"skipped": "未配置 API key 或 LLM 已禁用"}
-
-    database = db.Database(cfg.db_file)
-    conn = database.connect()
-    conn.create_function("litradar_abstract_hash", 1, _abstract_hash, deterministic=True)
+    stat: dict = {"group": prof.slug, "deep": 0, "brief": 0, "brief_failed": 0,
+                  "skipped": 0, "relevance": 0}
     started = db.now()
     try:
         # 新摘要按原文指纹判断过期:包括无原文→有原文,也包括同一秒内补齐。
@@ -180,19 +219,21 @@ def run(cfg: Config, *, limit: int = 200, days: int = 30, verbose: bool = True,
                          AND su.method = '摘要未提及' AND su.key_results = '摘要未提及'
                          AND su.limitation = '摘要未提及')))
         )"""
+        w = (f"-{days} days", f"-{days} days")
+
+        # ---- A. 要整条重做的 ----
         where = "1=1" if force else f"(su.item_id IS NULL OR {stale})"
         rows = list(conn.execute(
             f"""SELECT i.*, COALESCE(sc.final_score,-1) AS fs, su.depth AS depth
                 FROM item i
+                JOIN item_group ig ON ig.item_id = i.id AND ig.group_id = ?
                 LEFT JOIN summary          su ON su.item_id = i.id
                 LEFT JOIN score            sc ON sc.item_id = i.id
                 LEFT JOIN item_enrichment  e  ON e.item_id  = i.id
-                WHERE {where} AND i.kind='paper'
-                  AND {db.in_window('i')}
+                WHERE {where} AND i.kind='paper' AND {db.in_window('i')}
                 ORDER BY fs DESC, i.published_at DESC
                 LIMIT ?""",
-            # in_window 占两个 ?(没有 published_at 时回退比 created_at)
-            (f"-{days} days", f"-{days} days", limit),
+            (group_id, *w, limit),
         ).fetchall())
         stat["pending"] = len(rows)
 
@@ -205,16 +246,15 @@ def run(cfg: Config, *, limit: int = 200, days: int = 30, verbose: bool = True,
             f"""SELECT i.*, COALESCE(sc.final_score,-1) AS fs, su.depth AS depth,
                        {stale} AS summary_stale
                 FROM item i
+                JOIN item_group ig ON ig.item_id = i.id AND ig.group_id = ?
                 LEFT JOIN score   sc ON sc.item_id = i.id
                 LEFT JOIN summary su ON su.item_id = i.id
                 LEFT JOIN item_enrichment e ON e.item_id = i.id
                 WHERE i.kind='paper' AND {db.in_window('i')}
                 ORDER BY fs DESC, i.published_at DESC
                 LIMIT ?""",
-            (f"-{days} days", f"-{days} days", deep_n),
+            (group_id, *w, deep_n),
         ).fetchall()) if deep_n > 0 else []
-        # 前 N 名补深度摘要或刷新旧结果。此前已有 deep 的条目即使掉出前 N,
-        # 原文更新后也按 deep 重做,不能用 brief 覆盖掉已有方法/结果等字段。
         heads = [r for r in top_rows
                  if force or r["depth"] != "deep" or r["summary_stale"]]
         head_ids = {int(r["id"]) for r in heads}
@@ -222,29 +262,32 @@ def run(cfg: Config, *, limit: int = 200, days: int = 30, verbose: bool = True,
             if r["depth"] == "deep" and int(r["id"]) not in head_ids:
                 heads.append(r)
                 head_ids.add(int(r["id"]))
-        # 其余 pending 走 brief,但要去掉已经进 heads 的,别同一轮做两遍
         rest = [r for r in rows if int(r["id"]) not in head_ids]
 
-        # 前 N 名:逐篇深度摘要
         for r in heads:
             if verbose:
-                print(f"  深度摘要 #{r['id']}: {r['title'][:56]}…")
+                print(f"  [{prof.name}] 深度摘要 #{r['id']}: {r['title'][:48]}…")
             try:
                 data = summarize_one(r, prof, llm)
-                db.save_summary(conn, int(r["id"]), data, "deep", cfg.llm.model,
+                iid = int(r["id"])
+                db.save_summary(conn, iid, data, "deep", cfg.llm.model,
                                 abstract_hash=_abstract_hash(r["abstract"]))
+                # 原文可能变了:别的组那一行是基于旧原文写的,一起作废,
+                # 它们下一轮会走 B 路只补 relevance。
+                db.clear_group_relevance(conn, iid, keep_group_id=group_id)
+                db.save_group_relevance(conn, group_id, iid,
+                                        data.get("relevance"), cfg.llm.model)
                 conn.commit()
                 stat["deep"] += 1
             except LLMError as e:
                 print(f"  [warn] 摘要失败: {e}")
                 stat["skipped"] += 1
 
-        # 其余:批量,只出中文标题 + 一句话
         bs = 10
         for s in range(0, len(rest), bs):
             chunk = rest[s:s + bs]
             if verbose:
-                print(f"  批量摘要 {s + 1}-{s + len(chunk)} / {len(rest)}…")
+                print(f"  [{prof.name}] 批量摘要 {s + 1}-{s + len(chunk)} / {len(rest)}…")
             brief = summarize_brief(chunk, llm)
             if not brief:
                 stat["brief_failed"] += len(chunk)
@@ -257,12 +300,90 @@ def run(cfg: Config, *, limit: int = 200, days: int = 30, verbose: bool = True,
                     stat["brief"] += 1
             conn.commit()
 
-        db.log_run(conn, "summarize", "ok", stat, started_at=started)
+        # ---- B. 只补"对研究的用处" ----
+        need_rel = list(conn.execute(
+            f"""SELECT i.*
+                FROM item i
+                JOIN item_group ig ON ig.item_id = i.id AND ig.group_id = ?
+                JOIN summary      su ON su.item_id = i.id
+                LEFT JOIN summary_group sg ON sg.item_id = i.id AND sg.group_id = ?
+                LEFT JOIN item_enrichment e ON e.item_id = i.id
+                WHERE i.kind='paper' AND su.depth='deep'
+                  AND NOT {stale}
+                  AND sg.item_id IS NULL
+                  AND {db.in_window('i')}
+                ORDER BY i.published_at DESC
+                LIMIT ?""",
+            (group_id, group_id, *w, limit),
+        ).fetchall())
+        if need_rel:
+            if verbose:
+                print(f"  [{prof.name}] 补 relevance {len(need_rel)} 篇…")
+            # 单独兜异常:上面的 deep/brief 已经提交,不能因为补 relevance 失败
+            # 就把整组记成失败、把已经做成的统计一起丢掉。下一轮会再挑出来。
+            try:
+                got = summarize_relevance(need_rel, prof, llm)
+            except Exception as e:  # noqa: BLE001
+                stat["relevance_failed"] = len(need_rel)
+                if verbose:
+                    print(f"  [warn] 补 relevance 失败({len(need_rel)} 篇): "
+                          f"{type(e).__name__}: {e}")
+                got = {}
+            for iid, text in got.items():
+                db.save_group_relevance(conn, group_id, iid, text, cfg.llm.model)
+                stat["relevance"] += 1
+            conn.commit()
+
+        db.log_run(conn, "summarize", "ok", stat, started_at=started,
+                   group_slug=prof.slug)
         conn.commit()
     except Exception as e:  # noqa: BLE001
-        db.log_run(conn, "summarize", "failed", stat, error=str(e), started_at=started)
+        db.log_run(conn, "summarize", "failed", stat, error=str(e),
+                   started_at=started, group_slug=prof.slug)
         conn.commit()
         raise
+    return stat
+
+
+def run(cfg: Config, *, limit: int = 200, days: int = 30, verbose: bool = True,
+        force: bool = False, group: Profile | None = None) -> dict:
+    """按订阅组生成中文摘要。``group`` 指定时只跑那一个组。
+
+    摘要里只有 **relevance**(对研究的用处)与方向有关,其余字段通用,所以中性
+    部分一份共享(存在 summary),按组的那一行存在 summary_group —— 整条摘要
+    按组重算会把 LLM 成本乘上组数。
+
+    **一个组失败不影响其它组**:某个方向画像写坏了,不该让别的方向没摘要。
+    """
+    groups = [group] if group is not None else load_enabled_groups(cfg)
+    llm = DeepSeek(cfg.llm)
+    if not llm.available:
+        return {"skipped": "未配置 API key 或 LLM 已禁用"}
+
+    conn = db.Database(cfg.db_file).connect()
+    conn.create_function("litradar_abstract_hash", 1, _abstract_hash, deterministic=True)
+    try:
+        ids = db.sync_groups(conn, load_groups(cfg))
+        conn.commit()
+        total: dict = {"groups": {}, "deep": 0, "brief": 0, "brief_failed": 0,
+                       "skipped": 0, "relevance": 0, "errors": 0}
+        for prof in groups:
+            gid = ids.get(prof.slug)
+            if gid is None:
+                continue
+            try:
+                stat = _summarize_group(conn, cfg, prof, gid, llm, limit=limit,
+                                        days=days, verbose=verbose, force=force)
+            except Exception as e:  # noqa: BLE001
+                total["errors"] += 1
+                total["groups"][prof.slug] = {"error": f"{type(e).__name__}: {e}"}
+                if verbose:
+                    print(f"  [warn] 订阅组「{prof.name}」摘要失败: "
+                          f"{type(e).__name__}: {e}")
+                continue
+            total["groups"][prof.slug] = stat
+            for key in ("deep", "brief", "brief_failed", "skipped", "relevance"):
+                total[key] += int(stat.get(key, 0) or 0)
+        return total
     finally:
         conn.close()
-    return stat
