@@ -31,6 +31,7 @@
 | 13 | `docs/COMPLIANCE.md` 记录合规边界 | **未创建** | 边界写在 README「安全与合规」一节 |
 | 14 | `app.host: "0.0.0.0"` + `port: 8080`;`.env` 含 `EPO_KEY` / `EPO_SECRET` | 默认只绑 `127.0.0.1:8090`(代码默认值也已对齐);EPO 未接入 | 绑非回环地址会绕过 nginx 的 TLS 与口令保护,**勿照抄**;实际密钥清单见 `.env.example` |
 | 15 | 原稿只设想了一层口令 | 花钱接口(`/admin/run/*` 里的 rank / summarize / all)后来又加了三道约束 | ① 绑非回环地址又没设口令 → 直接 403(fail closed);② 管理员密码(步进验证,PBKDF2 哈希存 `.env`);③ 冷却 + 每日上限(默认每阶段 3 次,账本用 `run_log`,CLI 与定时任务同样计入)。配置见 `config.yaml` 的 `admin` 段 |
+| 16 | 原稿假定**一个人只有一个方向**(单份 `profiles/default.yaml`) | 实际要同时跟几个方向 | 引入**订阅组**:`interests.yaml` 的 `groups:` 每组各有一套检索词/关键词/期刊/种子;分值、规则排除、忽略、摘要的 relevance 都按组存,条目池共享。规则与 BM25 每组各算,LLM 精排可按组关掉。不写 `groups:` 的老配置等同单组(见 README「多订阅组」) |
 
 保留不变的核心设计:三阶段排序漏斗(规则 → BM25 → LLM)、SQLite 数据模型、
 期刊缩写归一匹配、数字核验防幻觉、systemd 调度、单用户 LAN 部署。

@@ -9,6 +9,7 @@
 ## 功能特性
 
 - **多源采集**：X-MOL 订阅邮件解析、Semantic Scholar 布尔检索、引用滚雪球、Crossref 检索（可选），所有来源按 DOI 去重合并
+- **多订阅组**：一个人可以同时跟几个方向，每组各有一套检索词、关键词、期刊白名单与排序，LLM 精排可按组开关；条目池共享（同一篇只存一份），收件箱按方向分开看
 - **元数据富化**：Crossref 权威元数据、Semantic Scholar 摘要与引用数、easyScholar 期刊等级（影响因子 / 中科院分区 / 北核等）
 - **三阶段排序**：规则过滤 → BM25 粗排 → DeepSeek listwise 精排，每篇输出分数与"为什么推荐"的中文理由
 - **中文结构化摘要**：问题 / 方法 / 关键结果 / 局限 / 对研究的用处；关键数字与英文原文逐字核验，推断内容显式标注
@@ -124,7 +125,7 @@ Copy-Item .env.example           .env
 |---|---|
 | `.env` | 密钥：DeepSeek / Semantic Scholar / easyScholar / IMAP / 接口口令 |
 | `config.yaml` | 运行参数：端口、时间窗、数据源开关、排序权重、期刊等级展示规则 |
-| `interests.yaml` | 研究画像：检索式、关键词、期刊白名单、关注作者、滚雪球种子 |
+| `interests.yaml` | 研究画像：检索式、关键词、期刊白名单、关注作者、滚雪球种子；多方向时用 `groups:` |
 
 各字段在示例文件中均有详细注释，以下仅列关键约定：
 
@@ -139,6 +140,45 @@ Copy-Item .env.example           .env
   权重须为非负有限数值且总和大于 0；两种写法冲突时会在加载配置时报告错误
 - 检索词与偏好可在 Web 界面 `/interests` 直接编辑，保存前校验 YAML 字段及列表元素类型并
   自动备份原文件。旧文件存在字段类型错误时仍可打开编辑页修复
+
+### 多订阅组
+
+一个人不必只有一个方向。`interests.yaml` 支持 `groups:`，每组各有一套检索词、关键词、
+期刊白名单与滚雪球种子；**规则过滤与 BM25 每组各算**（本地计算，不花钱），
+**LLM 精排按组开关**（`llm_rank`，唯一按组花钱的一步）。
+
+```yaml
+groups:
+  - slug: organic          # 稳定标识:改名不要改它,否则等于换了一个组
+    name: 有机合成方法学
+    direction: >
+      这一组的研究方向描述(会进精排与摘要的 prompt)。
+    search_queries: ['"N-H insertion" diazo aniline']
+    keywords: {core: [metal carbene]}
+    journals: {core: [Organic Letters]}
+    llm_rank: true         # 本组是否跑 LLM 精排
+  - slug: materials
+    name: 材料化学
+    llm_rank: false        # 这一组只按规则 + BM25 排,不花钱
+  - slug: old
+    name: 暂停的方向
+    enabled: false         # 临时停掉,不采集也不排序(历史分值保留)
+```
+
+要点：
+
+- **不写 `groups:` 就是单方向**（整份文件即一组），老配置**无需改动**即可继续用；
+  它对应的组 slug 固定为 `default`，与升级前入库的历史数据一致
+- **条目池共享、收件箱分开**：一篇文献被两组都命中时只存一行，但两组各自给它打分，
+  收件箱只显示本组捞到的条目
+- **摘要只算一次**：问题 / 方法 / 关键结果 / 局限与方向无关，一份共享；
+  只有"对研究的用处"（relevance）按组各写一行 —— 加一个方向不会把摘要成本翻倍
+- **X-MOL 是全局来源**：推什么由 X-MOL 网站上的订阅决定，本项目没法按方向驱动它，
+  所以它的条目进所有**启用**的组，再由各组规则判断相关性
+- **花费护栏按组计数**：`admin.cooldown_seconds` / `admin.daily_limit` 是"每组每天"，
+  一次运行只算当前组（见「安全与合规」）
+- 网页顶部有组切换器（只有一个组时不显示）；`?g=<slug>` 也能直接切，选择记在 cookie 里
+- 命令行加 `--group <slug>` 可只跑一组：`litradar rank --group organic`
 
 ## 邮件接入
 
@@ -169,6 +209,7 @@ litradar enrich         # 富化：补摘要、引用数、期刊等级
 litradar rank           # 三阶段排序
 litradar summarize      # 生成中文摘要（默认补缺失及原文已变化的摘要，--force 全量重做）
 litradar run            # 完整流水线（以上全部）
+                        # ingest / rank / summarize / run 都支持 --group <slug> 只跑一组
 litradar stats          # 数据统计
 litradar mail-test      # IMAP 连通性测试（只读）
 litradar admin-password # 设置/清除花钱阶段的管理员密码（只存哈希）
@@ -344,6 +385,8 @@ Caddy/nginx），不要直接把服务绑到 `0.0.0.0`。
   3. **频率护栏**：`admin.cooldown_seconds` 冷却 + `admin.daily_limit` 每日上限
      （默认每阶段 3 次）。账本用 `run_log`，所以命令行与定时任务跑的同样计入 ——
      上限约束的是"这一天这个阶段一共跑了几次"，不是"网页上点了几次"。
+     配了多个订阅组时**按组各算**：一次运行只算当前组，在 A 组点满不会吃掉 B 组的额度；
+     邮件采集与富化不按方向跑，它们的记录计入每个组。
   第 2 层是**步进验证（sudo 模式），不是 2FA**：两个凭据都是"你知道的东西"。
   三层都可关（不设密码 / 把限制设为 0），`litradar check` 会如实报出当前状态
 - 不建议将服务暴露于公网：订阅邮件内容面向订阅者本人，公网暴露构成对非授权用户的再分发
