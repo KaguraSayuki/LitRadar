@@ -17,13 +17,13 @@ const vm = require('node:vm');
       querySelectorAll: selector => selector === '[data-settings-form]' ? [form] : [],
       addEventListener() {}},
     location: {href:'http://test/settings/groups',assign: url => {context.destination=url;}},
-    prompt: () => 'test-password', confirm: () => true, alert: value => {throw Error(value);},
+    confirm: () => true, alert: value => {throw Error(value);},
     fetch: async (url, options) => {
       requests.push({url,body:Object.fromEntries(options.body),headers:options.headers});
-      return requests.length === 1 ? {status:401,headers:{get:()=> '1'}} :
-        {status:200,redirected:true,url:'http://test/settings/groups?saved=1'};
+      return {status:200,redirected:true,url:'http://test/settings/groups?saved=1'};
     },
   };
+  context.window = {litradarAuth: {fetch: (...args) => context.fetch(...args)}};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../../litradar/web/static/settings.js'),'utf8'),context);
   await submit({preventDefault(){},submitter:{name:'action',value:'copy',dataset:{}}});
   const result = {requests,destination:context.destination,busy:form.dataset.busy || ''};

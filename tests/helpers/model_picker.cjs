@@ -32,6 +32,7 @@ const vm = require('node:vm');
       return new Promise(resolve => {respond = models => resolve({ok:true, status:200,
         json:async () => ({models, message:'请选择模型'})});});},
   };
+  context.window = {litradarAuth: {fetch: (...args) => context.fetch(...args)}};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../../litradar/web/static/settings.js'), 'utf8'), context);
   const first = button.handlers.click({currentTarget:button});
   assert.equal(button.disabled, true);

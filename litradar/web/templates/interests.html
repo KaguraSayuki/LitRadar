@@ -3,6 +3,8 @@
 {% block title %}检索词 · LitRadar{% endblock %}
 
 {% block body %}
+{% include 'partials/authorization.html' %}
+<div data-auth-protected>
 <div class="page-head">
   <div>
     <h1>检索词与偏好</h1>
@@ -43,7 +45,7 @@
   <p>检索词必须是英文,中文拿去查 Crossref 会一无所获。多条查询取并集,实测召回多 86%,精确率交给 AI 精排。</p>
 </div>
 
-<form method="post" action="{{ group_url('/interests') }}" class="editor">
+<form data-settings-form method="post" action="{{ group_url('/interests') }}" class="editor">
   <input type="hidden" name="version" value="{{ version }}">
   <label class="sr-only" for="raw">interests.yaml</label>
   <textarea class="textarea" id="raw" name="raw" spellcheck="false" autocapitalize="off" autocorrect="off">{{ raw }}</textarea>
@@ -52,4 +54,6 @@
     <span class="hint">保存前会检查 YAML 语法、字段类型与必要字段,写坏了不会覆盖原文件;每次保存都会在同目录留一份带时间戳的备份(保留最近 5 份)。</span>
   </div>
 </form>
+</div>
+<script src="/static/settings.js?v={{ static_v }}" defer></script>
 {% endblock %}

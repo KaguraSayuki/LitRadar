@@ -19,6 +19,8 @@ router = APIRouter()
 SESSION_COOKIE = "litradar_session"
 SETUP_COOKIE = "litradar_setup"
 SESSION_SECONDS = 12 * 3600
+ADMIN_COOKIE = "litradar_admin"
+ADMIN_SECONDS = 5 * 60
 
 
 class PrivateAccessLog(logging.Filter):
@@ -62,10 +64,101 @@ def logged_in(request: Request, cfg) -> bool:
         return False
 
 
-def set_session(response, request, cfg):
+def set_session(response, request, cfg, *, admin_until=None):
     response.set_cookie(SESSION_COOKIE, session_value(cfg), httponly=True,
                         secure=request.url.scheme == "https", samesite="strict",
                         max_age=SESSION_SECONDS)
+    set_admin_session(response, request, cfg, expires=admin_until)
+
+
+def admin_value(cfg, *, expires=None) -> str:
+    expiry = str(expires if expires is not None else int(time.time()) + ADMIN_SECONDS)
+    body = expiry + "." + secrets.token_hex(16)
+    signature = hmac.new((cfg.app.admin_password_hash or "").encode(),
+                         ("litradar-admin:" + body).encode(), hashlib.sha256).hexdigest()
+    return body + "." + signature
+
+
+def admin_expires(request: Request, cfg) -> int:
+    if not cfg.app.admin_password_hash:
+        return 0
+    try:
+        expiry, nonce, signature = request.cookies.get(ADMIN_COOKIE, "").split(".")
+        timestamp = int(expiry)
+        if not time.time() < timestamp <= time.time() + ADMIN_SECONDS + 1:
+            return 0
+        expected = hmac.new(cfg.app.admin_password_hash.encode(),
+            ("litradar-admin:" + expiry + "." + nonce).encode(), hashlib.sha256).hexdigest()
+        return timestamp if hmac.compare_digest(signature, expected) else 0
+    except (ValueError, TypeError):
+        return 0
+
+
+def set_admin_session(response, request, cfg, *, expires=None):
+    response.set_cookie(ADMIN_COOKIE, admin_value(cfg, expires=expires), httponly=True,
+                        secure=request.url.scheme == "https", samesite="strict", max_age=ADMIN_SECONDS)
+
+
+def check_password(cfg, password: str) -> str:
+    """Share the persisted attempt limit between login and short operation grants."""
+    def attempt(data):
+        state = data.setdefault("login_attempts", {"start": time.time(), "failures": 0})
+        if time.time() - state["start"] >= 300:
+            state.update(start=time.time(), failures=0)
+        if state["failures"] >= 10:
+            return "尝试次数过多，请五分钟后重试。"
+        if len(password) > 512 or not verify_password(password, cfg.app.admin_password_hash or ""):
+            state["failures"] += 1
+            return "密码不正确，请重新输入。"
+        data.pop("login_attempts", None)
+        return ""
+    return credentials.mutate(cfg, attempt)
+
+
+def locked_page(request):
+    from . import app as web
+    return web.templates.TemplateResponse(request, "settings/locked.html",
+        web.ctx(request, page="settings", access_reload=True))
+
+
+def safe_next(value: str) -> str:
+    from urllib.parse import urlsplit
+    if (not value.startswith('/') or value.startswith('//') or '\\' in value
+            or any(ord(c) < 32 for c in value)):
+        return '/settings'
+    parsed = urlsplit(value)
+    if parsed.scheme or parsed.netloc:
+        return '/settings'
+    return value if parsed.path.startswith(('/settings', '/stats', '/interests')) else '/settings'
+
+
+@router.post("/access/unlock")
+async def unlock(request: Request):
+    from . import app as web
+    from fastapi.responses import JSONResponse
+    web.require_same_origin(request)
+    cfg = web.get_cfg()
+    form = await request.form()
+    error = check_password(cfg, str(form.get("password", "")))
+    if error:
+        if 'application/json' not in request.headers.get('accept', ''):
+            return page(request, 'login', error=error, ready=True, status=401)
+        raise SettingsError(error, status=401)
+    expiry = int(time.time()) + ADMIN_SECONDS
+    response = (JSONResponse({"expires_at": expiry, "server_time": time.time()})
+        if 'application/json' in request.headers.get('accept', '')
+        else RedirectResponse(safe_next(str(form.get('next', '/settings'))), status_code=303))
+    set_session(response, request, cfg, admin_until=expiry)
+    return response
+
+
+@router.get("/access/status")
+def authorization_status(request: Request):
+    from . import app as web
+    web.require_token(request)
+    cfg = web.get_cfg()
+    return {"expires_at": admin_expires(request, cfg), "server_time": time.time(),
+            "required": bool(cfg.app.admin_password_hash)}
 
 
 def issue_setup_link(cfg, url: str) -> str:
@@ -164,19 +257,7 @@ async def login(request: Request):
     cfg = web.get_cfg()
     form = await request.form()
     password = str(form.get("password", ""))
-    # Persist failures so retries cannot evade the throttle by switching workers.
-    def attempt(data):
-        state = data.setdefault("login_attempts", {"start": time.time(), "failures": 0})
-        if time.time() - state["start"] >= 300:
-            state.update(start=time.time(), failures=0)
-        if state["failures"] >= 10:
-            return "尝试次数过多，请五分钟后重试。"
-        if len(password) > 512 or not verify_password(password, cfg.app.admin_password_hash or ""):
-            state["failures"] += 1
-            return "密码不正确，请重新输入。"
-        data.pop("login_attempts", None)
-        return ""
-    error = credentials.mutate(cfg, attempt)
+    error = check_password(cfg, password)
     if error:
         return page(request, "login", error=error, ready=True, status=401)
     response = RedirectResponse("/settings", status_code=303)
@@ -190,5 +271,6 @@ def logout(request: Request):
     web.require_same_origin(request)
     response = RedirectResponse("/login", status_code=303)
     response.delete_cookie(SESSION_COOKIE)
+    response.delete_cookie(ADMIN_COOKIE)
     response.delete_cookie(web.COOKIE_NAME)
     return response

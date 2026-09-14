@@ -433,7 +433,7 @@ def test_新配置组同步前页面为空且读请求不建组(both_client, pat
 
 
 @pytest.mark.parametrize("stage", ["search", "rank", "summarize", "all"])
-def test_真实前端脚本的反馈撤销及流水线重试都沿用页面组(both_client, monkeypatch, stage):
+def test_真实前端脚本的反馈撤销及后台流水线都沿用页面组(both_client, monkeypatch, stage):
     node = shutil.which("node")
     if not node:
         pytest.skip("前端执行回归需要 Node.js 18+;其余 Web 测试不依赖 Node")
@@ -449,19 +449,14 @@ def test_真实前端脚本的反馈撤销及流水线重试都沿用页面组(b
         text=True, capture_output=True, check=True,
     )
     requests = json.loads(result.stdout)
-    assert len(requests) == 4  # ignore, undo, 第一次 run, 密码重试
+    assert len(requests) == 3  # ignore, undo, one background run
     calls, limits = [], []
     cfg.admin.guarded_stages = (stage,)
-
-    def password(request, cfg):
-        if not request.headers.get("X-Admin-Password"):
-            raise webapp.HTTPException(401, "password", headers={"X-Admin-Password-Required": "1"})
 
     def run(*a, **kw):
         calls.append(kw["group"].slug)
         return {"errors": 0}
 
-    monkeypatch.setattr(webapp, "require_admin_password", password)
     monkeypatch.setattr(webapp, "require_stage_limits", lambda cfg, stage, slug: limits.append(slug))
     monkeypatch.setattr(webapp.pipeline, "ingest_keyword_search", run)
     monkeypatch.setattr(webapp.rank, "run", run)
@@ -470,13 +465,16 @@ def test_真实前端脚本的反馈撤销及流水线重试都沿用页面组(b
     for n, req in enumerate(requests):
         assert parse_qs(urlsplit(req["url"]).query)["g"] == ["org"]
         response = c.post(req["url"], data=req["data"], headers=req["headers"])
-        assert response.status_code == (401 if n == 2 else 200)
+        assert response.status_code == (202 if n == 2 else 200)
         if n < 2:
             conn = db.Database(cfg.db_file).connect()
             states = dict(conn.execute("SELECT group_id, ignored FROM group_state"))
             conn.close()
             assert states.get(ids["org"]) == 1 - n
             assert states.get(ids["mat"], 0) == 0
+    from litradar.lock import single_instance
+    with single_instance(cfg.db_file.parent / 'litradar.lock', blocking=True):
+        pass
     assert calls == limits == ["org"]
     assert c.cookies.get(webapp.GROUP_COOKIE) == "mat"  # 写请求不切换默认视图
 

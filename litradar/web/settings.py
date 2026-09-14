@@ -24,11 +24,9 @@ def authorize(request: Request, *, write: bool = False):
     if write:
         web.require_same_origin(request)
         web.require_exposure_safe(cfg)
-        from .access import logged_in
         if not cfg.app.admin_password_hash:
             raise SettingsError("请先通过一次性设置链接建立访问密码，再保存设置。", status=403)
-        if not logged_in(request, cfg):
-            web.require_admin_password(request, cfg)
+        web.require_admin_password(request, cfg)
     return cfg
 
 
