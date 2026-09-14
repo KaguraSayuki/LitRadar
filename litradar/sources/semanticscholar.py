@@ -40,11 +40,18 @@ _last = [0.0]
 # 动机:实测「无效 key」会让所有请求 403,而匿名访问反而是 200 ——
 # 也就是说配错 key 比不配更糟。这里检测到就自动摘掉,保证富化仍能进行。
 _key_state = {"rejected": False, "warned": False}
+_key_fingerprint = None
 
 
 def _headers() -> dict[str, str]:
     h = {"User-Agent": "LitRadar/0.1 (personal literature radar)"}
     key = read_secret("S2_API_KEY")
+    global _key_fingerprint
+    import hashlib
+    fingerprint = hashlib.sha256((key or '').encode()).digest()
+    if fingerprint != _key_fingerprint:
+        _key_state.update(rejected=False, warned=False)
+        _key_fingerprint = fingerprint
     if key and not _key_state["rejected"]:
         h["x-api-key"] = key
     return h
