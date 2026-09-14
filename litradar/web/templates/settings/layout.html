@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}设置 · LitRadar{% endblock %}
+{% block body %}
+<div class="page-head"><div><h1>{% block heading %}设置{% endblock %}</h1><p class="page-sub">保存设置后，下次更新使用新设置。保存不会启动检索、排序或摘要。</p></div></div>
+<nav class="settings-nav" aria-label="设置分类">
+{% for key, label in [('groups','研究方向'),('services','数据与邮箱'),('reading','AI 与阅读'),('schedule','自动更新'),('maintenance','访问与维护')] %}
+<a href="/settings/{{ key }}" class="{{ 'is-on' if section == key }}" {% if section == key %}aria-current="page"{% endif %}>{{ label }}</a>
+{% endfor %}
+</nav>
+{% if message %}<p class="flash flash--ok" role="status">{{ message }}</p>{% endif %}
+{% if errors %}<div class="flash flash--err" role="alert"><div><strong>尚未保存，原设置已保留。</strong>{% for key, value in errors.items() %}<p>{{ value }}</p>{% endfor %}{% if errors.get('') %}<a href="{{ request.url.remove_query_params('k') }}" target="_blank" rel="noopener">在新标签页打开当前设置，对照保留的输入</a>{% endif %}</div></div>{% endif %}
+{% block settings_body %}{% endblock %}
+<script src="/static/settings.js?v={{ static_v }}" defer></script>
+{% endblock %}

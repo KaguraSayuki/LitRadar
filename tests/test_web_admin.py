@@ -233,15 +233,17 @@ def test_真实get_cfg缓存重载后坏文件可修复(tmp_path, monkeypatch):
     }), encoding="utf-8")
     monkeypatch.setattr(webapp, "CONFIG_PATH", str(config_file))
     monkeypatch.setattr(webapp, "_cfg_cache", {})
-    monkeypatch.delenv("LITRADAR_CACHE_TEST_TOKEN", raising=False)
+    monkeypatch.setenv("LITRADAR_CACHE_TEST_TOKEN", TOKEN)
     client = TestClient(webapp.app, raise_server_exceptions=False)
+    client.headers['X-Token'] = TOKEN
 
     assert client.get("/interests").status_code == 200
     rejected = client.post("/interests", data={"raw": bad}, follow_redirects=False)
     assert rejected.status_code == 400
     assert target.read_text(encoding="utf-8") == bad
 
-    saved = client.post("/interests", data={"raw": good}, follow_redirects=False)
+    from litradar.settings import SettingsStore
+    saved = client.post("/interests", data={"raw": good, "version":SettingsStore(webapp.get_cfg()).version()}, follow_redirects=False)
     assert saved.status_code == 303
     page = client.get("/interests")
     assert page.status_code == 200
@@ -266,11 +268,14 @@ def test_合法多组配置可保存并真实重载(tmp_path, monkeypatch, route
     monkeypatch.setattr(webapp, "CONFIG_PATH", str(config_file))
     monkeypatch.setattr(webapp, "_cfg_cache", {})
     c = TestClient(webapp.app)
+    monkeypatch.setenv('LITRADAR_TOKEN',TOKEN)
+    c.headers['X-Token'] = TOKEN
     c.get("/interests?g=org")  # 也覆盖已打开页面的组因为磁盘坏配置而无法加载
     data = {"groups": [{"slug": "org", "direction": "organic chemistry"},
                        {"slug": "mat", "direction": "materials"}]}
     raw = yaml.safe_dump(data)
-    saved = c.post(route + "?g=org", data={"raw": raw}, follow_redirects=False)
+    from litradar.settings import SettingsStore
+    saved = c.post(route + "?g=org", data={"raw": raw,'version':SettingsStore(webapp.get_cfg()).version()}, follow_redirects=False)
     assert saved.status_code == 303
     assert target.read_text(encoding="utf-8") == raw
     assert webapp.get_cfg().interests_data == data
@@ -295,7 +300,8 @@ def test_非法多组配置不覆盖也不备份(client, data):
 
 
 def _save(client, raw: str):
-    return client.post("/interests", data={"raw": raw}, headers={"X-Token": TOKEN},
+    from litradar.settings import SettingsStore
+    return client.post("/interests", data={"raw": raw,'version':SettingsStore(webapp.get_cfg()).version()}, headers={"X-Token": TOKEN},
                        follow_redirects=False)
 
 

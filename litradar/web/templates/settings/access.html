@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}{{ '首次设置' if mode == 'setup' else '登录' }} · LitRadar{% endblock %}
+{% block body %}
+<div class="page-head"><h1>{{ '欢迎使用 LitRadar' if mode == 'setup' else '登录 LitRadar' }}</h1></div>
+{% if error %}<p class="flash flash--err" role="alert">{{ error }}</p>{% endif %}
+<div class="panel settings-form">
+{% if mode == 'setup' %}<h2>先设置访问密码</h2><p>之后可以连接服务、创建研究方向，再选择更新时间。进度会保留，可以随时继续。</p>{% endif %}
+{% if ready %}
+<form method="post" action="{{ '/setup' if mode == 'setup' else '/login' }}">
+<label for="password">{{ '新密码（至少 8 位）' if mode == 'setup' else '访问密码' }}</label>
+<input type="password" id="password" name="password" minlength="8" maxlength="512" required autocomplete="{{ 'new-password' if mode == 'setup' else 'current-password' }}">
+{% if mode == 'setup' %}<label for="confirm">再次输入密码</label><input type="password" id="confirm" name="confirm" required autocomplete="new-password">{% endif %}
+<p><button class="btn btn--primary">{{ '保存密码并继续' if mode == 'setup' else '登录' }}</button></p>
+</form>
+{% else %}
+<p>请使用启动实例时提供的一次性设置链接。链接有效期为 30 分钟；未持有链接的访客不能设置密码。</p>
+<details><summary>交给安装或维护代理</summary><p>使用此实例的同一份配置执行 <code>litradar -c 配置文件路径 setup-link --url 实际访问地址</code>，将生成的私有链接交给实例所有者。不要在聊天群或公共日志中共享。</p></details>
+{% endif %}
+</div>
+{% endblock %}

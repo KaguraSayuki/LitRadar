@@ -1,0 +1,27 @@
+{% extends "settings/layout.html" %}
+{% block heading %}研究方向{% endblock %}
+{% block settings_body %}
+<p><a class="btn btn--primary" href="/settings/groups/new">新增研究方向</a></p>
+<div class="settings-cards">
+{% for entry in entries %}
+<article class="panel direction-card">
+  <h2><a href="/settings/group?{{ {'slug':entry.slug}|urlencode }}">{{ entry.name }}</a></h2>
+  <p>{{ entry.direction or '还没有填写方向说明' }}</p>
+  <p class="hint">{{ '参与更新' if entry.get('enabled',true) else '已停用，历史文献已保留' }} · {{ 'AI 精排开启' if entry.get('llm_rank',true) else '使用关键词与规则排序' }}</p>
+  <div class="settings-actions">
+    <a class="btn" href="/settings/group?{{ {'slug':entry.slug}|urlencode }}">编辑方向</a>
+    <a class="btn" href="/?g={{ entry.slug|urlencode }}">查看文献</a>
+    <form method="post" action="/settings/group-action?{{ {'slug':entry.slug}|urlencode }}" data-settings-form>
+      <input type="hidden" name="version" value="{{ version }}">
+      <button class="btn" name="action" value="copy">复制</button>
+      <button class="btn" name="action" value="{{ 'disable' if entry.get('enabled',true) else 'enable' }}">{{ '停用' if entry.get('enabled',true) else '恢复' }}</button>
+      {% if not loop.first %}<button class="btn" name="action" value="up" aria-label="上移 {{ entry.name }}">上移</button>{% endif %}
+      {% if not loop.last %}<button class="btn" name="action" value="down" aria-label="下移 {{ entry.name }}">下移</button>{% endif %}
+    </form>
+  </div>
+  {% if entry.get('enabled',true) %}<p><button class="btn" type="button" data-run-group="{{ entry.slug }}">更新这个方向</button> <span class="hint">检索、邮件采集、补全、排序和摘要；AI 调用可能产生费用，邮件与补全为全局阶段。</span></p>{% endif %}
+</article>
+{% else %}<div class="panel"><h2>从第一个研究方向开始</h2><p>为不同课题分别设置关键词、期刊和作者。没有 AI 密钥也能配置和筛选文献。</p><a href="/settings/groups/new">创建研究方向</a></div>{% endfor %}
+</div>
+<pre class="console" id="run-out" hidden></pre>
+{% endblock %}

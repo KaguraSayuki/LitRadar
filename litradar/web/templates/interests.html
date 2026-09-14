@@ -14,6 +14,7 @@
 {% if error %}<div class="flash flash--err">{{ icon('alert') }}{{ error }}</div>{% endif %}
 
 <div class="panel">
+  <p><a class="btn btn--primary" href="{{ group_url('/settings/groups') }}">使用研究方向表单</a> 日常配置请使用设置页。以下编辑器保留用于旧配置维护。</p>
   <dl class="kv">
     <dt>检索词</dt>
     <dd>
@@ -43,6 +44,7 @@
 </div>
 
 <form method="post" action="{{ group_url('/interests') }}" class="editor">
+  <input type="hidden" name="version" value="{{ version }}">
   <label class="sr-only" for="raw">interests.yaml</label>
   <textarea class="textarea" id="raw" name="raw" spellcheck="false" autocapitalize="off" autocorrect="off">{{ raw }}</textarea>
   <div class="formbar">

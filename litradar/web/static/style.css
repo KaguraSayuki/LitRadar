@@ -653,3 +653,26 @@ h2 small { font-weight: 400; color: var(--ink-3); font-size: 13px; margin-left: 
 @media (max-width: 640px) {
   .groupbar { max-width: 100%; }
 }
+/* Settings use the same visual language as the reading pages. */
+.settings-nav {display:flex;flex-wrap:wrap;gap:.5rem;margin-bottom:1.5rem}
+.settings-nav a {padding:.6rem .9rem;border-radius:8px;border:1px solid var(--line,#ddd);text-decoration:none}
+.settings-nav .is-on {background:var(--accent);color:var(--on-accent)}
+.settings-form {max-width:850px}
+.settings-form label:not(.check) {display:block;font-weight:600;margin:.8rem 0 .35rem}
+.settings-form input:not([type=checkbox]):not([type=hidden]),.settings-form select,.settings-form textarea {width:100%;box-sizing:border-box;padding:.65rem;border:1px solid var(--line,#aaa);border-radius:7px;background:var(--bg,#fff);color:inherit;font:inherit}
+.settings-form textarea {resize:vertical}
+.settings-form .check {display:flex;align-items:center;gap:.6rem;margin:1rem 0}
+.settings-form .check input {flex-shrink:0}
+.settings-field {margin:1.2rem 0}
+.settings-field .hint {margin:.25rem 0 .5rem}
+.settings-actions {display:flex;flex-wrap:wrap;gap:.5rem;align-items:center}
+.settings-actions form {display:flex;flex-wrap:wrap;gap:.5rem}
+.direction-card h2 {margin-top:0}
+.field-error,[aria-invalid=true] {color:var(--red-ink)}
+.settings-form [aria-invalid=true] {border-color:var(--red-ink)}
+.settings-form details {margin:1rem 0}
+.settings-form summary {cursor:pointer;font-weight:600;padding:.5rem 0}
+.credential-card {padding:1rem 0;border-bottom:1px solid var(--line)}
+.query-row {border:1px solid var(--line);border-radius:8px;padding:1rem;margin:1rem 0;min-width:0}
+.pair-row {display:flex;gap:.5rem;margin:.5rem 0}
+@media(max-width:640px){.pair-row{flex-direction:column}.settings-nav a{flex:1;text-align:center;white-space:nowrap}}
