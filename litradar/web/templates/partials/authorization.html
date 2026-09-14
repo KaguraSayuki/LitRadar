@@ -1,10 +1,16 @@
+{% set auth_next = group_url(request.url.remove_query_params('k').path + ('?' + request.url.remove_query_params('k').query if request.url.remove_query_params('k').query else '')) %}
 <section class="authorization" data-auth-panel data-reload="{{ 'true' if access_reload else 'false' }}" {% if not admin_required %}hidden{% endif %}>
   <div class="authorization__status" data-auth-status {% if not admin_expires_at %}hidden{% endif %}>
-    {{ icon('lock') }}<span>操作已解锁 · 剩余 <strong data-auth-countdown>5:00</strong></span><small>设置和受保护的运行操作共用本次授权</small>
+    <div class="authorization__scope"><span>{{ icon('lock') }}操作已解锁 · 剩余 <strong data-auth-countdown>5:00</strong></span><small>仅当前浏览器 · 设置与受保护的运行操作共用</small></div>
+    <form method="post" action="{{ group_url('/access/lock') }}" data-auth-lock>
+      <input type="hidden" name="next" value="{{ auth_next }}">
+      <button type="submit" class="btn btn--quiet">退出授权</button>
+    </form>
   </div>
+  <p class="field-error authorization__error" data-auth-lock-error role="alert" hidden></p>
   <form class="authorization__form settings-form" data-auth-form method="post" action="{{ group_url('/access/unlock') }}" {% if admin_expires_at %}hidden{% endif %}>
-    <div><h2 tabindex="-1" data-auth-heading>验证操作密码</h2><p data-auth-message>验证一次，5 分钟内可连续保存设置、运行排序和摘要。</p></div>
-    <input type="hidden" name="next" value="{{ group_url(request.url.remove_query_params('k').path + ('?' + request.url.remove_query_params('k').query if request.url.remove_query_params('k').query else '')) }}">
+    <div><h2 tabindex="-1" data-auth-heading>验证操作密码</h2><p data-auth-message>仅解锁当前浏览器。验证一次，5 分钟内可连续保存设置、运行排序和摘要。</p></div>
+    <input type="hidden" name="next" value="{{ auth_next }}">
     <div class="authorization__entry"><div class="settings-field"><label for="operation-password">访问密码</label><input id="operation-password" type="password" name="password" required maxlength="512" autocomplete="current-password"></div><button class="btn btn--primary" type="submit">验证并继续</button></div>
     <p class="field-error" data-auth-error role="alert" hidden></p>
     <a class="authorization__leave" href="{{ group_url('/') }}">返回雷达，也可以使用导航前往其他页面 {{ icon('chevron-right') }}</a>
