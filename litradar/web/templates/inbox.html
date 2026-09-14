@@ -13,7 +13,6 @@
     <p class="page-sub">
       共 <b>{{ total }}</b> 篇论文,按相关度排序
       {%- if total_filtered != total %},当前显示 <b>{{ total_filtered }}</b> 篇{% endif %}
-      {%- if not llm_ready %}。还没配 DeepSeek API Key,现在只按关键词排序{% endif %}
     </p>
   </div>
 </div>

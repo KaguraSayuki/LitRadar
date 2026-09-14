@@ -72,7 +72,7 @@
 {% macro score_block(it) %}
   {% set s = it['final_score'] %}
   {# 兜底分不叫"相关度" —— 那个词暗示它是 LLM 判断的结果,而这一个不是 #}
-  {% set lbl = '未评分' if s is none else ('关键词分' if it['score_partial'] else '相关度') %}
+  {% set lbl = '未评分' if s is none else ('关键词分' if it['score_keyword'] else '相关度') %}
   <div class="score score--{{ score_band(s) }}{{ ' score--partial' if it['score_partial'] }}"
        {% if s is not none %}title="{{ lbl }} {{ '%.1f'|format(s) }}{{ ' —— 精排批次失败,只由 BM25 与规则算出' if it['score_partial'] }}"{% endif %}>
     <span class="score__n">{{ '%.0f'|format(s) if s is not none else '–' }}</span>

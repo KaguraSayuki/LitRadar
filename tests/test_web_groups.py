@@ -12,9 +12,10 @@ import subprocess
 from copy import deepcopy
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 from litradar import db
@@ -192,7 +193,7 @@ def both_client(tmp_path, monkeypatch):
     cfg = Config()
     cfg.app.db_path = str(tmp_path / "both.db")
     cfg.app.interests = str(tmp_path / "i.yaml")
-    cfg.interests_data = TWO_GROUPS
+    cfg.interests_data = deepcopy(TWO_GROUPS)
     monkeypatch.setattr(webapp, "get_cfg", lambda: cfg)
 
     conn = db.Database(cfg.db_file).connect()
@@ -478,3 +479,119 @@ def test_真实前端脚本的反馈撤销及流水线重试都沿用页面组(b
             assert states.get(ids["mat"], 0) == 0
     assert calls == limits == ["org"]
     assert c.cookies.get(webapp.GROUP_COOKIE) == "mat"  # 写请求不切换默认视图
+
+
+@pytest.mark.parametrize("path", ["/", "/week", "/search?q=Both", "/item/1"])
+def test_当前组说明缺失时页面和查询都不回退到其他方向(both_client, path):
+    c, cfg, iid, ids = both_client
+    conn = db.Database(cfg.db_file).connect()
+    db.save_summary(conn, iid, {"one_liner": "Shared neutral result"}, "deep", "fake")
+    # 模拟旧进程遗留的共享列污染;不能只依赖新写入路径不再保存它。
+    conn.execute("UPDATE summary SET relevance='Only organic relevance' WHERE item_id=?", (iid,))
+    db.save_group_relevance(conn, ids["org"], iid, "Only organic relevance", "fake")
+    conn.commit()
+    assert db.get_items(conn, group_slug="mat")[0]["relevance"] is None
+    assert db.search_items(conn, "Both", group_slug="mat")[0]["relevance"] is None
+    conn.close()
+    page = c.get(path, params={"g": "mat", "q": "Both"})
+    assert page.status_code == 200
+    assert "Shared neutral result" in page.text
+    assert "Only organic relevance" not in page.text
+
+
+@pytest.mark.parametrize("slug", ["材料", "mat&chem", "mat+chem", "mat%26chem",
+                                  "mat/chem?#", 'mat "chem"'])
+def test_合法特殊slug在保存切换Cookie导航和反馈中保持身份(both_client, slug):
+    c, cfg, iid, ids = both_client
+    cfg.interests_data["groups"].append({"slug": slug, "name": "特殊方向"})
+    raw = yaml.safe_dump(cfg.interests_data, allow_unicode=True)
+    saved = c.post("/interests", data={"raw": raw}, follow_redirects=False)
+    assert saved.status_code == 303
+    cfg.interests_data = yaml.safe_load(cfg.interests_file.read_text(encoding="utf-8"))
+    conn = db.Database(cfg.db_file).connect()
+    gid = db.sync_groups(conn, load_groups(cfg))[slug]
+    db.add_to_group(conn, gid, iid)
+    conn.commit()
+    conn.close()
+
+    links = PageElements(c.get("/").text).attrs("a")
+    switch = next(a["href"] for a in links if a.get("title") == "特殊方向")
+    assert parse_qs(urlsplit(switch).query) == {"g": [slug]}
+    selected = c.get(switch)
+    assert selected.status_code == 200
+    assert unquote(c.cookies.get(webapp.GROUP_COOKIE)) == slug
+    # Cookie 默认页和显式导航都必须回到同一组,不能被 &、+、% 或 # 拆开。
+    for path in ["/", "/week", "/search?q=Both", f"/item/{iid}", "/interests"]:
+        page = PageElements(c.get(path).text)
+        assert page.attrs("body")[0]["data-group"] == slug
+        for attrs in page.attrs("a"):
+            href = attrs.get("href", "")
+            if href.startswith("/") and "groupbar__item" not in attrs.get("class", ""):
+                assert parse_qs(urlsplit(href).query)["g"] == [slug]
+    c.get("/?g=mat")
+    posted = c.post(f"/item/{iid}/action", params={"g": slug}, data={"action": "ignore"})
+    assert posted.status_code == 200
+    conn = db.Database(cfg.db_file).connect()
+    assert dict(conn.execute("SELECT group_id,ignored FROM group_state")) == {gid: 1}
+    conn.close()
+
+
+def test_未知Unicode组和损坏Cookie安全回退到实际组(both_client):
+    c, cfg, iid, ids = both_client
+    page = c.get("/", params={"g": "不存在的方向"})
+    assert page.status_code == 200
+    assert c.cookies.get(webapp.GROUP_COOKIE) == "org"
+    page = c.get("/", headers={"Cookie": webapp.GROUP_COOKIE + "=%FF"})
+    assert page.status_code == 200
+    assert PageElements(page.text).attrs("body")[0]["data-group"] == "org"
+
+
+@pytest.mark.parametrize("slug,needle", [("bad\nslug", "控制字符"),
+                                        ("材" * 86, "256"),
+                                        ("\ud800", "Unicode")])
+def test_无效slug在编辑页报错而不覆盖已有配置(both_client, slug, needle):
+    c, cfg, iid, ids = both_client
+    before = yaml.safe_dump(cfg.interests_data)
+    cfg.interests_file.write_text(before, encoding="utf-8")
+    raw = yaml.safe_dump({"groups": [{"slug": slug, "name": "Bad group"}]})
+    page = c.post("/interests", data={"raw": raw})
+    assert page.status_code == 400
+    assert needle in page.text
+    assert cfg.interests_file.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize("path", ["/", "/week", "/search?q=Both", "/item/1"])
+@pytest.mark.parametrize("mode,notice,label", [
+    ("group_disabled", "本组已关闭 DeepSeek 精排", "关键词分"),
+    ("disabled", "已关闭 DeepSeek", "关键词分"),
+    ("no_key", "还没配 DeepSeek API Key", "关键词分"),
+    ("failed", "", "关键词分"),
+    ("scored", "", "相关度"),
+    ("unscored", "", "未评分"),
+])
+def test_评分界面区分主动关闭真实失败和成功(both_client, monkeypatch, path, mode, notice, label):
+    c, cfg, iid, ids = both_client
+    cfg.interests_data["groups"][0]["llm_rank"] = mode != "group_disabled"
+    cfg.llm.enabled = mode != "disabled"
+    cfg.llm.api_key_env = "LITRADAR_TEST_SCORE_KEY"
+    monkeypatch.setenv(cfg.llm.api_key_env, "" if mode == "no_key" else "fake-no-network")
+    conn = db.Database(cfg.db_file).connect()
+    if mode != "unscored":
+        db.save_score(conn, iid, group_id=ids["org"], final_score=70,
+                      llm_score=70 if mode == "scored" else None)
+    conn.commit()
+    conn.close()
+
+    page = c.get(path, params={"g": "org", "q": "Both"})
+
+    assert page.status_code == 200
+    assert "Both groups" in page.text
+    assert ('class="score__l">' + label + "</span>") in page.text
+    assert ("精排失败" in page.text) == (mode == "failed")
+    assert ("score--partial" in page.text) == (mode == "failed")
+    notices = [p for p in PageElements(page.text).attrs("p") if p.get("class") == "notice"]
+    assert bool(notices) == bool(notice)
+    if notice:
+        assert notice in page.text
+    if mode != "no_key":
+        assert "还没配 DeepSeek API Key" not in page.text

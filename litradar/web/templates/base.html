@@ -37,7 +37,7 @@
   {% if groups and groups|length > 1 %}
   <nav class="groupbar" aria-label="订阅组">
     {% for gr in groups %}
-      <a href="?g={{ gr.slug }}"
+      <a href="?{{ {'g': gr.slug}|urlencode }}"
          class="groupbar__item{{ ' is-on' if group and gr.slug == group.slug else '' }}{{ ' is-off' if not gr.enabled }}"
          {% if group and gr.slug == group.slug %}aria-current="true"{% endif %}
          title="{{ gr.name }}{{ '(已停用)' if not gr.enabled }}">{{ gr.name }}</a>
@@ -50,6 +50,9 @@
 </header>
 
 <main class="main">
+{% if page in ('inbox', 'week', 'search') and rank_notice %}
+<p class="notice">{{ rank_notice }}</p>
+{% endif %}
 {% block body %}{% endblock %}
 </main>
 

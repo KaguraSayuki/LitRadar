@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime
 import re
+from copy import deepcopy
 
 import pytest
 
@@ -24,7 +25,7 @@ TWO_GROUPS = {"groups": [
 def _cfg(tmp_path, *, groups=TWO_GROUPS) -> Config:
     cfg = Config()
     cfg.app.db_path = str(tmp_path / "s.db")
-    cfg.interests_data = groups
+    cfg.interests_data = deepcopy(groups)
     return cfg
 
 
@@ -250,3 +251,208 @@ def test_运行记录按组记账(tmp_path):
         "SELECT stage, group_slug FROM run_log ORDER BY id")]
     conn.close()
     assert rows == [("summarize", "org"), ("summarize", "mat")]
+
+
+@pytest.mark.parametrize("depth", [None, "brief", "deep"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_force共享摘要只刷新一次且保留两组说明(tmp_path, depth, reverse):
+    cfg = _cfg(tmp_path)
+    if reverse:
+        cfg.interests_data["groups"].reverse()
+    ids = _ids(cfg)
+    conn = db.Database(cfg.db_file).connect()
+    iid = _seed(conn, "Shared paper", groups=list(ids.values()))
+    for gid in ids.values():
+        db.save_score(conn, iid, group_id=gid, final_score=80)
+        if depth == "deep":
+            db.save_group_relevance(conn, gid, iid, "old relevance", "old")
+    if depth:
+        db.save_summary(conn, iid, {"one_liner": "old"}, depth, "old",
+                        abstract_hash=summarize._abstract_hash("abstract of Shared paper"))
+    conn.commit()
+    conn.close()
+
+    out = summarize.run(cfg, force=True, verbose=False)
+
+    assert out["errors"] == 0
+    assert out["deep"] == out["relevance"] == 1
+    assert out["brief"] == 0
+    assert len(FakeLLM.calls) == 2
+    got = _relevances(cfg)
+    assert "示例方向 A" in got[("org", "Shared paper")]
+    assert "钙钛矿材料" in got[("mat", "Shared paper")]
+    conn = db.Database(cfg.db_file).connect()
+    # 共享表不再写入某个方向的说明,避免后续调用方误用。
+    assert conn.execute("SELECT relevance FROM summary WHERE item_id=?", (iid,)).fetchone()[0] is None
+    conn.close()
+    summarize.run(cfg, verbose=False)
+    assert len(FakeLLM.calls) == 2
+
+
+@pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize("limit", [1, 20])
+@pytest.mark.parametrize("existing_brief", [False, True])
+def test_后处理组的深度需求不会漏掉前组说明或重复生成简要摘要(
+        tmp_path, monkeypatch, force, limit, existing_brief):
+    cfg = _cfg(tmp_path)
+    cfg.llm.deep_summary_top_n = 1
+    ids = _ids(cfg)
+    conn = db.Database(cfg.db_file).connect()
+    shared = _seed(conn, "Shared paper", groups=list(ids.values()))
+    high = _seed(conn, "Organic winner", groups=[ids["org"]])
+    for iid, slug, score in [(shared, "org", 10), (shared, "mat", 99), (high, "org", 99)]:
+        db.save_score(conn, iid, group_id=ids[slug], final_score=score)
+    if existing_brief:
+        db.save_summary(conn, shared, {"one_liner": "brief"}, "brief", "old",
+                        abstract_hash=summarize._abstract_hash("abstract of Shared paper"))
+    conn.commit()
+    conn.close()
+    full, brief = [], []
+    original = summarize.summarize_one
+
+    def deep(row, prof, llm):
+        full.append(row["id"])
+        return original(row, prof, llm)
+
+    def batch(rows, llm):
+        brief.extend(r["id"] for r in rows)
+        return {r["id"]: {"one_liner": "brief"} for r in rows}
+
+    monkeypatch.setattr(summarize, "summarize_one", deep)
+    monkeypatch.setattr(summarize, "summarize_brief", batch)
+    out = summarize.run(cfg, limit=limit, force=force, verbose=False)
+
+    assert out["errors"] == 0
+    assert sorted(full) == sorted([shared, high])
+    assert brief == []
+    got = _relevances(cfg)
+    assert "示例方向 A" in got[("org", "Shared paper")]
+    assert "钙钛矿材料" in got[("mat", "Shared paper")]
+
+
+def test_force指定组保留未参与组的有效说明(tmp_path):
+    from litradar.rank import load_groups
+
+    cfg = _cfg(tmp_path)
+    ids = _ids(cfg)
+    conn = db.Database(cfg.db_file).connect()
+    _seed(conn, "Shared paper", groups=list(ids.values()))
+    conn.commit()
+    conn.close()
+    summarize.run(cfg, verbose=False)
+    before = _relevances(cfg)[("mat", "Shared paper")]
+    FakeLLM.calls = []
+
+    summarize.run(cfg, group=load_groups(cfg)[0], force=True, verbose=False)
+
+    assert FakeLLM.calls == ["full:示例方向 A"]
+    assert _relevances(cfg)[("mat", "Shared paper")] == before
+
+
+@pytest.mark.parametrize("fields,created,enriched", [
+    ({"problem": "p", "method": "m", "key_results": "k", "limitation": "l"}, None, "absent"),
+    ({"method": "m"}, None, None),
+    ({"problem": "p"}, "2026-01-01", "absent"),
+    ({"method": "m"}, "2026-01-01", "2025-01-01"),
+])
+def test_无指纹的旧摘要能补新组说明且不重算中性内容(tmp_path, fields, created, enriched):
+    cfg = _cfg(tmp_path)
+    ids = _ids(cfg)
+    conn = db.Database(cfg.db_file).connect()
+    iid = _seed(conn, "Legacy paper", groups=list(ids.values()))
+    db.save_summary(conn, iid, fields | {"one_liner": "legacy neutral"}, "deep", "old")
+    conn.execute("UPDATE summary SET created_at=? WHERE item_id=?", (created, iid))
+    db.save_group_relevance(conn, ids["org"], iid, "legacy organic", "old")
+    if enriched != "absent":
+        conn.execute("INSERT INTO item_enrichment(item_id,enriched_at) VALUES (?,?)", (iid, enriched))
+    conn.commit()
+    conn.close()
+
+    out = summarize.run(cfg, verbose=False)
+
+    assert out["errors"] == 0
+    assert out["deep"] == 0 and out["relevance"] == 1
+    assert FakeLLM.calls == ["relevance:钙钛矿材料"]
+    assert _relevances(cfg)[("org", "Legacy paper")] == "legacy organic"
+    conn = db.Database(cfg.db_file).connect()
+    assert conn.execute("SELECT one_liner FROM summary WHERE item_id=?", (iid,)).fetchone()[0] == "legacy neutral"
+    conn.close()
+
+
+@pytest.mark.parametrize("direction,rename,refresh", [
+    ("示例方向 A", True, False),
+    ("  示例方向 A  ", False, False),
+    ("酶工程", False, True),
+    ("", False, True),
+])
+def test_仅有效方向变化才补本组说明(tmp_path, direction, rename, refresh):
+    from litradar.rank import load_groups
+
+    cfg = _cfg(tmp_path)
+    ids = _ids(cfg)
+    conn = db.Database(cfg.db_file).connect()
+    iid = _seed(conn, "Shared paper", groups=list(ids.values()))
+    conn.commit()
+    conn.close()
+    summarize.run(cfg, verbose=False)
+    before = _relevances(cfg)
+    FakeLLM.calls = []
+    cfg.interests_data["groups"][0]["direction"] = direction
+    if rename:
+        cfg.interests_data["groups"][0]["name"] = "新名字"
+    conn = db.Database(cfg.db_file).connect()
+    neutral = tuple(conn.execute("SELECT * FROM summary WHERE item_id=?", (iid,)).fetchone())
+    db.sync_groups(conn, load_groups(cfg))
+    conn.commit()
+    got = _relevances(cfg)
+    assert (("org", "Shared paper") not in got) == refresh
+    assert got[("mat", "Shared paper")] == before[("mat", "Shared paper")]
+
+    out = summarize.run(cfg, verbose=False)
+
+    assert out["deep"] == 0 and out["relevance"] == int(refresh)
+    assert len(FakeLLM.calls) == int(refresh)
+    assert tuple(conn.execute("SELECT * FROM summary WHERE item_id=?", (iid,)).fetchone()) == neutral
+    conn.close()
+
+
+def test_方向只有提示词实际使用的前300字影响说明缓存(tmp_path):
+    cfg = _cfg(tmp_path)
+    cfg.interests_data["groups"][0]["direction"] = "有" * 300 + "旧后缀"
+    ids = _ids(cfg)
+    conn = db.Database(cfg.db_file).connect()
+    _seed(conn, "Shared paper", groups=list(ids.values()))
+    conn.commit()
+    conn.close()
+    summarize.run(cfg, verbose=False)
+    FakeLLM.calls = []
+
+    cfg.interests_data["groups"][0]["direction"] = "有" * 300 + "新后缀"
+    summarize.run(cfg, verbose=False)
+    assert FakeLLM.calls == []
+
+    cfg.interests_data["groups"][0]["direction"] = "新" + "有" * 299 + "新后缀"
+    summarize.run(cfg, verbose=False)
+    assert FakeLLM.calls == ["relevance:" + "新" + "有" * 299]
+
+
+def test_新组说明失败后下轮只重试说明(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    ids = _ids(cfg)
+    conn = db.Database(cfg.db_file).connect()
+    _seed(conn, "Shared paper", groups=list(ids.values()))
+    conn.commit()
+    conn.close()
+    original = summarize.summarize_relevance
+
+    def fail(*args):
+        raise RuntimeError("relevance service unavailable")
+
+    monkeypatch.setattr(summarize, "summarize_relevance", fail)
+    out = summarize.run(cfg, verbose=False)
+    assert out["groups"]["mat"]["relevance_failed"] == 1
+    assert set(_relevances(cfg)) == {("org", "Shared paper")}
+    monkeypatch.setattr(summarize, "summarize_relevance", original)
+    FakeLLM.calls = []
+    summarize.run(cfg, verbose=False)
+    assert FakeLLM.calls == ["relevance:钙钛矿材料"]

@@ -45,7 +45,7 @@
     <div class="aside-card">
       {% set s = it['final_score'] %}
       <div class="score score--{{ score_band(s) }}{{ ' score--partial' if it['score_partial'] }}">
-        <span class="score__l">{{ '未评分' if s is none else ('关键词分' if it['score_partial'] else '相关度') }}</span>
+        <span class="score__l">{{ '未评分' if s is none else ('关键词分' if it['score_keyword'] else '相关度') }}</span>
         <span class="score__n">{{ '%.1f'|format(s) if s is not none else '–' }}</span>
       </div>
       {% if it['score_partial'] %}
