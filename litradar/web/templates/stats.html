@@ -98,7 +98,7 @@
     <div class="run">
       <span class="stage">{{ stage_name.get(r['stage'], r['stage']) }}</span>
       <span class="status {{ 'status--ok' if r['status'] == 'ok' else 'status--err' }}">{{ '成功' if r['status'] == 'ok' else '失败' }}</span>
-      <time datetime="{{ r['finished_at'] }}">{{ (r['finished_at'] or '')[:16]|replace('T', ' ') }}</time>
+      <time datetime="{{ r['finished_at'] }}">{{ r['finished_at']|local_time }}</time>
       <span class="kvs">
         {# 值可能是整段查询列表,截到 60 字,完整内容放 title #}
         {% for k, v in (r['stats']|fromjsonobj).items() %}{% set vs = v|string %}<span{% if vs|length > 65 %} title="{{ vs }}"{% endif %}>{{ k }} <b>{{ vs|truncate(60, true, '…') }}</b></span>{% endfor %}

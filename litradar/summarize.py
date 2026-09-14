@@ -361,7 +361,8 @@ def _complete_group_relevance(conn: sqlite3.Connection, cfg: Config, prof: Profi
 
 
 def run(cfg: Config, *, limit: int = 200, days: int = 30, verbose: bool = True,
-        force: bool = False, group: Profile | None = None) -> dict:
+        force: bool = False, group: Profile | None = None,
+        selected_groups: list[Profile] | None = None) -> dict:
     """按订阅组生成中文摘要。``group`` 指定时只跑那一个组。
 
     摘要里只有 **relevance**(对研究的用处)与方向有关,其余字段通用,所以中性
@@ -370,7 +371,8 @@ def run(cfg: Config, *, limit: int = 200, days: int = 30, verbose: bool = True,
 
     **一个组失败不影响其它组**:某个方向画像写坏了,不该让别的方向没摘要。
     """
-    groups = [group] if group is not None else load_enabled_groups(cfg)
+    groups = (selected_groups if selected_groups is not None else
+              [group] if group is not None else load_enabled_groups(cfg))
     llm = DeepSeek(cfg.llm)
     if not llm.available:
         return {"skipped": "未配置 API key 或 LLM 已禁用"}

@@ -259,6 +259,13 @@ class JournalRankConfig:
     aliases: dict[str, str] = field(default_factory=dict)
 
 
+@dataclass
+class ScheduleConfig:
+    enabled: bool = False
+    time: str = "07:00"
+    groups: list[str] = field(default_factory=list)  # empty = all enabled directions
+    owner: str = "external"
+    handoff_confirmed: bool = False
 
 
 @dataclass
@@ -270,6 +277,7 @@ class Config:
     sources: SourceConfig = field(default_factory=SourceConfig)
     ranking: RankingConfig = field(default_factory=RankingConfig)
     journal_rank: JournalRankConfig = field(default_factory=JournalRankConfig)
+    schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     interests_data: dict[str, Any] = field(default_factory=dict)
     config_file: Path | None = field(default=None, repr=False, compare=False)
 
@@ -398,4 +406,5 @@ def config_from_dict(raw: dict[str, Any]) -> Config:
         sources=_build(SourceConfig, raw.get("sources")),
         ranking=_ranking_config(raw.get("ranking")),
         journal_rank=_build(JournalRankConfig, raw.get("journal_rank")),
+        schedule=_build(ScheduleConfig, raw.get("schedule")),
     )
