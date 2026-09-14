@@ -148,16 +148,15 @@ def test_admin_password_set_then_clear(tmp_path, monkeypatch):
 
     assert cli.cmd_admin_password(cfg, SimpleNamespace(clear=False)) == 0
 
-    text = env_path.read_text(encoding="utf-8")
-    assert "DEEPSEEK_API_KEY=keep-me" in text, "写入不能碰其它行"
-    line = [l for l in text.splitlines()
-            if l.startswith(cfg.app.admin_password_env + "=")][0]
-    stored = line.split("=", 1)[1]
+    from litradar import credentials
+    text = credentials.store_path(cfg).read_text(encoding="utf-8")
+    assert "DEEPSEEK_API_KEY=keep-me" in env_path.read_text(), "不能修改旧密钥文件"
+    stored = credentials.read_store(cfg)['values'][cfg.app.admin_password_env]
     assert passwords.verify_password("s3cret-password", stored)
     assert "s3cret-password" not in text, "只存哈希,绝不写明文"
 
     assert cli.cmd_admin_password(cfg, SimpleNamespace(clear=True)) == 0
-    assert cfg.app.admin_password_env not in env_path.read_text(encoding="utf-8")
+    assert credentials.read_store(cfg)['values'][cfg.app.admin_password_env] is None
 
 
 def test_admin_password_rejects_short_or_mismatched(tmp_path, monkeypatch, capsys):

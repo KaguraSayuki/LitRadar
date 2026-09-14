@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import db, enrich, pipeline, rank, summarize
+from . import credentials, db, enrich, pipeline, rank, summarize
 from .config import load_config, read_secret
 from .lock import AlreadyRunning, single_instance
 from .sources import easyscholar, mail, xmol_email
@@ -220,40 +220,16 @@ def _journal_rank_line(cfg) -> tuple[str, str, str]:
             "影响因子/中科院分区不会显示;不配也能正常跑,只是缺这些标签")
 
 
-def _write_env_value(path, name: str, value: str | None) -> None:
-    """在 .env 里写入或删除一个变量,其余行原样保留。"""
-    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-    out: list[str] = []
-    written = False
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith(f"{name}=") or stripped == name:
-            if value is not None and not written:
-                out.append(f"{name}={value}")
-                written = True
-            continue                       # value=None 时等于删掉这一行
-        out.append(line)
-    if value is not None and not written:
-        out.append(f"{name}={value}")
-    path.write_text("\n".join(out).rstrip("\n") + "\n", encoding="utf-8")
-    if os.name != "nt":
-        try:
-            path.chmod(0o600)              # .env 里有密钥,写完收紧权限
-        except OSError:
-            pass
 
 
 def cmd_admin_password(cfg, args):
-    """设置 / 清除花钱阶段的管理员密码(只把 PBKDF2 哈希写进 .env)。"""
+    """设置 / 清除管理员密码，只把 PBKDF2 哈希写进私有凭据文件。"""
     from . import passwords
-    from .config import ROOT
-
-    env_path = ROOT / ".env"
     name = cfg.app.admin_password_env
 
     if args.clear:
-        _write_env_value(env_path, name, None)
-        print(f"已从 {env_path} 删除 {name};重启服务后花钱阶段不再要密码。")
+        credentials.write(cfg, name, None)
+        print("已清除应用管理的访问密码，新请求立即生效。")
         return 0
 
     import getpass
@@ -266,12 +242,11 @@ def cmd_admin_password(cfg, args):
         print("错误:两次输入不一致。", file=sys.stderr)
         return 1
 
-    _write_env_value(env_path, name, passwords.hash_password(first))
-    print(f"已把 {name} 的哈希写入 {env_path}(只存哈希,不存明文)。")
+    credentials.write(cfg, name, passwords.hash_password(first))
+    print("已保存管理员密码哈希，新请求立即生效；已有登录需要重新验证。")
     stages = "、".join(cfg.admin.guarded_stages) or "(空)"
     print(f"受保护阶段:{stages}"
           f"(冷却 {cfg.admin.cooldown_seconds}s,每日上限 {cfg.admin.daily_limit} 次)")
-    print("注意:改密码需要重启服务才生效;首次设置无需重启。")
     return 0
 
 
@@ -292,15 +267,17 @@ def cmd_check(cfg, args):
         print(f"  {mark} {label}" + (f"  {detail}" if detail else ""))
 
     print("\n【1】配置文件")
-    cfg_path = ROOT / "config.yaml"
+    cfg_path = cfg.config_file or ROOT / "config.yaml"
     if cfg_path.exists():
         line(OK, "config.yaml", str(cfg_path))
     else:
-        line(WARN, "config.yaml 不存在", "正在使用默认值;建议 cp config.example.yaml config.yaml")
-        problems.append("缺少 config.yaml")
+        line(WARN, "config.yaml 不存在", "正在使用默认值；在网页保存设置后自动创建")
 
-    print("\n【2】密钥与环境变量 (.env)")
-    env_path = ROOT / ".env"
+    print("\n【2】凭据与部署环境")
+    env_path = cfg_path.parent / ".env"
+    private_path = credentials.store_path(cfg)
+    if private_path.exists():
+        line(OK, "应用管理的凭据文件", "已存在；可在网页更换，下次调用生效")
     if env_path.exists():
         if os.name == "nt":
             # Windows 的 st_mode 不反映 ACL,chmod 也只能切换只读位。在这里
@@ -311,19 +288,17 @@ def cmd_check(cfg, args):
             line(OK if mode == "600" else WARN, ".env", f"权限 {mode}" +
                  ("" if mode == "600" else "  ← 建议 chmod 600 .env"))
     else:
-        line(WARN, ".env 不存在", "复制 .env.example 并填写")
-        problems.append("缺少 .env")
+        line(OK, ".env 未使用", "可通过网页接入服务，不需要创建此兼容文件")
 
     # DeepSeek
     llm = DeepSeek(cfg.llm)
     if cfg.llm.api_key:
-        k = cfg.llm.api_key
-        line(OK, f"{cfg.llm.api_key_env} 已设置",
-             f"{k[:6]}…{k[-4:]} (长度 {len(k)})")
+        line(OK, f"{cfg.llm.api_key_env} 已设置")
     else:
         line(BAD, f"{cfg.llm.api_key_env} 未设置",
              "没有它排序与摘要会跳过 LLM,只按 BM25+规则排")
-        problems.append(f"{cfg.llm.api_key_env} 未设置")
+        if cfg.llm.enabled:
+            problems.append(f"{cfg.llm.api_key_env} 未设置")
 
     # 可选
     for name, why in [("S2_API_KEY", "Semantic Scholar 限流会宽松很多,建议申请"),
@@ -337,15 +312,15 @@ def cmd_check(cfg, args):
     # 分区标签,而且富化统计全是 0,不主动说一句用户根本看不出哪里不对。
     line(*_journal_rank_line(cfg))
 
-    # 绑定地址与口令:没有账号体系,只看"是否暴露到局域网"
+    # These are configured listening values; a reverse proxy may expose another URL.
     if cfg.app.is_loopback:
-        line(OK, "仅绑本机", f"{cfg.app.host}:{cfg.app.port} · 不设口令也安全")
+        line(OK, "配置为仅绑本机", f"{cfg.app.host}:{cfg.app.port}")
         if cfg.app.token:
             line(OK, "接口口令已设置", "本机访问也需要 ?k=<token>")
     else:
         line(WARN, "绑定了非本机地址", f"{cfg.app.host}:{cfg.app.port}")
-        if cfg.app.token:
-            line(OK, "接口口令已设置", "访问时带 ?k=<token>")
+        if cfg.app.token or cfg.app.admin_password_hash:
+            line(OK, "访问保护已设置", "网页可使用访问密码登录，脚本可使用接口口令")
         else:
             line(BAD, "暴露到局域网但未设口令",
                  "手动触发接口现在会直接拒绝(fail closed);"
@@ -359,7 +334,7 @@ def cmd_check(cfg, args):
     else:
         if cfg.app.admin_password_hash:
             line(OK, f"{cfg.app.admin_password_env} 已设置",
-                 f"运行 {guarded} 前要再输一次密码")
+                 f"登录会话可运行 {guarded}；仅用接口口令时另需管理员密码")
         else:
             line(WARN, f"{cfg.app.admin_password_env} 未设置",
                  f"只要拿到接口口令就能运行 {guarded} 烧 DeepSeek 额度;"
@@ -497,9 +472,9 @@ def cmd_check(cfg, args):
             elif r.status_code == 429:
                 line(WARN, "S2 限流 (429)", "稍后重试即可")
             else:
-                line(WARN, f"S2 返回 HTTP {r.status_code}", str(r.text)[:80])
+                line(WARN, f"S2 返回 HTTP {r.status_code}", "请检查凭据和服务状态")
         except Exception as e:  # noqa: BLE001
-            line(BAD, "S2 测试失败", f"{type(e).__name__}: {str(e)[:70]}")
+            line(BAD, "S2 测试失败", "请检查网络和服务状态")
             problems.append("S2 测试失败")
 
     print("\n【7】DeepSeek 连通性")
@@ -512,12 +487,12 @@ def cmd_check(cfg, args):
                 '请只输出 {"ok":true,"msg":"pong"}',
                 max_tokens=64,
             )
-            line(OK, "DeepSeek 调用成功", f"模型 {cfg.llm.model} · 返回 {got}")
+            line(OK, "DeepSeek 调用成功", f"模型 {cfg.llm.model}")
         except LLMError as e:
-            line(BAD, "DeepSeek 调用失败", str(e)[:110])
+            line(BAD, "DeepSeek 调用失败", "请检查模型、服务地址、密钥和可用额度")
             problems.append("DeepSeek 调用失败")
         except Exception as e:  # noqa: BLE001
-            line(BAD, "DeepSeek 调用异常", f"{type(e).__name__}: {str(e)[:100]}")
+            line(BAD, "DeepSeek 调用异常", "请检查模型服务配置")
             problems.append("DeepSeek 调用异常")
 
     print()
@@ -612,9 +587,10 @@ def main(argv: list[str] | None = None) -> int:
     guarded = args.cmd in ("run", "ingest", "enrich", "rank", "summarize")
     try:
         if guarded:
-            with single_instance(_lock_path(cfg)):
+            with single_instance(_lock_path(cfg)), credentials.snapshot(cfg):
                 return args.func(cfg, args)
-        return args.func(cfg, args)
+        with credentials.snapshot(cfg):
+            return args.func(cfg, args)
     except AlreadyRunning as e:
         print(f"跳过: {e}", file=sys.stderr)
         return 0

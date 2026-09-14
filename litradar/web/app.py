@@ -17,7 +17,7 @@ from fastapi.templating import Jinja2Templates
 from markupsafe import Markup
 from starlette.datastructures import QueryParams, URL
 
-from .. import db, journal_rank, pipeline, rank, summarize
+from .. import credentials, db, journal_rank, pipeline, rank, summarize
 from ..config import Config, load_config
 from ..lock import AlreadyRunning, single_instance
 from ..normalize import days_ago
@@ -111,23 +111,13 @@ def _static_version() -> str:
 
 CONFIG_PATH = os.environ.get("LITRADAR_CONFIG")
 
-# 预加载 config(单用户,配置很少变;改动后重启即可)
+# Retained for compatibility with integrations that clear the former cache.
 _cfg_cache: dict[str, Any] = {}
 
 
 def get_cfg() -> Config:
-    """加载配置。顺带重读 .env,让新填的 API key 无需重启服务即可生效。
-
-    用 load_env_file() 而不是 load_dotenv(override=True):后者会让 .env
-    覆盖真实环境变量,把 systemd / 命令行传入的配置清掉(实测导致鉴权失效)。
-    """
-    from ..config import load_env_file
-
-    load_env_file()
-
-    if "cfg" not in _cfg_cache:
-        _cfg_cache["cfg"] = load_config(CONFIG_PATH)
-    return _cfg_cache["cfg"]
+    """Read a fresh configuration and credential snapshot for each operation."""
+    return load_config(CONFIG_PATH)
 
 
 def require_token(request: Request) -> None:
@@ -845,7 +835,7 @@ def admin_run(request: Request, stage: str, days: int = 0):
     # enrich 时点一下,两边互抢 Semantic Scholar 的 1 req/s 限流,表现为
     # "批量全部返回空"。双击按钮同理,会并发跑两份。
     try:
-        with single_instance(cfg.db_file.parent / "litradar.lock"):
+        with single_instance(cfg.db_file.parent / "litradar.lock"), credentials.snapshot(cfg):
             # mail 与 enrich 是全局的(不按方向跑),不受当前组影响
             if stage == "mail":
                 out = pipeline.ingest_mail(cfg)
