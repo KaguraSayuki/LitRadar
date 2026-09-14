@@ -12,7 +12,7 @@
       <p class="detail__en">{{ it['title']|richtitle }}</p>
     {% else %}
       <h1 class="detail__title detail__title--en">{{ it['title']|richtitle }}</h1>
-      <p class="note">中文标题和摘要还没生成。<a href="/stats#run">去生成</a></p>
+      <p class="note">中文标题和摘要还没生成。<a href="{{ group_url('/stats#run') }}">去生成</a></p>
     {% endif %}
 
     <div class="meta">
@@ -33,7 +33,7 @@
     {% if it['ignored'] %}
       <p class="notice notice--ignored">
         你把它标成了<b>不感兴趣</b>,所以它只出现在
-        <a href="/?state=ignored">「不感兴趣」页签</a>里,不会回到未读 / 已读 / 全部。
+        <a href="{{ group_url('/?state=ignored') }}">「不感兴趣」页签</a>里,不会回到未读 / 已读 / 全部。
         点下面的<b>恢复</b>可以让它回到正常列表。
       </p>
     {% endif %}

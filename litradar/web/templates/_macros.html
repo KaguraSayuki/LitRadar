@@ -91,10 +91,10 @@
 
       {# 有中文译名就中文当主标题,英文原题降为衬线副标题 #}
       {% if it['title_zh'] %}
-        <h3 class="entry__title"><a href="/item/{{ it['id'] }}">{{ it['title_zh'] }}</a></h3>
+        <h3 class="entry__title"><a href="{{ group_url('/item/' ~ it['id']) }}">{{ it['title_zh'] }}</a></h3>
         <p class="entry__en">{{ it['title']|richtitle }}</p>
       {% else %}
-        <h3 class="entry__title entry__title--en"><a href="/item/{{ it['id'] }}">{{ it['title']|richtitle }}</a></h3>
+        <h3 class="entry__title entry__title--en"><a href="{{ group_url('/item/' ~ it['id']) }}">{{ it['title']|richtitle }}</a></h3>
       {% endif %}
 
       <div class="meta">
@@ -121,7 +121,7 @@
       {% if it['one_liner'] %}
         <p class="entry__summary">{{ it['one_liner'] }}</p>
       {% elif it['abstract'] %}
-        <p class="note">中文摘要还没生成,先看英文原文。<a href="/stats#run">去生成</a></p>
+        <p class="note">中文摘要还没生成,先看英文原文。<a href="{{ group_url('/stats#run') }}">去生成</a></p>
         <p class="entry__abstract">{{ it['abstract'] }}</p>
       {% else %}
         <p class="note">这条还没有摘要,来源也没提供英文摘要。</p>

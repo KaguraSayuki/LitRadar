@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from markupsafe import Markup
+from starlette.datastructures import QueryParams, URL
 
 from .. import db, journal_rank, pipeline, rank, summarize
 from ..config import Config, load_config
@@ -323,21 +324,37 @@ def ui_groups(cfg: Config) -> list[Profile]:
         return []
 
 
-def active_group(request: Request, cfg: Config) -> Profile | None:
+def active_group(request: Request, cfg: Config, *, require_known: bool = False) -> Profile | None:
     """当前查看的订阅组:``?g=slug`` > cookie > 第一个启用的组。
 
-    没有组(配置为空且默认组也建不出来)时返回 None,调用方按"不分组"处理。
+    写请求优先使用页面显式传入的组;旧页面可由同源 Referer 恢复组上下文。
+    按组写入的调用方用 require_known 拒绝失效的显式组;编辑器仍可修复坏配置。
     """
+    explicit = request.query_params.get("g")
+    if explicit is None and request.method == "POST":
+        try:
+            ref = URL(request.headers.get("referer", ""))
+            if (ref.replace(path="", query="", fragment="")
+                    == request.url.replace(path="", query="", fragment="")):
+                explicit = QueryParams(ref.query).get("g")
+        except ValueError:
+            pass
+    wanted = (explicit or request.cookies.get(GROUP_COOKIE) or "").strip()
     groups = ui_groups(cfg)
-    if not groups:
-        return None
-    wanted = (request.query_params.get("g")
-              or request.cookies.get(GROUP_COOKIE) or "").strip()
     for g in groups:
         if g.slug == wanted:
             return g
+    if explicit is not None and require_known:
+        raise HTTPException(400, f"未知订阅组: {explicit}")
+    if not groups:
+        return None
     enabled = [g for g in groups if g.enabled]
     return (enabled or groups)[0]
+
+
+def _group_url(url: str, slug: str | None) -> str:
+    """把页面所属组固化在导航/表单 URL,保留原有筛选和锚点。"""
+    return str(URL(url).include_query_params(g=slug)) if slug else url
 
 
 @app.middleware("http")
@@ -353,9 +370,9 @@ async def remember_token(request: Request, call_next):
     if k and expected and hmac.compare_digest(k, expected):
         resp.set_cookie(COOKIE_NAME, k, httponly=True, samesite="lax",
                         max_age=60 * 60 * 24 * 180)
-    # 切组后把选择记下来:页面内的链接不带 ?g=,不记的话点进详情就跳回第一组
+    # Cookie 只记住默认视图;已有页面的导航和写请求各自携带渲染时的组。
     g = request.query_params.get("g")
-    if g:
+    if g and request.method == "GET" and resp.status_code < 400:
         resp.set_cookie(GROUP_COOKIE, g, httponly=True, samesite="lax",
                         max_age=60 * 60 * 24 * 180)
     return resp
@@ -370,6 +387,7 @@ def ctx(request: Request, **kw) -> dict:
         "groups": ui_groups(cfg),
         "group": group,
         "group_slug": group.slug if group else None,
+        "group_url": lambda url: _group_url(url, group.slug if group else None),
         # 让模板能判断"没评分"到底是没配 key,还是只是被规则过滤了
         "llm_ready": bool(cfg.llm.enabled and cfg.llm.api_key),
         "static_v": _static_version(),
@@ -517,7 +535,7 @@ def inbox(request: Request, state: str = "new", kind: str = "paper",
         starred_total=starred_total, ignored_total=ignored_total,
         page_no=page, pages=pages, per_page=PER_PAGE,
         qs=_page_params(state=state if state != "new" else None,
-                        min_score=min_score),
+                        min_score=min_score, kind=kind, g=gslug),
         page="inbox"))
 
 
@@ -558,7 +576,7 @@ def search(request: Request, q: str = "", page: int = 1):
         conn.close()
     return templates.TemplateResponse(request, "search.html", ctx(
         request, items=rows, q=q, page_no=page, pages=pages,
-        qs=_page_params(q=q), page="search"))
+        qs=_page_params(q=q, g=g.slug if g else None), page="search"))
 
 
 @app.get("/item/{item_id}", response_class=HTMLResponse)
@@ -697,29 +715,19 @@ def interests_save(request: Request, raw: str = Form(...)):
     except yaml.YAMLError as e:
         return fail(f"YAML 语法错误: {e}")
 
-    # 2) 结构校验 —— 光"语法合法"远远不够。
-    #    实测教训:提交一段合法但极小的 YAML(如 `search_queries:\n  - a`)会通过
-    #    语法检查、把整份配置清空(实测把 7.9KB 的配置写成 22 字节)。
-    #    所以必须确认它是 mapping 且含预期键。
-    if not isinstance(data, dict):
-        return fail("内容必须是一个 YAML 映射(顶层是 key: value),不能是列表或标量")
-    missing = {"direction", "search_queries", "keywords", "journals"} - set(data)
-    if missing:
-        return fail(f"缺少必要字段:{'、'.join(sorted(missing))}。"
-                    "若确实要清空某项,请保留该键并把值留空,不要提交不完整的文件。")
-
-    # 3) 字段与元素类型。YAML 语法合法并不代表 Profile 可加载;
-    #    先挡住嵌套映射/列表中的错误类型,避免写入后编辑页和流水线一起崩。
+    # 2) 统一校验器负责旧版必填字段与 groups 格式,以及字段/元素类型。
+    #    在这里再要求旧版顶层键会拒绝所有合法的多组配置。
     type_errors = validate_interests(data)
     if type_errors:
         return fail("偏好字段类型错误:" + "；".join(type_errors))
 
-    # 4) 写前备份 —— 覆盖配置不可逆,必须留后路
+    group = active_group(request, cfg)
+    # 3) 写前备份 —— 覆盖配置不可逆,必须留后路
     target = cfg.interests_file
     if target.exists():
         _backup_interests(target)
 
-    # 5) 原子写入:先写同目录的临时文件,再 rename 换掉正式文件。
+    # 4) 原子写入:先写同目录的临时文件,再 rename 换掉正式文件。
     #    直接 write_text 写到一半崩溃会留下半个文件 —— 整份配置就没了。
     tmp = target.with_name(target.name + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
@@ -728,15 +736,18 @@ def interests_save(request: Request, raw: str = Form(...)):
         os.fsync(f.fileno())
     os.replace(tmp, target)
     _cfg_cache.clear()               # 让下次请求重新加载
-    return RedirectResponse("/interests?saved=1", status_code=303)
+    return RedirectResponse(_group_url("/interests?saved=1", group.slug if group else None),
+                            status_code=303)
 
 
 # ── 旧路由兼容 ──────────────────────────────────────────────────────────────
 # /profile 是早期名字。留重定向,避免旧书签/缓存页面撞 404
 # (实测有人在旧页面点保存,拿到 404)。
 @app.get("/profile")
-def profile_redirect_get():
-    return RedirectResponse("/interests", status_code=301)
+def profile_redirect_get(request: Request):
+    group = active_group(request, get_cfg())
+    return RedirectResponse(_group_url("/interests", group.slug if group else None),
+                            status_code=301)
 
 
 @app.post("/profile")
@@ -750,7 +761,9 @@ async def profile_redirect_post(request: Request):
     raw = (parse_qs(body).get("raw") or [""])[0]
     if raw:
         return interests_save(request, raw=raw)
-    return RedirectResponse("/interests", status_code=303)
+    group = active_group(request, get_cfg())
+    return RedirectResponse(_group_url("/interests", group.slug if group else None),
+                            status_code=303)
 
 
 # ------------------------------------------------------------------ actions
@@ -762,7 +775,7 @@ def item_action(request: Request, item_id: int, action: str = Form(...)):
     # "它与这个方向的关系",落到默认组的话在 B 组点一下会改掉 A 组的视图。
     # 刚写进配置、还没被流水线 sync 的组不会出问题:它名下的 item_group 是
     # 空的,收件箱里就没有条目,也就没有按钮可点。
-    g = active_group(request, get_cfg())
+    g = active_group(request, get_cfg(), require_known=True)
     gslug = g.slug if g else None
     conn = _conn()
     try:
@@ -794,14 +807,14 @@ def item_action(request: Request, item_id: int, action: str = Form(...)):
 def admin_run(request: Request, stage: str, days: int = 0):
     # 这里是唯一会真的花钱的入口(DeepSeek 额度),闸门一个都不能少:
     #   口令 → 同源 → 暴露检查 →(花钱阶段)密码 →(花钱阶段)冷却 + 每日上限。
-    # 前端 fetch 是同源的,cookie 会自动带上,static/app.js 无需改动。
+    # 前端显式传入当前页面的 ?g=,口令 Cookie 仍随同源 fetch 自动发送。
     require_token(request)
     require_same_origin(request)
     cfg = get_cfg()
     require_exposure_safe(cfg)
     # 当前组(切换器/`?g=` 决定的那个)。记账与执行要用同一个组,否则"在 A 组
     # 点了一下"会算到所有组头上,上限自然就不准了。
-    prof = active_group(request, cfg)
+    prof = active_group(request, cfg, require_known=True)
     gslug = prof.slug if prof else None
     if stage in cfg.admin.guarded_stages:
         require_admin_password(request, cfg)

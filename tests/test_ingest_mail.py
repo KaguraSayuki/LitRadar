@@ -1,5 +1,6 @@
 """邮件入库事务与历史 raw_email 重放。"""
 from pathlib import Path
+import sqlite3
 from unittest.mock import Mock
 
 import pytest
@@ -83,3 +84,76 @@ def test_迁移前未完成raw邮件可离线重放(tmp_path, monkeypatch):
     # 完成标记已写入后，下一轮不再重放同一 raw。
     out = pipeline.ingest_mail(cfg, verbose=False)
     assert out["messages"] == out["records"] == 0
+
+
+@pytest.mark.parametrize("scenario", ["empty", "unrelated", "success", "write-failure", "replay-failure"])
+def test_收信与确认邮件时不持有数据库写锁(tmp_path, monkeypatch, scenario):
+    cfg = _cfg(tmp_path)
+    cfg.interests_data = {"groups": [{"slug": "org"}, {"slug": "mat"}]}
+    conn = db.Database(cfg.db_file).connect()
+    iid, _ = pipeline._store(conn, {"kind": "paper", "title": "Existing paper", "source": "test"})
+    if scenario == "replay-failure":
+        conn.execute("INSERT INTO raw_email(message_id, raw) VALUES (?,?)", ("old", RAW))
+    conn.commit()
+    conn.close()
+    probes = []
+
+    def browser_write():
+        other = sqlite3.connect(cfg.db_file, timeout=0)
+        try:
+            # 独立连接必须已能读到组同步,且立即写入反馈,不等待 IMAP 超时。
+            assert other.execute("SELECT COUNT(*) FROM interest_group WHERE slug IN ('org','mat')").fetchone()[0] == 2
+            other.execute("UPDATE item_state SET starred=1 WHERE item_id=?", (iid,))
+            other.commit()
+            probes.append("write")
+        finally:
+            other.close()
+
+    def messages(_):
+        browser_write()  # connect/search
+        if scenario not in ("empty", "replay-failure"):
+            yield mail.MailMessage(
+                raw=b"unrelated" if scenario == "unrelated" else RAW,
+                source_ref="test:mail", origin="test", ack=browser_write)
+            browser_write()  # 下一封 FETCH/断连之前
+
+    monkeypatch.setattr(mail, "iter_messages", messages)
+    if scenario in ("write-failure", "replay-failure"):
+        monkeypatch.setattr(pipeline, "_store", Mock(side_effect=RuntimeError("failed record")))
+    out = pipeline.ingest_mail(cfg, verbose=False)
+    assert out["errors"] == int(scenario in ("write-failure", "replay-failure"))
+    assert len(probes) == (3 if scenario == "success" else
+                           1 if scenario in ("empty", "replay-failure") else 2)
+
+
+@pytest.mark.parametrize("mode", ["imap", "folder", "maildir"])
+def test_XMOL关闭时邮件采集入口跳过且不触碰来源或数据库(tmp_path, monkeypatch, mode):
+    cfg = _cfg(tmp_path)
+    cfg.sources.xmol_enabled = False
+    cfg.mail.mode = mode
+    # IMAP 配置无效也不能拦住后续阶段;其它模式不能意外读取/归档文件。
+    monkeypatch.setattr(mail, "iter_messages", Mock(side_effect=AssertionError("disabled source")))
+    assert pipeline.ingest_mail(cfg, verbose=False) == {"skipped": "sources.xmol_enabled=false"}
+    assert not cfg.db_file.exists()
+
+
+def test_完整流水线关闭XMOL后继续其余阶段(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    cfg.sources.xmol_enabled = False
+    cfg.mail.mode = "imap"
+    monkeypatch.setattr(pipeline, "ingest_mail", Mock(side_effect=AssertionError("disabled mail")))
+    calls = []
+
+    def stage(name):
+        def run(*a, **kw):
+            calls.append(name)
+            return {"errors": 0}
+        return run
+
+    monkeypatch.setattr(pipeline, "ingest_keyword_search", stage("search"))
+    monkeypatch.setattr(pipeline.enrich, "run", stage("enrich"))
+    monkeypatch.setattr(pipeline.rank, "run", stage("rank"))
+    monkeypatch.setattr(pipeline.summarize, "run", stage("summarize"))
+    out = pipeline.run_all(cfg, verbose=False)
+    assert out["ingest_mail"] == {"skipped": "sources.xmol_enabled=false"}
+    assert calls == ["search", "enrich", "rank", "summarize"]

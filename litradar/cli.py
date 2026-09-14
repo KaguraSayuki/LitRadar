@@ -49,12 +49,24 @@ def _pick_group(cfg, slug):
     raise ValueError(f"未知订阅组 {slug!r};当前有:{known}")
 
 
+def _result_exit_code(*results: dict) -> int:
+    """分组允许失败后继续,但已报告的错误仍要让脚本/systemd 判定失败。
+
+    调用方传各阶段汇总;不递归查询词/组名映射(其中也可能有名为 errors 的键)。
+    未配置可选来源等 skipped 结果仍算正常完成。
+    """
+    return int(any(result.get("errors", 0) for result in results))
+
+
 def cmd_ingest(cfg, args):
+    out = {}
     if args.what in ("mail", "all"):
-        print(pipeline.ingest_mail(cfg))
+        out["mail"] = pipeline.ingest_mail(cfg)
+        print(out["mail"])
     if args.what in ("search", "all"):
-        print(pipeline.ingest_keyword_search(cfg, group=_pick_group(cfg, args.group)))
-    return 0
+        out["search"] = pipeline.ingest_keyword_search(cfg, group=_pick_group(cfg, args.group))
+        print(out["search"])
+    return _result_exit_code(*out.values())
 
 
 def cmd_enrich(cfg, args):
@@ -63,23 +75,22 @@ def cmd_enrich(cfg, args):
 
 
 def cmd_rank(cfg, args):
-    print(json.dumps(rank.run(cfg, days=args.days, group=_pick_group(cfg, args.group)),
-                     ensure_ascii=False, indent=2))
-    return 0
+    out = rank.run(cfg, days=args.days, group=_pick_group(cfg, args.group))
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+    return _result_exit_code(out)
 
 
 def cmd_summarize(cfg, args):
-    print(json.dumps(
-        summarize.run(cfg, days=args.days, limit=args.limit, force=args.force,
-                      group=_pick_group(cfg, args.group)),
-        ensure_ascii=False, indent=2))
-    return 0
+    out = summarize.run(cfg, days=args.days, limit=args.limit, force=args.force,
+                        group=_pick_group(cfg, args.group))
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+    return _result_exit_code(out)
 
 
 def cmd_run(cfg, args):
     out = pipeline.run_all(cfg, days=args.days, group=_pick_group(cfg, args.group))
     print(json.dumps(out, ensure_ascii=False, indent=2))
-    return 0
+    return _result_exit_code(*out.values())
 
 
 
@@ -126,8 +137,7 @@ def cmd_mail_test(cfg, args):
 
     try:
         # 带超时:服务器半挂时不要让体检命令一直吊在这里
-        conn = imaplib.IMAP4_SSL(m.imap_host, m.imap_port,
-                                 timeout=mail.IMAP_TIMEOUT)
+        conn = mail.open_imap(m)
     except Exception as e:  # noqa: BLE001
         print(f"  ❌ 连接失败: {type(e).__name__}: {e}")
         return 1
@@ -184,11 +194,7 @@ def cmd_mail_test(cfg, args):
             print('\n  ✅ 一切正常。把 config.yaml 的 mail.mode 设为 "imap" 后跑 ingest 即可。')
         return 0
     finally:
-        try:
-            conn.close()
-        except Exception:  # noqa: BLE001
-            pass
-        conn.logout()
+        mail._disconnect(conn)
 
 
 # ------------------------------------------------------------------ 体检

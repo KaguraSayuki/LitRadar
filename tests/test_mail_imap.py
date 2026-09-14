@@ -2,14 +2,18 @@
 from __future__ import annotations
 
 import sys
+import imaplib
+import ssl
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from litradar.config import MailConfig  # noqa: E402
+from litradar import cli  # noqa: E402
+from litradar.config import Config, MailConfig  # noqa: E402
 from litradar.sources import mail  # noqa: E402
 
 
@@ -19,8 +23,9 @@ class FakeIMAP:
 
     created: list["FakeIMAP"] = []
 
-    def __init__(self, host, port, timeout=None):
+    def __init__(self, host, port, timeout=None, ssl_context=None):
         self.host, self.port, self.timeout = host, port, timeout
+        self.ssl_context = ssl_context
         self.calls: list[tuple] = []
         self.logged_out = False
         FakeIMAP.created.append(self)
@@ -128,6 +133,100 @@ def test_缺密码时报错(fake_imap, monkeypatch):
     monkeypatch.delenv("IMAP_PASSWORD", raising=False)
     with pytest.raises(ValueError):
         list(mail.iter_imap(_cfg()))
+
+
+@pytest.mark.parametrize("entry", ["ingest", "ack", "mail-test"])
+def test_所有IMAP入口验证证书和主机名(fake_imap, monkeypatch, entry):
+    # 上下文来自真实 ssl 库,FakeIMAP 只替换网络和协议 I/O。
+    if entry == "ingest":
+        _drain(_cfg())
+    elif entry == "ack":
+        mail.mark_seen(_cfg(imap_mark_seen=True), mail.MailMessage(b"", "imap:1", "1"))
+    else:
+        monkeypatch.setattr(FakeIMAP, "search", lambda *a: ("OK", [b""]), raising=False)
+        cfg = Config()
+        cfg.mail = _cfg()
+        assert cli.cmd_mail_test(cfg, SimpleNamespace()) == 1  # 空邮箱诊断失败
+    conn = fake_imap.created[0]
+    assert conn.ssl_context.verify_mode == ssl.CERT_REQUIRED
+    assert conn.ssl_context.check_hostname is True
+    assert conn.timeout == mail.IMAP_TIMEOUT
+    assert ("close",) not in conn.calls
+    assert conn.logged_out
+    if entry == "mail-test":
+        assert ("select", "INBOX", True) in conn.calls
+
+
+@pytest.mark.parametrize("entry", ["ingest", "mail-test"])
+@pytest.mark.parametrize("reason", ["untrusted issuer", "hostname mismatch"])
+def test_证书验证失败时不发送登录凭据(monkeypatch, entry, reason):
+    # 保留 IMAP4_SSL 的真实构造/上下文,仅在建立 socket 的边界注入握手失败。
+    # 若上下文没有验证,假握手会成功,接着 LOGIN 将使本用例失败。
+    def handshake(conn, *a, **kw):
+        if (conn.ssl_context.verify_mode == ssl.CERT_REQUIRED
+                and conn.ssl_context.check_hostname):
+            raise ssl.SSLCertVerificationError(reason)
+
+    def login(*a, **kw):
+        pytest.fail("证书不可信时不能发送 LOGIN")
+
+    monkeypatch.setenv("IMAP_PASSWORD", "test-only")
+    monkeypatch.setattr(imaplib.IMAP4, "__init__", handshake)
+    monkeypatch.setattr(imaplib.IMAP4, "login", login)
+    if entry == "ingest":
+        with pytest.raises(ssl.SSLCertVerificationError, match=reason):
+            list(mail.iter_imap(_cfg()))
+    else:
+        cfg = Config()
+        cfg.mail = _cfg()
+        assert cli.cmd_mail_test(cfg, SimpleNamespace()) == 1
+
+
+@pytest.mark.parametrize("mark_seen", [False, True])
+@pytest.mark.parametrize("finish", ["normal", "empty", "fetch-error", "early-close"])
+def test_IMAP退出路径不清除其他客户端标删除的邮件(fake_imap, monkeypatch, mark_seen, finish):
+    original_uid = FakeIMAP.uid
+
+    def uid(conn, command, *args):
+        if command == "SEARCH" and finish == "empty":
+            return "OK", [b""]
+        if command == "FETCH" and finish == "fetch-error":
+            raise imaplib.IMAP4.error("test fetch error")
+        return original_uid(conn, command, *args)
+
+    monkeypatch.setattr(FakeIMAP, "uid", uid)
+    cfg = _cfg(imap_mark_seen=mark_seen)
+    if finish == "early-close":
+        messages = mail.iter_imap(cfg)
+        next(messages)
+        messages.close()
+    elif finish == "fetch-error":
+        with pytest.raises(imaplib.IMAP4.error):
+            _drain(cfg)
+    else:
+        _drain(cfg)
+    conn = fake_imap.created[0]
+    assert ("select", "INBOX", not mark_seen) in conn.calls
+    assert ("close",) not in conn.calls
+    assert conn.logged_out
+
+
+def test_断连不发送标准库的CLOSE或EXPUNGE命令():
+    class OfflineIMAP(imaplib.IMAP4):
+        def __init__(self):
+            self.state = "SELECTED"
+            self.commands = []
+
+        def _simple_command(self, command, *args):
+            self.commands.append(command)
+            return "OK", []
+
+        def logout(self):
+            self.commands.append("LOGOUT")
+
+    conn = OfflineIMAP()
+    mail._disconnect(conn)
+    assert conn.commands == ["LOGOUT"]
 
 
 # ---------------------------------------------------------------- folder

@@ -38,6 +38,13 @@ function litradarToast(text, opts) {
 }
 
 /* ---------------------------------------------------------------- 反馈按钮 */
+function _groupUrl(path) {
+  var url = new URL(path, window.location.href);
+  var group = document.body.dataset.group;
+  if (group) url.searchParams.set('g', group);
+  return url.pathname + url.search + url.hash;
+}
+
 function _swapActs(box, html) {
   var tpl = document.createElement('template');
   tpl.innerHTML = html.trim();
@@ -49,7 +56,7 @@ function _swapActs(box, html) {
 async function _postAction(itemId, action) {
   var fd = new FormData();
   fd.append('action', action);
-  var r = await fetch('/item/' + itemId + '/action', { method: 'POST', body: fd });
+  var r = await fetch(_groupUrl('/item/' + itemId + '/action'), { method: 'POST', body: fd });
   if (!r.ok) throw new Error('HTTP ' + r.status);
   return r.text();
 }
@@ -111,7 +118,8 @@ async function litradarRun(stage, btn) {
   try {
     // 不带 days —— 服务端统一取 config 里的 app.pipeline_window_days。
     // 写死 30 天会让抓取(180 天)回来的条目永远进不了排序器。
-    var r = await fetch('/admin/run/' + stage, { method: 'POST' });
+    var url = _groupUrl('/admin/run/' + stage);
+    var r = await fetch(url, { method: 'POST' });
     // 花钱阶段(rank / summarize / all)另要一次密码。服务端用这个头区分
     // "该弹密码框"和"URL 里的 token 不对" —— 两者都是 401。
     // 密码只活在这一次调用里,不写 localStorage / cookie,用完即忘。
@@ -119,7 +127,7 @@ async function litradarRun(stage, btn) {
       var pw = window.prompt('「' + stage + '」会消耗 DeepSeek 额度,请输入管理员密码:');
       if (pw) {
         btn.textContent = '验证中…';
-        r = await fetch('/admin/run/' + stage, {
+        r = await fetch(url, {
           method: 'POST', headers: { 'X-Admin-Password': pw },
         });
       }
