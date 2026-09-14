@@ -4,11 +4,12 @@
 {% macro selected_fields(keys) %}{% for f in fields if f.key in keys %}{{ field(f,values,errors) }}{% endfor %}{% endmacro %}
 {% block settings_body %}
 {% if section == 'services' %}
+{% include 'settings/model.html' %}
 <section class="settings-panel">
-  {{ section_head('接入服务', '按需连接即可。凭据分别保存，页面不会显示已保存的密钥。', 'plug') }}
-  {% set service_info = {'s2':('S2','文献检索与摘要补全'),'llm':('AI','文献精排与中文摘要'),'openalex':('OA','开放学术文献检索'),'journal':('ES','期刊等级与影响因子'),'mail':('@','订阅邮件的只读连接检查')} %}
+  {{ section_head('文献与邮件服务', '按需连接即可。凭据分别保存，页面不会显示已保存的密钥。', 'plug') }}
+  {% set service_info = {'s2':('S2','文献检索与摘要补全'),'openalex':('OA','开放学术文献检索'),'journal':('ES','期刊等级与影响因子'),'mail':('@','订阅邮件的只读连接检查')} %}
   <div class="services-list">
-  {% for service,info in service_states.items() %}
+  {% for service,info in service_states.items() if service != 'llm' %}
     <details class="service-row">
       <summary><span class="service-mark" aria-hidden="true">{{ service_info[service][0] }}</span><span class="service-row__title"><strong>{{ info.label }}</strong><small>{{ service_info[service][1] }}</small></span><span class="settings-badge {{ 'settings-badge--active' if info.configured }}">{{ '已设置' if info.configured else '未设置' }}</span>{{ icon('chevron-right') }}</summary>
       <div class="service-row__body">
@@ -23,7 +24,7 @@
             {% if info.managed %}<button class="btn btn--quiet" name="action" value="clear" data-confirm="清除这个服务的凭据？下次调用将无法使用此服务。">清除</button>{% endif %}
           </div>
         </form>
-        <p class="hint">测试使用已保存的凭据。{{ '会发送简短模型消息，可能产生少量费用。' if service == 'llm' else ('只读检查，不标记已读、不移动或删除邮件。' if service == 'mail' else '只测试连接，不采集文献。') }}</p>
+        <p class="hint">测试使用已保存的凭据。{{ '只读检查，不标记已读、不移动或删除邮件。' if service == 'mail' else '只测试连接，不采集文献。' }}</p>
         <p id="check-{{ service }}" class="settings-result" role="status"></p>
       </div>
     </details>
@@ -81,7 +82,8 @@
   </section>
   <section class="settings-panel settings-panel--disclosure">
     <details class="settings-disclosure" {% if errors %}open{% endif %}>
-      <summary>模型连接与排序参数</summary>
+      <summary>精排批次与排序权重</summary>
+      <p class="hint">模型地址、密钥与兼容选项在<a href="/settings/services#model-connection">默认模型连接</a>中设置。</p>
       <div class="form-grid">{% for f in fields if f.advanced and f.key.startswith('llm.') %}{{ field(f,values,errors) }}{% endfor %}</div>
       <hr class="settings-divider"><p class="settings-section-label">三类排序信号的权重</p>
       <div class="form-grid form-grid--three">{% for f in fields if f.key.startswith('ranking.weights.') %}{{ field(f,values,errors) }}{% endfor %}</div>

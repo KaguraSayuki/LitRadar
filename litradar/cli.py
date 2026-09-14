@@ -256,7 +256,7 @@ def cmd_check(cfg, args):
     from pathlib import Path
 
     from .config import ROOT
-    from .llm import DeepSeek, LLMError
+    from .llm import LLMClient, LLMError
     from .rank import load_interests
 
     problems: list[str] = []
@@ -288,8 +288,8 @@ def cmd_check(cfg, args):
     else:
         line(OK, ".env 未使用", "可通过网页接入服务，不需要创建此兼容文件")
 
-    # DeepSeek
-    llm = DeepSeek(cfg.llm)
+    # Default model connection
+    llm = LLMClient(cfg.llm)
     if cfg.llm.api_key:
         line(OK, f"{cfg.llm.api_key_env} 已设置")
     else:
@@ -335,7 +335,7 @@ def cmd_check(cfg, args):
                  f"登录会话可运行 {guarded}；仅用接口口令时另需管理员密码")
         else:
             line(WARN, f"{cfg.app.admin_password_env} 未设置",
-                 f"只要拿到接口口令就能运行 {guarded} 烧 DeepSeek 额度;"
+                 f"仅凭接口口令即可运行 {guarded} 并产生模型调用费用；"
                  " 用 litradar admin-password 设置")
         limits = []
         if cfg.admin.cooldown_seconds:
@@ -475,23 +475,19 @@ def cmd_check(cfg, args):
             line(BAD, "S2 测试失败", "请检查网络和服务状态")
             problems.append("S2 测试失败")
 
-    print("\n【7】DeepSeek 连通性")
+    print("\n【7】模型兼容性")
     if not llm.available:
         line(WARN, "跳过", "未配置 API key")
     else:
         try:
-            got = llm.json(
-                "你只输出 JSON。",
-                '请只输出 {"ok":true,"msg":"pong"}',
-                max_tokens=64,
-            )
-            line(OK, "DeepSeek 调用成功", f"模型 {cfg.llm.model}")
+            message = llm.check_compatibility()
+            line(OK, "模型兼容性", message)
         except LLMError as e:
-            line(BAD, "DeepSeek 调用失败", "请检查模型、服务地址、密钥和可用额度")
-            problems.append("DeepSeek 调用失败")
+            line(BAD, "模型调用失败", str(e))
+            problems.append("模型调用失败")
         except Exception as e:  # noqa: BLE001
-            line(BAD, "DeepSeek 调用异常", "请检查模型服务配置")
-            problems.append("DeepSeek 调用异常")
+            line(BAD, "模型调用异常", "请检查模型服务配置")
+            problems.append("模型调用异常")
 
     print()
     if problems:

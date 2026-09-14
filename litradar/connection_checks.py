@@ -60,14 +60,15 @@ def check(cfg, service: str) -> str:
                     except Exception:
                         pass
         if service == "llm":
-            from .llm import DeepSeek
+            from .llm import LLMClient, LLMError
             if not cfg.llm.api_key:
                 raise SettingsError("请先保存模型服务密钥。")
             try:
                 test = copy.deepcopy(cfg.llm)
                 test.timeout = min(test.timeout, 25)
-                DeepSeek(test).json("Reply with JSON only.", 'Return {"ok":true}', max_tokens=16)
-                return "模型调用成功。本次发送了一条简短测试消息。"
+                return LLMClient(test).check_compatibility() + "本次未保存文献。"
+            except LLMError as error:
+                raise SettingsError(str(error)) from None
             except Exception:
                 raise SettingsError("模型调用失败，请检查密钥、模型名称、服务地址及可用额度。") from None
         names = credentials.services(cfg)

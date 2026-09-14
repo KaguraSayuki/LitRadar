@@ -44,11 +44,15 @@ schedule:
 
 # LLM 精排与摘要。各组的 llm_rank 只控制精排，摘要使用全局开关。
 llm:
-  provider: deepseek
+  # 兼容 OpenAI Chat Completions；默认提供 DeepSeek 预设，也可在网页填写其他服务。
+  provider: openai-compatible
   base_url: "https://api.deepseek.com"
   # 调用的模型名称，费用及可用性以服务提供方为准。
   model: "deepseek-chat"
-  api_key_env: "DEEPSEEK_API_KEY"
+  api_key_env: "DEEPSEEK_API_KEY"  # 保留旧变量名；自定义服务同样使用此凭据槽位。
+  json_mode: auto  # auto / json_object / prompt
+  token_limit_parameter: auto  # auto / max_tokens / max_completion_tokens
+  # null 表示不发送 temperature，使用模型默认值。
   temperature: 0.2
   # 每批参与 LLM 精排的条目数。
   rerank_batch_size: 20

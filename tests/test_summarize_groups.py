@@ -66,7 +66,7 @@ class FakeLLM:
 @pytest.fixture(autouse=True)
 def _reset_calls(monkeypatch):
     FakeLLM.calls = []
-    monkeypatch.setattr(summarize, "DeepSeek", FakeLLM)
+    monkeypatch.setattr(summarize, "LLMClient", FakeLLM)
 
 
 def _relevances(cfg) -> dict[tuple[str, str], str]:

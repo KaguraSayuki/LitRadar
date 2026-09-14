@@ -28,8 +28,9 @@
       <textarea id="{{ f.key }}" name="{{ f.key }}" rows="3" {% if f.hint %}aria-describedby="{{ f.key }}-help"{% endif %} {% if errors.get(f.key) %}aria-invalid="true"{% endif %}>{{ values.get(f.key,'') }}</textarea>
     {% else %}
       <input id="{{ f.key }}" name="{{ f.key }}" value="{{ values.get(f.key,'') }}"
-        type="{{ 'number' if f.kind in ('int','float') else (f.kind if f.kind in ('email','url','time') else 'text') }}"
-        {% if f.kind in ('int','float') %}min="{{ f.low }}" max="{{ f.high }}" step="{{ 'any' if f.kind == 'float' else '1' }}" required{% endif %}
+        type="{{ 'number' if f.kind in ('int','float','optional_float') else (f.kind if f.kind in ('email','url','time') else 'text') }}"
+        {% if f.kind in ('int','float','optional_float') %}min="{{ f.low }}" max="{{ f.high }}" step="{{ '1' if f.kind == 'int' else 'any' }}" {% if f.kind != 'optional_float' %}required{% endif %}{% endif %}
+        {% if f.key in ('llm.base_url','llm.model') %}required{% endif %}
         {% if f.hint %}aria-describedby="{{ f.key }}-help"{% endif %}
         {% if errors.get(f.key) %}aria-invalid="true"{% endif %}>
     {% endif %}

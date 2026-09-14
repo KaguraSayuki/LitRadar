@@ -1,5 +1,57 @@
 /* Progressive settings forms retain their inputs after validation and auth errors. */
 (() => {
+  const modelForm = document.getElementById('model-settings');
+  const savedModel = modelForm ? JSON.stringify([...new FormData(modelForm)]) : null;
+  const modelAddress = document.getElementById('llm.base_url');
+  const modelName = document.getElementById('llm.model');
+  const modelChoices = document.getElementById('available-models');
+  const modelListField = document.getElementById('model-list-field');
+  const modelListOutput = document.getElementById('model-list-result');
+  let modelListRevision = 0;
+  function clearModels() {
+    modelListRevision += 1;
+    modelChoices.replaceChildren(new Option('请选择模型', ''));
+    modelChoices.disabled = true;
+    modelListField.hidden = true;
+    modelListOutput.textContent = '';
+  }
+  modelAddress?.addEventListener('input', clearModels);
+  document.getElementById('credential-llm')?.addEventListener('input', clearModels);
+  modelChoices?.addEventListener('change', () => {
+    if (modelChoices.value) modelName.value = modelChoices.value;
+  });
+  document.getElementById('fetch-models')?.addEventListener('click', async event => {
+    if (!modelAddress.reportValidity()) return;
+    if (document.getElementById('credential-llm')?.value.trim()) {
+      modelListOutput.textContent = '请先保存新密钥，再获取模型列表。';
+      return;
+    }
+    const button = event.currentTarget;
+    clearModels();
+    const revision = modelListRevision;
+    button.disabled = true;
+    modelListOutput.textContent = '正在获取模型…';
+    const body = new FormData(); body.set('base_url', modelAddress.value);
+    try {
+      const result = await action('/settings/models', body);
+      if (revision !== modelListRevision) return;
+      result.models.forEach(name => modelChoices.append(new Option(name, name)));
+      modelChoices.value = result.models.includes(modelName.value) ? modelName.value : '';
+      modelChoices.disabled = false;
+      modelListField.hidden = false;
+      modelListOutput.textContent = result.message;
+    } catch (error) {
+      if (revision === modelListRevision) modelListOutput.textContent = error.message;
+    } finally { button.disabled = false; }
+  });
+  document.getElementById('model-preset-deepseek')?.addEventListener('click', () => {
+    clearModels();
+    document.getElementById('llm.base_url').value = 'https://api.deepseek.com';
+    document.getElementById('llm.model').value = 'deepseek-chat';
+    document.getElementById('llm.json_mode').value = 'auto';
+    document.getElementById('llm.token_limit_parameter').value = 'auto';
+    document.getElementById('llm.temperature').value = '0.2';
+  });
   // Reveal the relevant fields without clearing values in collapsed sections.
   const mailMode = document.getElementById('mail.mode');
   mailMode?.addEventListener('change', () => {
@@ -44,6 +96,12 @@
   }));
   document.querySelectorAll('[data-check-service]').forEach(button => button.addEventListener('click', async () => {
     const output = document.getElementById('check-' + button.dataset.checkService);
+    if (button.dataset.checkService === 'llm' && modelForm &&
+        (modelForm.dataset.unsaved === 'true' || JSON.stringify([...new FormData(modelForm)]) !== savedModel ||
+         document.getElementById('credential-llm')?.value.trim())) {
+      output.textContent = '连接设置或密钥尚未保存，请先保存后再测试。';
+      return;
+    }
     button.disabled = true; output.textContent = '正在测试…';
     try {output.textContent = (await action('/settings/check/' + button.dataset.checkService)).message;}
     catch (error) {output.textContent = error.message;}
@@ -105,7 +163,18 @@
       if (value) return submit(form, submitter, value);
       return;
     }
-    if (response.redirected) { location.assign(response.url); return; }
+    if (response.redirected) {
+      const destination = new URL(response.url);
+      if (form.id === 'model-settings' || form.id === 'model-credential') destination.hash = 'model-connection';
+      const current = new URL(location.href);
+      if (destination.origin === current.origin && destination.pathname === current.pathname &&
+          destination.search === current.search) {
+        // A fragment-only navigation would retain the old revision and dirty-form baseline.
+        location.hash = destination.hash;
+        location.reload();
+      } else location.assign(destination.href);
+      return;
+    }
     const type = response.headers.get('content-type') || '';
     if (type.includes('text/html')) {
       const html = await response.text();

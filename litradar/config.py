@@ -152,11 +152,13 @@ class SourceConfig:
 
 @dataclass
 class LLMConfig:
-    provider: str = "deepseek"
+    provider: str = "openai-compatible"  # Legacy provider names remain readable.
     base_url: str = "https://api.deepseek.com"
     model: str = "deepseek-chat"
     api_key_env: str = "DEEPSEEK_API_KEY"
-    temperature: float = 0.2
+    temperature: float | None = 0.2
+    json_mode: str = "auto"              # auto | json_object | prompt
+    token_limit_parameter: str = "auto"  # auto | max_tokens | max_completion_tokens
     rerank_batch_size: int = 20
     # 进 LLM 精排的条数上限。**0 = 不截断**(默认)。
     # 候选池只有 ~200 条,省这点调用微不足道;而硬截断会让 BM25 有"一票否决权",

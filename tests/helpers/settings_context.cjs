@@ -11,6 +11,7 @@ const vm = require('node:vm');
     addEventListener: (type, handler) => {if(type === 'submit') submit = handler;},
   };
   const context = {
+    URL,
     FormData: class extends Map {constructor(){super([['version','v1']]);}},
     document: {getElementById: () => null, querySelector: () => null,
       querySelectorAll: selector => selector === '[data-settings-form]' ? [form] : [],
@@ -25,5 +26,14 @@ const vm = require('node:vm');
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../../litradar/web/static/settings.js'),'utf8'),context);
   await submit({preventDefault(){},submitter:{name:'action',value:'copy',dataset:{}}});
-  process.stdout.write(JSON.stringify({requests,destination:context.destination,busy:form.dataset.busy || ''}));
+  const result = {requests,destination:context.destination,busy:form.dataset.busy || ''};
+  form.id = 'model-settings';
+  context.location.href = 'http://test/settings/services?saved=1';
+  context.location.reload = () => {result.modelReloaded = true;};
+  context.fetch = async () => ({status:200,redirected:true,url:context.location.href});
+  await submit({preventDefault(){},submitter:{dataset:{}}});
+  if (!result.modelReloaded || context.location.hash !== '#model-connection') {
+    throw Error('Saving again must reload the model form and its revision');
+  }
+  process.stdout.write(JSON.stringify(result));
 })().catch(error => {console.error(error);process.exitCode=1;});
