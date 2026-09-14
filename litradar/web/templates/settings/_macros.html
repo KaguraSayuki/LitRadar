@@ -1,0 +1,50 @@
+{% from '_macros.html' import icon %}
+
+{% macro section_head(title, description='', symbol='') %}
+<header class="settings-panel__head">
+  <div><h2>{{ title }}</h2>{% if description %}<p>{{ description }}</p>{% endif %}</div>
+  {% if symbol %}{{ icon(symbol) }}{% endif %}
+</header>
+{% endmacro %}
+
+{% macro toggle(name, label, checked, hint='') %}
+<label class="switch-row">
+  <span class="switch-row__text"><strong>{{ label }}</strong>{% if hint %}<small>{{ hint }}</small>{% endif %}</span>
+  <input type="checkbox" name="{{ name }}" {% if checked %}checked{% endif %}>
+</label>
+{% endmacro %}
+
+{% macro field(f, values, errors) %}
+<div class="settings-field">
+  {% if f.kind == 'bool' %}
+    {{ toggle(f.key, f.label, values.get(f.key), f.hint) }}
+  {% else %}
+    <label for="{{ f.key }}">{{ f.label }}</label>
+    {% if f.kind == 'select' %}
+      <select id="{{ f.key }}" name="{{ f.key }}" {% if f.hint %}aria-describedby="{{ f.key }}-help"{% endif %} {% if errors.get(f.key) %}aria-invalid="true"{% endif %}>
+        {% for value,label in f.choices %}<option value="{{ value }}" {% if values.get(f.key) == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+      </select>
+    {% elif f.kind == 'lines' %}
+      <textarea id="{{ f.key }}" name="{{ f.key }}" rows="3" {% if f.hint %}aria-describedby="{{ f.key }}-help"{% endif %} {% if errors.get(f.key) %}aria-invalid="true"{% endif %}>{{ values.get(f.key,'') }}</textarea>
+    {% else %}
+      <input id="{{ f.key }}" name="{{ f.key }}" value="{{ values.get(f.key,'') }}"
+        type="{{ 'number' if f.kind in ('int','float') else (f.kind if f.kind in ('email','url','time') else 'text') }}"
+        {% if f.kind in ('int','float') %}min="{{ f.low }}" max="{{ f.high }}" step="{{ 'any' if f.kind == 'float' else '1' }}" required{% endif %}
+        {% if f.hint %}aria-describedby="{{ f.key }}-help"{% endif %}
+        {% if errors.get(f.key) %}aria-invalid="true"{% endif %}>
+    {% endif %}
+    {% if f.hint %}<p class="hint" id="{{ f.key }}-help">{{ f.hint }}</p>{% endif %}
+  {% endif %}
+  {% if errors.get(f.key) %}<p class="field-error">{{ errors[f.key] }}</p>{% endif %}
+</div>
+{% endmacro %}
+
+{% macro savebar(label='保存设置', hint='保存后，下次更新使用新设置。', back_url='') %}
+<div class="settings-savebar">
+  <p>{{ hint }}</p>
+  <div class="settings-actions">
+    {% if back_url %}<a class="btn btn--quiet" href="{{ back_url }}">取消</a>{% endif %}
+    <button class="btn btn--primary" type="submit">{{ label }}</button>
+  </div>
+</div>
+{% endmacro %}

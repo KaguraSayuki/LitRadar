@@ -69,9 +69,9 @@
   </div>
 {% else %}
   <div class="empty">
-    这里还没有条目。<br>
-    把 X-MOL 订阅邮件导出为 .eml 放进 <code>data/inbox/</code>,然后运行<br>
-    <code>.venv/bin/python -m litradar.cli run</code>
+    这里还没有文献。<br>
+    先<a href="{{ group_url('/settings/groups') }}">设置研究方向</a>，再运行一次更新。<br>
+    已有订阅邮件也可以从<a href="{{ group_url('/settings/services') }}">数据与邮箱</a>页面导入。
   </div>
 {% endif %}
 {% endblock %}

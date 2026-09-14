@@ -1,16 +1,23 @@
-<h2>期刊标签</h2><p class="hint">勾选要显示的信息，可以为标签设置短名称。旧的特殊转换规则会继续保留。</p>
 <input type="hidden" name="journal_fields_present" value="1">
+<div class="journal-options__caption"><span>显示的期刊信息</span><span>右侧填写短名称，留空只显示值</span></div>
+<div class="journal-options">
 {% for key,label in journal_fields.items() %}
-<label class="check"><input type="checkbox" name="journal_field" value="{{ key }}" {{ 'checked' if key in selected_journal_fields }}>{{ label }}</label>
-<label>短名称<input name="journal_label_{{ key }}" value="{{ journal_labels.get(label,label) }}" placeholder="留空只显示值"></label>{% endfor %}
-<details><summary>期刊别名与分区简写</summary>
-<p class="hint">每行左侧填文献来源中的刊名，右侧填期刊服务识别的全名。</p>
-<div id="alias-rows">{% for name,target in journal_aliases.items() %}<div class="pair-row"><input name="alias_name" aria-label="原刊名" value="{{ name }}"><input name="alias_target" aria-label="期刊全名" value="{{ target }}"></div>{% endfor %}<div class="pair-row"><input name="alias_name" aria-label="原刊名" placeholder="原刊名"><input name="alias_target" aria-label="期刊全名" placeholder="期刊全名"></div></div>
-<button class="btn" type="button" data-add-pair="alias-rows">增加别名</button>
-<p class="hint">分区简写示例：化学 1 区 → 化 1。只填写名称，不需要编写规则。</p>
-{% for subject,short in journal_subjects %}<div class="pair-row"><label>{{ subject }}<input name="subject_short" value="{{ short }}"><input type="hidden" name="subject_name" value="{{ subject }}"></label></div>{% endfor %}
-<label>预览样例<input id="journal-sample" value="化学1区"></label><button class="btn" type="button" id="preview-journal">预览标签</button><p id="journal-preview" role="status"></p>
+  <div class="journal-option">
+    <label class="check"><input type="checkbox" name="journal_field" value="{{ key }}" {% if key in selected_journal_fields %}checked{% endif %}>{{ label }}</label>
+    <label class="journal-option__name"><span class="sr-only">{{ label }}短名称</span><input type="text" name="journal_label_{{ key }}" value="{{ journal_labels.get(label,label) }}" placeholder="只显示值"></label>
+  </div>
+{% endfor %}
+</div>
+<details class="settings-disclosure">
+  <summary>期刊别名与分区简写</summary>
+  <p class="hint">将文献来源中的刊名，映射到期刊服务识别的全名。原有特殊转换规则会继续保留。</p>
+  <div id="alias-rows">
+    {% for name,target in journal_aliases.items() %}<div class="pair-row"><input name="alias_name" aria-label="原刊名" value="{{ name }}"><input name="alias_target" aria-label="期刊全名" value="{{ target }}"></div>{% endfor %}
+    <div class="pair-row"><input name="alias_name" aria-label="原刊名" placeholder="原刊名"><input name="alias_target" aria-label="期刊全名" placeholder="期刊全名"></div>
+  </div>
+  <button class="btn" type="button" data-add-pair="alias-rows">{{ icon('plus') }}增加别名</button>
+  <p class="settings-section-label">分区名称简写</p><p class="hint">例如：化学 1 区 → 化 1。只需填写名称。</p>
+  <div class="subject-grid">{% for subject,short in journal_subjects %}<label>{{ subject }}<input name="subject_short" value="{{ short }}"><input type="hidden" name="subject_name" value="{{ subject }}"></label>{% endfor %}</div>
+  <div class="inline-preview"><div class="settings-field"><label for="journal-sample">预览样例</label><input id="journal-sample" value="化学1区"></div><button class="btn" type="button" id="preview-journal">预览标签</button></div>
+  <p id="journal-preview" class="settings-result" role="status"></p>
 </details>
-<h2>运行授权与频率限制</h2><p class="hint">选择需要管理员密码和次数限制的运行阶段。完整更新只要包含受限阶段，也会应用对应限制。</p>
-<input type="hidden" name="guarded_present" value="1">
-{% for key,label in stage_labels.items() %}<label class="check"><input type="checkbox" name="guarded_stage" value="{{ key }}" {{ 'checked' if key in guarded }}>{{ label }}</label>{% endfor %}
