@@ -144,6 +144,7 @@ CREATE TABLE IF NOT EXISTS interest_group (
     slug       TEXT NOT NULL UNIQUE,
     name       TEXT NOT NULL DEFAULT '',
     direction  TEXT NOT NULL DEFAULT '',
+    direction_initialized INTEGER NOT NULL DEFAULT 0,  -- 已从配置建立方向基线
     enabled    INTEGER NOT NULL DEFAULT 1,
     llm_rank   INTEGER NOT NULL DEFAULT 1,   -- 本组是否跑 LLM 精排(花钱开关)
     position   INTEGER NOT NULL DEFAULT 0,
@@ -677,6 +678,11 @@ def ensure_group(conn: sqlite3.Connection, slug: str, *, name: str = "",
     return int(cur.lastrowid)
 
 
+def summary_direction(direction: str | None) -> str:
+    """摘要/相关性提示词实际读取的方向,也是缓存失效的比较口径。"""
+    return (direction or "").strip()[:300]
+
+
 def sync_groups(conn: sqlite3.Connection, groups) -> dict[str, int]:
     """把 interests.yaml 里的组对账进库,返回 {slug: group_id}。
 
@@ -689,9 +695,17 @@ def sync_groups(conn: sqlite3.Connection, groups) -> dict[str, int]:
             conn, group.slug, name=group.name, direction=group.direction,
             enabled=group.enabled, llm_rank=group.llm_rank, position=position,
         )
+        previous = conn.execute(
+            "SELECT direction, direction_initialized FROM interest_group WHERE id=?",
+            (gid,)).fetchone()
+        if (previous["direction_initialized"]
+                and summary_direction(previous["direction"]) != summary_direction(group.direction)):
+            # 方向变化只影响本组的说明,不重做共享中性摘要;改显示名不失效。
+            conn.execute("DELETE FROM summary_group WHERE group_id=?", (gid,))
         conn.execute(
             """UPDATE interest_group
-                  SET name=?, direction=?, enabled=?, llm_rank=?, position=?, updated_at=?
+                  SET name=?, direction=?, enabled=?, llm_rank=?, position=?, updated_at=?,
+                      direction_initialized=1
                 WHERE id=?""",
             (group.name or group.slug, group.direction, int(bool(group.enabled)),
              int(bool(group.llm_rank)), position, now(), gid),
@@ -763,11 +777,45 @@ def _migrate_v6(conn: sqlite3.Connection) -> None:
         """)
 
 
+def _migrate_v7(conn: sqlite3.Connection) -> None:
+    """旧单方向说明归入 default,不再从共享 summary 跨组回退。
+
+    v5/v6 的共享列也可能是别的组最近生成的文本。只有默认组成员且没有
+    其它组说明的条目才按旧单组数据迁移;已有的默认组记录保留原值。
+    """
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(interest_group)")}
+    if "direction_initialized" not in columns:
+        conn.execute("ALTER TABLE interest_group ADD COLUMN direction_initialized INTEGER NOT NULL DEFAULT 0")
+        # 已使用过分组的库有明确方向;从分组前直升的新建表则保持默认 0。
+        conn.execute("UPDATE interest_group SET direction_initialized=1")
+    default_id = group_id(conn, DEFAULT_GROUP_SLUG)
+    if default_id is not None:
+        has_default_relevance = conn.execute(
+            "SELECT 1 FROM summary_group WHERE group_id=? LIMIT 1", (default_id,)).fetchone()
+        migrated = conn.execute(
+            """INSERT OR IGNORE INTO summary_group
+                 (group_id, item_id, relevance, model, created_at)
+               SELECT ?, su.item_id, su.relevance, su.model, COALESCE(su.created_at, ?)
+                 FROM summary su
+                 JOIN item_group ig ON ig.item_id=su.item_id AND ig.group_id=?
+                WHERE COALESCE(su.relevance, '') <> ''
+                  AND NOT EXISTS (SELECT 1 FROM summary_group sg
+                                   WHERE sg.item_id=su.item_id AND sg.group_id<>?)""",
+            (default_id, now(), default_id, default_id),
+        ).rowcount
+        if migrated and not has_default_relevance:
+            # v5/v6 已建 default、尚未第一次加载画像的旧库也可能留着空方向。
+            # 首次同步只建立基线,不能把刚迁入且可能在摘要窗口之外的说明删掉。
+            conn.execute("UPDATE interest_group SET direction_initialized=0 "
+                         "WHERE id=? AND direction=''", (default_id,))
+    conn.execute("UPDATE summary SET relevance=NULL WHERE relevance IS NOT NULL")
+
+
 # 迁移步骤按版本排列:下标 + 1 = 跑完这步之后的 user_version。
 # 加新迁移就在末尾追加一个函数,**同时把 SCHEMA 改成最新结构** ——
 # 新库只建 SCHEMA、不走这里。
 _MIGRATIONS = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5,
-               _migrate_v6]
+               _migrate_v6, _migrate_v7]
 SCHEMA_VERSION = len(_MIGRATIONS)
 
 # 只能在迁移之后建的索引(见 Database.init 的注释)。
@@ -1107,7 +1155,7 @@ def get_items(
         SELECT i.*, sc.final_score, sc.llm_score, sc.llm_reason,
                su.title_zh, su.one_liner, su.method, su.key_results,
                su.problem, su.limitation,
-               COALESCE(sg.relevance, su.relevance) AS relevance,
+               sg.relevance AS relevance,
                COALESCE(s.state,'new') AS state,
                COALESCE(s.starred,0) AS starred,
                COALESCE(gs.ignored,0) AS ignored,
@@ -1129,8 +1177,8 @@ def search_items(conn: sqlite3.Connection, q: str, limit: int = 100,
     # 必须与 get_items 选出同一组列 —— 卡片宏会用到 cited_by_count / is_oa / oa_url
     gid = _read_group_id(conn, group_slug)
     sql = f"""
-        SELECT i.*, sc.final_score, sc.llm_reason, su.title_zh, su.one_liner,
-               COALESCE(sg.relevance, su.relevance) AS relevance,
+        SELECT i.*, sc.final_score, sc.llm_score, sc.llm_reason, su.title_zh, su.one_liner,
+               sg.relevance AS relevance,
                COALESCE(s.state,'new') AS state, COALESCE(s.starred,0) AS starred,
                COALESCE(gs.ignored,0) AS ignored,
                e.cited_by_count, e.is_oa, e.oa_url
@@ -1217,6 +1265,7 @@ def clear_group_relevance(conn: sqlite3.Connection, item_id: int, *,
 
 def save_summary(conn: sqlite3.Connection, item_id: int, data: dict, depth: str,
                  model: str, *, abstract_hash: str | None = None) -> None:
+    """只存中性摘要。方向性说明由 save_group_relevance 写入所属组。"""
     conn.execute(
         """INSERT INTO summary (item_id, title_zh, one_liner, problem, method, key_results,
                                 limitation, relevance, depth, model, abstract_hash, created_at)
@@ -1232,7 +1281,7 @@ def save_summary(conn: sqlite3.Connection, item_id: int, data: dict, depth: str,
              created_at=excluded.created_at""",
         (item_id, data.get("title_zh"), data.get("one_liner"), data.get("problem"),
          data.get("method"), data.get("key_results"), data.get("limitation"),
-         data.get("relevance"), depth, model, abstract_hash, now()),
+         None, depth, model, abstract_hash, now()),
     )
 
 

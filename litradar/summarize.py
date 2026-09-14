@@ -95,7 +95,7 @@ def summarize_relevance(rows: list[sqlite3.Row], prof: Profile,
         prompt = RELEVANCE_PROMPT.format(
             title=row["title"],
             abstract=(row["abstract"] or "")[:2000] or "(无摘要,只有标题)",
-            direction=prof.direction[:300],
+            direction=db.summary_direction(prof.direction),
         )
         try:
             data = llm.json(RELEVANCE_SYSTEM, prompt, max_tokens=300)
@@ -121,6 +121,20 @@ def _numbers(text: str) -> set[str]:
 def _abstract_hash(abstract: str | None) -> str:
     """记录生成时实际读取的原文,不把一次元数据刷新误当成摘要变化。"""
     return hashlib.sha256((abstract or "").encode("utf-8")).hexdigest()
+
+
+# 历史摘要没有指纹/富化记录时仍要得到明确的布尔值,否则 stale 和 NOT stale
+# 都可能为 SQL NULL,既不刷新摘要也不补新组说明。
+_SUMMARY_STALE = """COALESCE((
+    (su.abstract_hash IS NOT NULL
+     AND su.abstract_hash <> litradar_abstract_hash(i.abstract))
+    OR (su.abstract_hash IS NULL
+        AND COALESCE(i.abstract, '') <> ''
+        AND (e.enriched_at > su.created_at
+             OR (su.depth = 'deep' AND su.problem = '摘要未提及'
+                 AND su.method = '摘要未提及' AND su.key_results = '摘要未提及'
+                 AND su.limitation = '摘要未提及')))
+), 0)"""
 
 
 def verify_numbers(summary: dict, abstract: str) -> dict:
@@ -149,7 +163,7 @@ def summarize_one(row: sqlite3.Row, prof: Profile, llm: DeepSeek) -> dict:
         title=row["title"], journal=row["journal"] or "未知",
         published=row["published_at"] or "未知", authors=_join_authors(row) or "未知",
         abstract=abstract[:3000] or "(无摘要,只有标题和期刊信息)",
-        direction=prof.direction[:300],
+        direction=db.summary_direction(prof.direction),
     )
     data = llm.json(SUMMARY_SYSTEM, prompt, max_tokens=1400)
 
@@ -196,11 +210,8 @@ def _summarize_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
                      verbose: bool, force: bool) -> dict:
     """**一个组**的摘要。
 
-    两条路,分开算账:
-      A. 中性摘要缺失或原文变了 → 整条重做(用本组的方向写 relevance);
-      B. 中性摘要还新鲜、但本组还没有 relevance → **只补那一行**。
-    只有深度摘要有 relevance(简要摘要本来就只有标题+一句话),所以 B 只挑
-    depth='deep' 的条目 —— 否则简要摘要的条目会被每轮重复挑出来。
+    先生成中性摘要,同一轮共享条目只处理一次。全体组的中性摘要完成后,
+    run 再补各组 relevance,以便前面的组也拿到后来升级为 deep 的说明。
     """
     stat: dict = {"group": prof.slug, "deep": 0, "brief": 0, "brief_failed": 0,
                   "skipped": 0, "relevance": 0}
@@ -209,28 +220,22 @@ def _summarize_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
         # 新摘要按原文指纹判断过期:包括无原文→有原文,也包括同一秒内补齐。
         # 历史摘要没有指纹,用富化时间或旧的无摘要占位内容恢复一次;
         # 成功重做后会保存指纹,之后仅引用数等元数据变化不会再触发 LLM。
-        stale = """(
-            (su.abstract_hash IS NOT NULL
-             AND su.abstract_hash <> litradar_abstract_hash(i.abstract))
-            OR (su.abstract_hash IS NULL
-                AND COALESCE(i.abstract, '') <> ''
-                AND (e.enriched_at > su.created_at
-                     OR (su.depth = 'deep' AND su.problem = '摘要未提及'
-                         AND su.method = '摘要未提及' AND su.key_results = '摘要未提及'
-                         AND su.limitation = '摘要未提及')))
-        )"""
+        stale = _SUMMARY_STALE
         w = (f"-{days} days", f"-{days} days")
 
         # ---- A. 要整条重做的 ----
         where = "1=1" if force else f"(su.item_id IS NULL OR {stale})"
         rows = list(conn.execute(
-            f"""SELECT i.*, COALESCE(sc.final_score,-1) AS fs, su.depth AS depth
+            f"""SELECT i.*, COALESCE(sc.final_score,-1) AS fs, su.depth AS depth,
+                       {stale} AS summary_stale,
+                       i.id IN (SELECT item_id FROM temp.summary_run_deep) AS wants_deep
                 FROM item i
                 JOIN item_group ig ON ig.item_id = i.id AND ig.group_id = ?
                 LEFT JOIN summary          su ON su.item_id = i.id
                 LEFT JOIN score            sc ON sc.item_id = i.id AND sc.group_id = ?
                 LEFT JOIN item_enrichment  e  ON e.item_id  = i.id
                 WHERE {where} AND i.kind='paper' AND {db.in_window('i')}
+                  AND i.id NOT IN (SELECT item_id FROM temp.summary_run_done)
                 ORDER BY fs DESC, i.published_at DESC
                 LIMIT ?""",
             (group_id, group_id, *w, limit),
@@ -244,7 +249,8 @@ def _summarize_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
         deep_n = cfg.llm.deep_summary_top_n
         top_rows = list(conn.execute(
             f"""SELECT i.*, COALESCE(sc.final_score,-1) AS fs, su.depth AS depth,
-                       {stale} AS summary_stale
+                       {stale} AS summary_stale,
+                       i.id IN (SELECT item_id FROM temp.summary_run_done) AS refreshed
                 FROM item i
                 JOIN item_group ig ON ig.item_id = i.id AND ig.group_id = ?
                 LEFT JOIN score   sc ON sc.item_id = i.id AND sc.group_id = ?
@@ -256,10 +262,10 @@ def _summarize_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
             (group_id, group_id, *w, deep_n),
         ).fetchall()) if deep_n > 0 else []
         heads = [r for r in top_rows
-                 if force or r["depth"] != "deep" or r["summary_stale"]]
+                 if not r["refreshed"] and (force or r["depth"] != "deep" or r["summary_stale"])]
         head_ids = {int(r["id"]) for r in heads}
         for r in rows:
-            if r["depth"] == "deep" and int(r["id"]) not in head_ids:
+            if (r["depth"] == "deep" or r["wants_deep"]) and int(r["id"]) not in head_ids:
                 heads.append(r)
                 head_ids.add(int(r["id"]))
         rest = [r for r in rows if int(r["id"]) not in head_ids]
@@ -272,11 +278,13 @@ def _summarize_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
                 iid = int(r["id"])
                 db.save_summary(conn, iid, data, "deep", cfg.llm.model,
                                 abstract_hash=_abstract_hash(r["abstract"]))
-                # 原文可能变了:别的组那一行是基于旧原文写的,一起作废,
-                # 它们下一轮会走 B 路只补 relevance。
-                db.clear_group_relevance(conn, iid, keep_group_id=group_id)
+                # 说明只依赖原文和方向。原文变了才使其它组说明失效;
+                # 单纯 force 重写中性摘要不能删除未参与本轮的有效说明。
+                if r["summary_stale"]:
+                    db.clear_group_relevance(conn, iid, keep_group_id=group_id)
                 db.save_group_relevance(conn, group_id, iid,
                                         data.get("relevance"), cfg.llm.model)
+                conn.execute("INSERT INTO temp.summary_run_done VALUES (?,?)", (iid, group_id))
                 conn.commit()
                 stat["deep"] += 1
             except LLMError as e:
@@ -297,52 +305,59 @@ def _summarize_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
                 if iid in brief:
                     db.save_summary(conn, iid, brief[iid], "brief", cfg.llm.model,
                                     abstract_hash=_abstract_hash(r["abstract"]))
+                    conn.execute("INSERT INTO temp.summary_run_done VALUES (?,NULL)", (iid,))
                     stat["brief"] += 1
             conn.commit()
 
-        # ---- B. 只补"对研究的用处" ----
-        need_rel = list(conn.execute(
-            f"""SELECT i.*
-                FROM item i
-                JOIN item_group ig ON ig.item_id = i.id AND ig.group_id = ?
-                JOIN summary      su ON su.item_id = i.id
-                LEFT JOIN summary_group sg ON sg.item_id = i.id AND sg.group_id = ?
-                LEFT JOIN item_enrichment e ON e.item_id = i.id
-                WHERE i.kind='paper' AND su.depth='deep'
-                  AND NOT {stale}
-                  AND sg.item_id IS NULL
-                  AND {db.in_window('i')}
-                ORDER BY i.published_at DESC
-                LIMIT ?""",
-            (group_id, group_id, *w, limit),
-        ).fetchall())
-        if need_rel:
-            if verbose:
-                print(f"  [{prof.name}] 补 relevance {len(need_rel)} 篇…")
-            # 单独兜异常:上面的 deep/brief 已经提交,不能因为补 relevance 失败
-            # 就把整组记成失败、把已经做成的统计一起丢掉。下一轮会再挑出来。
-            try:
-                got = summarize_relevance(need_rel, prof, llm)
-            except Exception as e:  # noqa: BLE001
-                stat["relevance_failed"] = len(need_rel)
-                if verbose:
-                    print(f"  [warn] 补 relevance 失败({len(need_rel)} 篇): "
-                          f"{type(e).__name__}: {e}")
-                got = {}
-            for iid, text in got.items():
-                db.save_group_relevance(conn, group_id, iid, text, cfg.llm.model)
-                stat["relevance"] += 1
-            conn.commit()
-
-        db.log_run(conn, "summarize", "ok", stat, started_at=started,
-                   group_slug=prof.slug)
-        conn.commit()
     except Exception as e:  # noqa: BLE001
         db.log_run(conn, "summarize", "failed", stat, error=str(e),
                    started_at=started, group_slug=prof.slug)
         conn.commit()
         raise
     return stat
+
+
+def _complete_group_relevance(conn: sqlite3.Connection, cfg: Config, prof: Profile,
+                              group_id: int, llm: DeepSeek, stat: dict, *,
+                              limit: int, days: int, verbose: bool, force: bool) -> None:
+    """所有组的中性摘要落库后,只补/强制更新本组的方向性说明。"""
+    stale = _SUMMARY_STALE
+    w = (f"-{days} days", f"-{days} days")
+    # ---- B. 只补"对研究的用处" ----
+    need_rel = list(conn.execute(
+        f"""SELECT i.*
+            FROM item i
+            JOIN item_group ig ON ig.item_id = i.id AND ig.group_id = ?
+            JOIN summary      su ON su.item_id = i.id
+            LEFT JOIN summary_group sg ON sg.item_id = i.id AND sg.group_id = ?
+            LEFT JOIN item_enrichment e ON e.item_id = i.id
+            WHERE i.kind='paper' AND su.depth='deep'
+              AND NOT {stale}
+              AND (sg.item_id IS NULL OR (? AND NOT EXISTS (
+                    SELECT 1 FROM temp.summary_run_done done
+                     WHERE done.item_id=i.id AND done.group_id=?)))
+              AND {db.in_window('i')}
+            ORDER BY i.published_at DESC
+            LIMIT ?""",
+        (group_id, group_id, force, group_id, *w, limit),
+    ).fetchall())
+    if need_rel:
+        if verbose:
+            print(f"  [{prof.name}] 补 relevance {len(need_rel)} 篇…")
+        # 单独兜异常:上面的 deep/brief 已经提交,不能因为补 relevance 失败
+        # 就把整组记成失败、把已经做成的统计一起丢掉。下一轮会再挑出来。
+        try:
+            got = summarize_relevance(need_rel, prof, llm)
+        except Exception as e:  # noqa: BLE001
+            stat["relevance_failed"] = len(need_rel)
+            if verbose:
+                print(f"  [warn] 补 relevance 失败({len(need_rel)} 篇): "
+                      f"{type(e).__name__}: {e}")
+            got = {}
+        for iid, text in got.items():
+            db.save_group_relevance(conn, group_id, iid, text, cfg.llm.model)
+            stat["relevance"] += 1
+        conn.commit()
 
 
 def run(cfg: Config, *, limit: int = 200, days: int = 30, verbose: bool = True,
@@ -365,12 +380,33 @@ def run(cfg: Config, *, limit: int = 200, days: int = 30, verbose: bool = True,
     try:
         ids = db.sync_groups(conn, load_groups(cfg))
         conn.commit()
+        # 先合并本轮各组的深度需求,避免 A 组先花钱生成 brief,B 组再升级。
+        # 临时表随连接销毁;done 只记录成功保存的摘要,失败仍可由后续组重试。
+        conn.execute("CREATE TEMP TABLE summary_run_deep (item_id INTEGER PRIMARY KEY)")
+        conn.execute("CREATE TEMP TABLE summary_run_done (item_id INTEGER PRIMARY KEY, group_id INTEGER)")
+        if cfg.llm.deep_summary_top_n > 0:
+            for prof in groups:
+                gid = ids.get(prof.slug)
+                if gid is not None:
+                    conn.execute(
+                        f"""INSERT OR IGNORE INTO temp.summary_run_deep
+                            SELECT i.id FROM item i
+                            JOIN item_group ig ON ig.item_id=i.id AND ig.group_id=?
+                            LEFT JOIN score sc ON sc.item_id=i.id AND sc.group_id=?
+                            WHERE i.kind='paper' AND {db.in_window('i')}
+                            ORDER BY COALESCE(sc.final_score,-1) DESC, i.published_at DESC
+                            LIMIT ?""",
+                        (gid, gid, f"-{days} days", f"-{days} days", cfg.llm.deep_summary_top_n),
+                    )
+        conn.commit()
         total: dict = {"groups": {}, "deep": 0, "brief": 0, "brief_failed": 0,
                        "skipped": 0, "relevance": 0, "errors": 0}
+        started = {}
         for prof in groups:
             gid = ids.get(prof.slug)
             if gid is None:
                 continue
+            started[prof.slug] = db.now()
             try:
                 stat = _summarize_group(conn, cfg, prof, gid, llm, limit=limit,
                                         days=days, verbose=verbose, force=force)
@@ -382,6 +418,23 @@ def run(cfg: Config, *, limit: int = 200, days: int = 30, verbose: bool = True,
                           f"{type(e).__name__}: {e}")
                 continue
             total["groups"][prof.slug] = stat
+
+        # 后处理组可能刚把共享论文升级为 deep;现在再给所有成功组补说明。
+        for prof in groups:
+            stat = total["groups"].get(prof.slug)
+            if stat is None or "error" in stat:
+                continue
+            try:
+                _complete_group_relevance(conn, cfg, prof, ids[prof.slug], llm, stat,
+                                          limit=limit, days=days, verbose=verbose, force=force)
+                db.log_run(conn, "summarize", "ok", stat, started_at=started[prof.slug],
+                           group_slug=prof.slug)
+            except Exception as e:  # noqa: BLE001
+                total["errors"] += 1
+                stat["error"] = f"{type(e).__name__}: {e}"
+                db.log_run(conn, "summarize", "failed", stat, error=str(e),
+                           started_at=started[prof.slug], group_slug=prof.slug)
+            conn.commit()
             for key in ("deep", "brief", "brief_failed", "skipped", "relevance"):
                 total[key] += int(stat.get(key, 0) or 0)
         return total

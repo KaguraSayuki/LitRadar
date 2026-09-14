@@ -8,6 +8,7 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, unquote
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -21,7 +22,7 @@ from ..config import Config, load_config
 from ..lock import AlreadyRunning, single_instance
 from ..normalize import days_ago
 from ..passwords import verify_password
-from ..rank import load_groups, load_interests, validate_interests
+from ..rank import Profile, load_groups, load_interests, validate_interests
 
 HERE = Path(__file__).resolve().parent
 
@@ -339,7 +340,11 @@ def active_group(request: Request, cfg: Config, *, require_known: bool = False) 
                 explicit = QueryParams(ref.query).get("g")
         except ValueError:
             pass
-    wanted = (explicit or request.cookies.get(GROUP_COOKIE) or "").strip()
+    try:
+        remembered = unquote(request.cookies.get(GROUP_COOKIE, ""), errors="strict")
+    except UnicodeDecodeError:
+        remembered = ""
+    wanted = (explicit or remembered).strip()
     groups = ui_groups(cfg)
     for g in groups:
         if g.slug == wanted:
@@ -373,14 +378,25 @@ async def remember_token(request: Request, call_next):
     # Cookie 只记住默认视图;已有页面的导航和写请求各自携带渲染时的组。
     g = request.query_params.get("g")
     if g and request.method == "GET" and resp.status_code < 400:
-        resp.set_cookie(GROUP_COOKIE, g, httponly=True, samesite="lax",
-                        max_age=60 * 60 * 24 * 180)
+        selected = active_group(request, get_cfg())
+        if selected:
+            resp.set_cookie(GROUP_COOKIE, quote(selected.slug, safe=""),
+                            httponly=True, samesite="lax", max_age=60 * 60 * 24 * 180)
     return resp
+
+
+def _ranking_status(cfg: Config, group: Profile | None = None) -> str:
+    if group is not None and not group.llm_rank:
+        return "group_disabled"
+    if not cfg.llm.enabled:
+        return "disabled"
+    return "ready" if cfg.llm.api_key else "no_key"
 
 
 def ctx(request: Request, **kw) -> dict:
     cfg = get_cfg()
     group = active_group(request, cfg)
+    ranking = _ranking_status(cfg, group)
     base = {
         "request": request,
         "today": date.today().isoformat(),
@@ -388,8 +404,12 @@ def ctx(request: Request, **kw) -> dict:
         "group": group,
         "group_slug": group.slug if group else None,
         "group_url": lambda url: _group_url(url, group.slug if group else None),
-        # 让模板能判断"没评分"到底是没配 key,还是只是被规则过滤了
-        "llm_ready": bool(cfg.llm.enabled and cfg.llm.api_key),
+        "llm_ready": ranking == "ready",
+        "rank_notice": {
+            "group_disabled": "本组已关闭 DeepSeek 精排，新排序只使用关键词和规则分。",
+            "disabled": "已关闭 DeepSeek，新排序只使用关键词和规则分。",
+            "no_key": "还没配 DeepSeek API Key，新排序只使用关键词和规则分。",
+        }.get(ranking, ""),
         "static_v": _static_version(),
         "home_label": HOME_LABEL,
     }
@@ -422,14 +442,14 @@ def _rank_renderer(cfg: Config):
     return r
 
 
-def _decorate(rows, conn):
+def _decorate(rows, conn, *, group: Profile | None = None):
     """给条目挂上展示层才算得出来的东西:期刊等级标签、兜底分标记。
 
     这些都依赖 web 的配置,不该塞进 db.get_items —— 否则 CLI / 测试也会被
     拖上 web 的配置。缓存表一次读全(几十行),不逐条查库。
     """
     cfg = get_cfg()
-    llm_ready = bool(cfg.llm.enabled and cfg.llm.api_key)
+    llm_ready = _ranking_status(cfg, group) == "ready"
 
     if cfg.journal_rank.enabled:
         ranks = db.journal_ranks(conn)
@@ -457,12 +477,10 @@ def _decorate(rows, conn):
         #  全部失败则整体归一化到 0-100 —— 所以标签只说"不是 LLM 打的",
         #  不去断言具体封顶值。)
         #
-        # 只在 LLM 可用时才标:没配 key 时全场都没有 LLM 分,逐条标注是噪音
-        # (页面顶部已经有一句全局说明)。
-        d["score_partial"] = bool(
-            llm_ready
-            and d.get("final_score") is not None
-            and d.get("llm_score") is None)
+        # 只有本组启用精排且 LLM 可用才标失败;主动关闭或没配 key 时,
+        # 关键词分是预期结果,页面顶部统一说明原因。
+        d["score_keyword"] = d.get("final_score") is not None and d.get("llm_score") is None
+        d["score_partial"] = llm_ready and d["score_keyword"]
         out.append(d)
     return out
 
@@ -514,7 +532,7 @@ def inbox(request: Request, state: str = "new", kind: str = "paper",
         pages = max(1, -(-total_filtered // PER_PAGE))     # 向上取整
         page = min(max(1, page), pages)                     # 越界就夹到有效范围
         rows = _decorate(db.get_items(conn, **filt, limit=PER_PAGE,
-                                      offset=(page - 1) * PER_PAGE), conn)
+                                      offset=(page - 1) * PER_PAGE), conn, group=g)
         # 副标题里"共 N 篇"的分母必须跟当前页签是同一批条目,
         # 否则在"不感兴趣"页签会出现"共 59 篇…当前显示 149 篇"这种自相矛盾的读数。
         # 收藏/不感兴趣是独立清单,分母就是它们自己;
@@ -547,7 +565,7 @@ def week(request: Request):
     try:
         rows = _decorate(db.get_items(conn, kind="paper", since=days_ago(7),
                                       group_slug=(g.slug if g else None),
-                                      limit=200), conn)
+                                      limit=200), conn, group=g)
         heads, rest = list(rows[:3]), list(rows[3:])
     finally:
         conn.close()
@@ -571,7 +589,7 @@ def search(request: Request, q: str = "", page: int = 1):
             page = min(max(1, page), pages)
             start = (page - 1) * per
             rows = _decorate(db.search_items(conn, q, limit=per, offset=start,
-                                             group_slug=(g.slug if g else None)), conn)
+                                             group_slug=(g.slug if g else None)), conn, group=g)
     finally:
         conn.close()
     return templates.TemplateResponse(request, "search.html", ctx(
@@ -594,7 +612,7 @@ def item_detail(request: Request, item_id: int):
             """SELECT i.*, sc.final_score, sc.rule_score, sc.coarse_score, sc.llm_score,
                       sc.llm_reason, su.title_zh, su.one_liner, su.problem, su.method,
                       su.key_results, su.limitation, su.depth,
-                      COALESCE(sg.relevance, su.relevance) AS relevance,
+                      sg.relevance AS relevance,
                       COALESCE(s.state,'new') state, COALESCE(s.starred,0) starred,
                       COALESCE(gs.ignored,0) ignored,
                       e.cited_by_count, e.is_oa, e.oa_url
@@ -609,7 +627,7 @@ def item_detail(request: Request, item_id: int):
             (gid, gid, gid, item_id),
         ).fetchone()
         # 在连接还开着的时候挂标签 —— _decorate 要读期刊缓存表
-        it = _decorate([row], conn)[0] if row else None
+        it = _decorate([row], conn, group=g)[0] if row else None
         if it is not None:
             it["groups"] = db.item_group_ids(conn, item_id)
     finally:

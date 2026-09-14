@@ -97,6 +97,8 @@ def _group_label(entry: Any, index: int) -> str:
     if isinstance(entry, dict):
         ident = str(entry.get("slug") or entry.get("name") or "").strip()
         if ident:
+            # 无效 Unicode slug 的诊断也必须能作为 UTF-8 页面返回。
+            ident = ident.encode("utf-8", errors="backslashreplace").decode("utf-8")
             return f"groups[{index}]({ident})"
     return f"groups[{index}]"
 
@@ -110,8 +112,16 @@ def _resolve_slug(entry: dict, index: int) -> tuple[str, str | None]:
     raw = entry.get("slug")
     if raw is not None and not isinstance(raw, str):
         return "", f"slug 必须是字符串,当前是{_type_label(raw)}"
+    if raw and re.search(r"[\x00-\x1f\x7f]", raw):
+        return "", "slug 不能包含控制字符"
     explicit = (raw or "").strip()
     if explicit:
+        try:
+            encoded = explicit.encode("utf-8")
+        except UnicodeEncodeError:
+            return "", "slug 必须是有效的 Unicode 文本"
+        if len(encoded) > 256:
+            return "", "slug 的 UTF-8 编码不能超过 256 字节"
         return explicit, None
     name = str(entry.get("name") or "").strip()
     return _derive_slug(name or "default", index), None

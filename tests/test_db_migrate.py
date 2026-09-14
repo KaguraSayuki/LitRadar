@@ -10,6 +10,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -314,4 +316,122 @@ def test_v4库升级后能直接跑第二次迁移不会重复计分(tmp_path):
 
     assert conn.execute("SELECT COUNT(*) FROM item_group").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM score").fetchone()[0] == 1
+    conn.close()
+
+
+# 固定迁移涉及的 v6 旧表定义,不能借用当前 SCHEMA 的方向基线列。
+LEGACY_GROUP = """
+DROP TABLE interest_group;
+CREATE TABLE interest_group (
+    id INTEGER PRIMARY KEY,
+    slug TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL DEFAULT '',
+    direction TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    llm_rank INTEGER NOT NULL DEFAULT 1,
+    position INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+
+
+def _legacy_relevance_db(path, *, version=6, source="legacy", direction="organic"):
+    conn = sqlite3.connect(path)
+    conn.executescript(db.SCHEMA)  # 其它表未变;迁移涉及的表在下面还原。
+    conn.executescript(LEGACY_GROUP)
+    if version == 4:
+        conn.executescript(LEGACY_SCORE)
+        conn.executescript("""
+            DROP TABLE summary_group;
+            DROP TABLE group_state;
+            DROP TABLE item_group;
+            DROP TABLE interest_group;
+        """)
+    else:
+        for gid, slug in [(1, "default"), (2, "mat")]:
+            conn.execute("""INSERT INTO interest_group
+                (id,slug,name,direction,created_at,updated_at) VALUES (?,?,?,?,?,?)""",
+                (gid, slug, slug, direction if gid == 1 else "materials", "old", "old"))
+    conn.execute("""INSERT INTO item
+        (id,kind,dedup_key,title,title_norm,abstract,published_at,source,created_at,updated_at)
+        VALUES (1,'paper','doi:10.1/legacy','Legacy paper','legacy paper','Original abstract',
+                '2000-01-01','test','2000-01-01','2000-01-01')""")
+    conn.execute("INSERT INTO item_state(item_id) VALUES (1)")
+    conn.execute("""INSERT INTO summary
+        (item_id,one_liner,relevance,depth,model,created_at)
+        VALUES (1,'Neutral result','Legacy default relevance','deep','old-model',NULL)""")
+    if version == 6:
+        for gid in ([2] if source == "nonmember" else [1, 2]):
+            conn.execute("INSERT INTO item_group(group_id,item_id,first_seen) VALUES (?,1,'old')", (gid,))
+        if source in ("mat", "default"):
+            gid = 2 if source == "mat" else 1
+            conn.execute("""INSERT INTO summary_group(group_id,item_id,relevance,model,created_at)
+                VALUES (?,1,?,'new-model','new')""", (gid, f"Current {source} relevance"))
+    conn.execute(f"PRAGMA user_version={version}")
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.parametrize("source,expected_default", [
+    ("legacy", "Legacy default relevance"),
+    ("mat", None),
+    ("default", "Current default relevance"),
+    ("nonmember", None),
+])
+def test_v6迁移只将可信旧说明归入默认组(tmp_path, source, expected_default):
+    path = tmp_path / "legacy.db"
+    _legacy_relevance_db(path, source=source)
+    conn = db.Database(path).connect()
+    got = dict(conn.execute("""SELECT g.slug,sg.relevance FROM summary_group sg
+        JOIN interest_group g ON g.id=sg.group_id"""))
+    assert got.get("default") == expected_default
+    assert got.get("mat") == ("Current mat relevance" if source == "mat" else None)
+    assert tuple(conn.execute("SELECT one_liner,relevance,model FROM summary").fetchone()) == \
+        ("Neutral result", None, "old-model")
+    if source == "legacy":
+        row = conn.execute("SELECT model,created_at FROM summary_group").fetchone()
+        assert row[0] == "old-model" and row[1]  # 旧的 NULL 时间不阻止升级。
+    snapshot = list(map(tuple, conn.execute("SELECT * FROM summary_group")))
+    db.Database._migrate(conn)
+    assert list(map(tuple, conn.execute("SELECT * FROM summary_group"))) == snapshot
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    conn.close()
+
+
+@pytest.mark.parametrize("version", [4, 6])
+def test_旧库首次同步方向保留窗口外说明而以后改方向会失效(tmp_path, version):
+    from litradar.config import Config
+    from litradar.rank import load_groups
+
+    path = tmp_path / "first-sync.db"
+    _legacy_relevance_db(path, version=version, direction="")
+    conn = db.Database(path).connect()
+    cfg = Config()
+    cfg.interests_data = {"direction": "organic"}
+    db.sync_groups(conn, load_groups(cfg))
+    conn.commit()
+    row = db.get_items(conn, group_slug="default")[0]
+    assert row["relevance"] == "Legacy default relevance"
+    assert row["published_at"] == "2000-01-01"  # 不靠摘要窗口内的 LLM 重算挽回。
+
+    cfg.interests_data = {"direction": "enzymes"}
+    db.sync_groups(conn, load_groups(cfg))
+    assert db.get_items(conn, group_slug="default")[0]["relevance"] is None
+    assert conn.execute("SELECT one_liner FROM summary").fetchone()[0] == "Neutral result"
+    conn.close()
+
+
+def test_v6已知方向升级后仍能检测方向变化(tmp_path):
+    from litradar.config import Config
+    from litradar.rank import load_groups
+
+    path = tmp_path / "known-direction.db"
+    _legacy_relevance_db(path, direction="organic")
+    conn = db.Database(path).connect()
+    cfg = Config()
+    cfg.interests_data = {"direction": "enzymes"}
+    db.sync_groups(conn, load_groups(cfg))
+    assert db.get_items(conn, group_slug="default")[0]["relevance"] is None
     conn.close()

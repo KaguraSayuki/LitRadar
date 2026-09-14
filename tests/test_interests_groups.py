@@ -125,6 +125,26 @@ def test_改名不改_slug_的前提是显式写_slug():
     assert explicit == renamed == "keep-me"
 
 
+@pytest.mark.parametrize("slug", ["材料", "mat&chem", "mat+chem", "mat%26chem",
+                                  "mat/chem?#", "材" * 85 + "a"])
+def test_可编码的显式slug校验和加载保持一致(slug):
+    data = {"groups": [{"slug": slug, "name": "方向"}]}
+    assert rank.validate_interests(data) == []
+    assert rank.load_groups(_cfg(data))[0].slug == slug
+
+
+@pytest.mark.parametrize("slug,needle", [("bad\nslug", "控制字符"), ("\t", "控制字符"),
+                                        ("bad\x7fslug", "控制字符"), ("\ud800", "Unicode"),
+                                        ("材" * 86, "256"), ("a" * 257, "256")])
+def test_无法安全传输的slug在保存和加载时一致拒绝(slug, needle):
+    data = {"groups": [{"slug": slug, "name": "Bad"}]}
+    errors = rank.validate_interests(data)
+    assert any(needle in e for e in errors)
+    assert all(e.encode("utf-8") for e in errors)
+    with pytest.raises(ValueError, match=needle):
+        rank.load_groups(_cfg(data))
+
+
 # ─────────────────────────────────────────────────────────────── 校验
 def test_合法形态都通过():
     assert rank.validate_interests(LEGACY) == []
