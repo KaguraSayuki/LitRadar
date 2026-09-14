@@ -310,7 +310,7 @@ def test_精排拿到反馈样本(tmp_path, monkeypatch):
             pass
 
     monkeypatch.setattr(rank, "llm_rerank", fake_rerank)
-    monkeypatch.setattr(rank, "DeepSeek", FakeLLM)
+    monkeypatch.setattr(rank, "LLMClient", FakeLLM)
 
     stat = rank.run(cfg, days=30, verbose=False)
     assert seen["liked"] == ["Metal carbene asymmetric catalysis"]
@@ -356,7 +356,7 @@ def test_精排部分失败的条目不反超(tmp_path, monkeypatch):
     conn.commit()
     conn.close()
 
-    monkeypatch.setattr(rank, "DeepSeek", _FakeLLM)
+    monkeypatch.setattr(rank, "LLMClient", _FakeLLM)
     monkeypatch.setattr(rank, "llm_rerank",
                         lambda *a, **kw: {ok_id: (60.0, "相关")})
 
@@ -390,7 +390,7 @@ def test_完全没有LLM分时仍然归一化(tmp_path, monkeypatch):
     class _NoLLM(_FakeLLM):
         available = False
 
-    monkeypatch.setattr(rank, "DeepSeek", _NoLLM)
+    monkeypatch.setattr(rank, "LLMClient", _NoLLM)
     rank.run(cfg, days=30, verbose=False)
 
     conn = db.Database(cfg.db_file).connect()

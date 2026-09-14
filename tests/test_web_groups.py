@@ -567,9 +567,9 @@ def test_无效slug在编辑页报错而不覆盖已有配置(both_client, slug,
 
 @pytest.mark.parametrize("path", ["/", "/week", "/search?q=Both", "/item/1"])
 @pytest.mark.parametrize("mode,notice,label", [
-    ("group_disabled", "本组已关闭 DeepSeek 精排", "关键词分"),
-    ("disabled", "已关闭 DeepSeek", "关键词分"),
-    ("no_key", "还没配 DeepSeek API Key", "关键词分"),
+    ("group_disabled", "本组已关闭 AI 精排", "关键词分"),
+    ("disabled", "已关闭 AI", "关键词分"),
+    ("no_key", "尚未设置模型 API 密钥", "关键词分"),
     ("failed", "", "关键词分"),
     ("scored", "", "相关度"),
     ("unscored", "", "未评分"),
@@ -599,4 +599,4 @@ def test_评分界面区分主动关闭真实失败和成功(both_client, monkey
     if notice:
         assert notice in page.text
     if mode != "no_key":
-        assert "还没配 DeepSeek API Key" not in page.text
+        assert "尚未设置模型 API 密钥" not in page.text

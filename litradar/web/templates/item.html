@@ -50,14 +50,14 @@
       </div>
       {% if it['score_partial'] %}
         <p class="notice notice--ignored">
-          <b>这一篇没拿到 DeepSeek 打分</b> —— 它的精排批次失败了。<br>
+          <b>这一篇没拿到 AI 打分</b> —— 它的精排批次失败了。<br>
           所以上面的分数只由 BM25 粗排与规则算出,<b>不能和其他条目横向比较</b>。
           下次排序会自动重试。
         </p>
       {% endif %}
       {% if s is not none %}
         <dl class="parts">
-          <dt>DeepSeek 精排</dt><dd>{{ it['llm_score'] if it['llm_score'] is not none else '—' }}</dd>
+          <dt>AI 精排</dt><dd>{{ it['llm_score'] if it['llm_score'] is not none else '—' }}</dd>
           <dt>BM25 粗排</dt><dd>{{ it['coarse_score'] if it['coarse_score'] is not none else '—' }}</dd>
           <dt>规则加分</dt><dd>{{ it['rule_score'] if it['rule_score'] is not none else '—' }}</dd>
         </dl>
@@ -118,7 +118,7 @@
           {% if it['limitation'] %}<dt>局限</dt><dd>{{ it['limitation'] }}</dd>{% endif %}
           {% if it['relevance'] %}<dt>对你的用处</dt><dd>{{ it['relevance'] }}</dd>{% endif %}
         </dl>
-        <p class="hint">由 DeepSeek 根据 {{ source_name(it['source']) }} 元数据生成。数字已和原文核对过,标注"推断"的是模型推测,请以原文为准。</p>
+        <p class="hint">由 AI 根据 {{ source_name(it['source']) }} 元数据生成。数字已和原文核对过,标注"推断"的是模型推测,请以原文为准。</p>
       </section>
     {% endif %}
 

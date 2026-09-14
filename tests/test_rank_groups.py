@@ -47,7 +47,7 @@ class _NoLLM:
 
 @pytest.fixture
 def no_llm(monkeypatch):
-    monkeypatch.setattr(rank, "DeepSeek", _NoLLM)
+    monkeypatch.setattr(rank, "LLMClient", _NoLLM)
 
 
 def _scores(cfg) -> dict[tuple[str, str], float]:
@@ -179,7 +179,7 @@ def test_llm_rank_false_不调_LLM_但仍有分数(tmp_path, monkeypatch):
         calls.append(1)
         return {}
 
-    monkeypatch.setattr(rank, "DeepSeek", _FakeLLM)
+    monkeypatch.setattr(rank, "LLMClient", _FakeLLM)
     monkeypatch.setattr(rank, "llm_rerank", fake_rerank)
     conn = db.Database(cfg.db_file).connect()
     ids = db.sync_groups(conn, rank.load_groups(cfg))
@@ -213,7 +213,7 @@ def test_开着的组照常调_LLM(tmp_path, monkeypatch):
         calls.append(len(rows))
         return {}
 
-    monkeypatch.setattr(rank, "DeepSeek", _FakeLLM)
+    monkeypatch.setattr(rank, "LLMClient", _FakeLLM)
     monkeypatch.setattr(rank, "llm_rerank", fake_rerank)
     conn = db.Database(cfg.db_file).connect()
     ids = db.sync_groups(conn, rank.load_groups(cfg))

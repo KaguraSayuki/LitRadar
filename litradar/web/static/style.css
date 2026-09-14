@@ -788,6 +788,15 @@ h2 small { font-weight: 400; color: var(--ink-3); font-size: 13px; margin-left: 
 .service-row__body .settings-actions { margin-top: 13px; }
 .service-row__body .hint { margin: 10px 0 0; }
 .source-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px 30px; }
+.model-preset { margin-top: 12px; }
+.model-picker { min-width: 0; }
+.model-picker > .btn { margin-top: 10px; }
+.model-picker > #model-list-field { margin-top: 14px; }
+.model-preset .btn { padding-left: 0; }
+.model-save { margin-top: 18px; }
+.model-key-state { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.model-key-state strong { font-size: 13px; font-weight: 500; color: var(--ink-2); }
+#model-connection { scroll-margin-top: calc(var(--topbar-h) + 20px); }
 .legacy-filter { margin-top: 20px !important; }
 .upload-area { display: flex; align-items: center; gap: 16px; padding: 20px; border: 1px dashed var(--line-strong); border-radius: 9px; background: var(--bg); cursor: pointer; }
 .upload-area > .icon { width: 25px; height: 25px; color: var(--ink-3); }

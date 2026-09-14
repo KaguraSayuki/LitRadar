@@ -25,7 +25,7 @@
 | `enrich.py` | 批量补全文献元数据、管理期刊等级缓存 |
 | `rank.py` | 画像校验、订阅组加载、规则过滤、BM25 和 LLM 精排 |
 | `summarize.py` | 共享摘要、方向性说明、原文指纹与数字核验 |
-| `llm.py` | OpenAI 兼容的 DeepSeek 客户端 |
+| `llm.py` | OpenAI Chat Completions 兼容客户端，支持自定义地址、参数适配与结构化结果校验 |
 | `http.py` | 通用 HTTP 请求、重试与退避支持；部分数据源另有专用请求逻辑 |
 | `journal_rank.py` | 期刊等级标签的字段选择与文本转换 |
 | `lock.py` | CLI 与 Web 共用的流水线互斥锁 |

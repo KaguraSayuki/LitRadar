@@ -56,7 +56,7 @@ def _patch(monkeypatch) -> tuple[list, list]:
         brief_ids.extend(int(r["id"]) for r in rows)
         return {int(r["id"]): {"title_zh": "浅", "one_liner": "浅"} for r in rows}
 
-    monkeypatch.setattr(summarize, "DeepSeek", _FakeLLM)
+    monkeypatch.setattr(summarize, "LLMClient", _FakeLLM)
     monkeypatch.setattr(summarize, "summarize_one", fake_one)
     monkeypatch.setattr(summarize, "summarize_brief", fake_brief)
     return deep_ids, brief_ids

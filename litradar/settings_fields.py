@@ -52,6 +52,15 @@ SERVICES = [
     Field("sources.snowball_per_seed", "每篇种子最多获取引用论文数", "int", low=1, high=1000, advanced=True),
 ]
 
+MODEL = [
+    Field("llm.base_url", "API 地址", "url", "填写 API 根地址，保留服务要求的 /v1 等路径。密钥会发送到这个地址，请使用可信的服务。"),
+    Field("llm.model", "模型名称", hint="填写服务提供方给出的完整模型标识。"),
+    Field("llm.json_mode", "JSON 输出方式", "select", "自动模式会在接口明确拒绝 JSON 参数时，改用提示词约束，并校验返回结果。", choices=(("auto", "自动适配（推荐）"), ("json_object", "接口 JSON 模式"), ("prompt", "提示词约束 JSON")), advanced=True),
+    Field("llm.token_limit_parameter", "输出长度参数", "select", "自动模式先使用传统参数，接口明确拒绝时改用推理模型参数。", choices=(("auto", "自动适配（推荐）"), ("max_tokens", "max_tokens（传统接口）"), ("max_completion_tokens", "max_completion_tokens（推理模型）")), advanced=True),
+    Field("llm.temperature", "生成随机程度", "optional_float", "留空使用模型默认值。不支持此参数的接口会自动省略它。", 0, 2, advanced=True),
+    Field("llm.timeout", "模型请求超时（秒）", "int", low=5, high=600, advanced=True),
+]
+
 READING = [
     Field("llm.enabled", "启用 AI 排序与摘要", "bool", "关闭后保留已有摘要，新文献按关键词和规则排序"),
     Field("llm.deep_summary_top_n", "每个方向生成深度摘要的篇数", "int", "按相关度选择；其他文献生成简要摘要，同篇中性摘要在各方向复用", 0, 200),
@@ -59,10 +68,6 @@ READING = [
     Field("app.pipeline_window_days", "文献处理范围（天）", "int", "排序与摘要覆盖这段时间，应不小于已启用来源的回溯范围", 1, 3650),
     Field("journal_rank.enabled", "展示期刊等级与影响因子", "bool", "需要 easyScholar 密钥"),
     Field("journal_rank.max_lookups", "每次最多查询新期刊数", "int", "结果会缓存，后续优先复用", 0, 1000),
-    Field("llm.model", "模型名称", hint="默认 deepseek-chat；请填写已接入服务支持的模型", advanced=True),
-    Field("llm.base_url", "模型服务地址", "url", "使用兼容 OpenAI 的聊天接口。API 密钥会发送给此地址，请只填写信任的服务。", advanced=True),
-    Field("llm.temperature", "生成随机程度", "float", "默认 0.2，范围 0–2", 0, 2, advanced=True),
-    Field("llm.timeout", "模型请求超时（秒）", "int", low=5, high=600, advanced=True),
     Field("llm.rerank_batch_size", "每个精排批次篇数", "int", "过大可能超过模型输入上限", 1, 100, advanced=True),
     Field("ranking.weights.llm", "AI 评分权重", "float", "默认 0.85；三项权重之和必须大于零", 0, 100, advanced=True),
     Field("ranking.weights.coarse", "关键词评分权重", "float", "默认 0.10", 0, 100, advanced=True),
@@ -77,7 +82,7 @@ def display_values(cfg: Config, fields: list[Field]) -> dict:
     data = asdict(cfg)
     data["ranking"]["weights"] = {key: getattr(cfg.ranking, "w_" + key) for key in ("llm", "coarse", "rule")}
     return {f.key: "\n".join(get_value(data, f.key, []) or []) if f.kind == "lines"
-            else get_value(data, f.key, "") for f in fields}
+            else (get_value(data, f.key) if get_value(data, f.key) is not None else "") for f in fields}
 
 
 def parse_fields(form, fields: list[Field], cfg: Config) -> dict:
@@ -88,7 +93,9 @@ def parse_fields(form, fields: list[Field], cfg: Config) -> dict:
         raw = str(form.get(f.key, "")).strip()
         if f.kind == "bool":
             value = raw == "on"
-        elif f.kind in ("int", "float"):
+        elif f.kind == "optional_float" and not raw:
+            value = None
+        elif f.kind in ("int", "float", "optional_float"):
             try:
                 value = int(raw) if f.kind == "int" else float(raw)
                 if not math.isfinite(value) or not f.low <= value <= f.high:
@@ -106,12 +113,23 @@ def parse_fields(form, fields: list[Field], cfg: Config) -> dict:
             if len(raw) > 2000 or any(ord(c) < 32 for c in raw):
                 raise SettingsError("内容过长或包含换行，请检查输入。", f.key)
             if f.kind == "url":
-                u = urlsplit(raw)
-                if u.scheme not in ("http", "https") or not u.hostname or u.username or u.password or u.query or u.fragment:
+                try:
+                    u = urlsplit(raw)
+                    u.port
+                except ValueError:
+                    raise SettingsError("API 地址格式无效，请检查主机名和端口。", f.key) from None
+                if (u.scheme not in ("http", "https") or not u.hostname or u.username or u.password
+                        or u.query or u.fragment or any(c.isspace() for c in raw) or '\\' in raw):
                     raise SettingsError("请填写不含账号、密码和查询参数的 HTTP 或 HTTPS 服务地址。", f.key)
+                if f.key == "llm.base_url":
+                    value = raw.rstrip('/').removesuffix('/chat/completions')
+            if f.key == "llm.model" and not raw:
+                raise SettingsError("请填写模型名称。", f.key)
             if f.kind == "email" and raw and ("@" not in raw or " " in raw):
                 raise SettingsError("请填写完整的联系邮箱，或留空。", f.key)
         patch[f.key] = value
+    if fields is MODEL:
+        return patch  # Connection fields have no dependency on collection or reading settings.
     data = asdict(cfg)
     for key, value in patch.items():
         put_value(data, key, value)
@@ -140,7 +158,7 @@ def parse_fields(form, fields: list[Field], cfg: Config) -> dict:
 def validate_restored_config(cfg: Config) -> None:
     """Backups receive the same numeric and cross-field checks as web forms."""
     from .scheduler import validate
-    for fields in PAGES.values():
+    for fields in [*PAGES.values(), MODEL]:
         values = display_values(cfg, fields)
         for field in fields:
             if field.kind == 'bool':

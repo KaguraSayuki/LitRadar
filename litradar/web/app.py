@@ -148,7 +148,7 @@ def require_same_origin(request: Request) -> None:
     为什么需要:``/admin/run/*`` 是不带 CSRF token 的简单 POST。就算没设口令
     (默认只绑 127.0.0.1,看起来"外面进不来"),你在浏的任意网页都能往
     ``http://127.0.0.1:8090/admin/run/all`` 发一个无需预检的跨源 POST,
-    照样把 DeepSeek 额度烧掉。
+    照样把 AI 额度烧掉。
 
     浏览器在非 GET 请求上一定会带 Origin,且这个头改不了;curl / 定时脚本
     不带,所以"没有 Origin 就放行"不会挡住正常的自动化。
@@ -357,9 +357,9 @@ def ctx(request: Request, **kw) -> dict:
         "group_url": lambda url: _group_url(url, group.slug if group else None),
         "llm_ready": ranking == "ready",
         "rank_notice": {
-            "group_disabled": "本组已关闭 DeepSeek 精排，新排序只使用关键词和规则分。",
-            "disabled": "已关闭 DeepSeek，新排序只使用关键词和规则分。",
-            "no_key": "还没配 DeepSeek API Key，新排序只使用关键词和规则分。",
+            "group_disabled": "本组已关闭 AI 精排，新排序只使用关键词和规则分。",
+            "disabled": "已关闭 AI，新排序只使用关键词和规则分。",
+            "no_key": "尚未设置模型 API 密钥，新排序只使用关键词和规则分。",
         }.get(ranking, ""),
         "static_v": _static_version(),
         "home_label": HOME_LABEL,
@@ -783,7 +783,7 @@ def item_action(request: Request, item_id: int, action: str = Form(...)):
 
 @app.post("/admin/run/{stage}")
 def admin_run(request: Request, stage: str, days: int = 0):
-    # 这里是唯一会真的花钱的入口(DeepSeek 额度),闸门一个都不能少:
+    # 流水线可能调用付费模型,运行前检查:
     #   口令 → 同源 → 暴露检查 →(花钱阶段)密码 →(花钱阶段)冷却 + 每日上限。
     # 前端显式传入当前页面的 ?g=,口令 Cookie 仍随同源 fetch 自动发送。
     require_token(request)

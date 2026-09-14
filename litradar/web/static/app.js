@@ -124,7 +124,7 @@ async function litradarRun(stage, btn) {
     // "该弹密码框"和"URL 里的 token 不对" —— 两者都是 401。
     // 密码只活在这一次调用里,不写 localStorage / cookie,用完即忘。
     if (r.status === 401 && r.headers.get('X-Admin-Password-Required')) {
-      var pw = window.prompt('「' + stage + '」会消耗 DeepSeek 额度,请输入管理员密码:');
+      var pw = window.prompt('「' + stage + '」会消耗 AI 额度,请输入管理员密码:');
       if (pw) {
         btn.textContent = '验证中…';
         r = await fetch(url, {

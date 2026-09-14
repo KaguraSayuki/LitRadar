@@ -120,7 +120,7 @@ def test_check_command_runs_to_completion(tmp_path, monkeypatch, capsys):
         def available(self):
             return False
 
-    monkeypatch.setattr("litradar.llm.DeepSeek", FakeLLM)
+    monkeypatch.setattr("litradar.llm.LLMClient", FakeLLM)
 
     cli.cmd_check(cfg, SimpleNamespace())
 

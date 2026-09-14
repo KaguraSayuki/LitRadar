@@ -117,6 +117,165 @@ def test_partial_config_save_preserves_extensions(settings_env):
     assert data["llm"]["deep_summary_top_n"] == 3
 
 
+def _model_form(path, **changes):
+    from litradar.settings_fields import MODEL, display_values
+    cfg = load_config(path)
+    return {**display_values(cfg, MODEL), "version": SettingsStore(cfg).version(), **changes}
+
+
+def test_model_connection_has_one_home_and_preserves_legacy_credentials(settings_env):
+    from litradar.credentials import write
+    path, _, client = settings_env
+    cfg = load_config(path)
+    write(cfg, cfg.llm.api_key_env, "private-model-key")
+    service_page = client.get("/settings/services").text
+    assert service_page.count('name="llm.base_url"') == 1
+    assert 'id="model-connection"' in service_page
+    assert "测试兼容性" in service_page and "private-model-key" not in service_page
+    reading_page = client.get("/settings/reading").text
+    assert 'name="llm.base_url"' not in reading_page
+    assert 'name="llm.enabled"' in reading_page
+
+    response = client.post("/settings/model", data=_model_form(path, **{
+        "llm.base_url": "https://my-model.example.invalid/proxy/v1/chat/completions/",
+        "llm.model": "my-text-model", "llm.temperature": "",
+        "llm.json_mode": "prompt", "llm.token_limit_parameter": "max_completion_tokens"}),
+        follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"].endswith("#model-connection")
+    saved = load_config(path)
+    assert saved.llm.base_url == "https://my-model.example.invalid/proxy/v1"
+    assert saved.llm.model == "my-text-model"
+    assert saved.llm.provider == "openai-compatible"
+    assert saved.llm.temperature is None and saved.llm.json_mode == "prompt"
+    assert saved.llm.token_limit_parameter == "max_completion_tokens"
+    assert saved.llm.api_key_env == cfg.llm.api_key_env
+    assert saved.llm.api_key == "private-model-key"
+    assert saved.llm.enabled is False
+    data = yaml.safe_load(path.read_text())
+    assert data["extension"] == {"keep": 12} and "sources" not in data
+    assert "private-model-key" not in path.read_text()
+    assert 'name="llm.temperature" value=""' in client.get("/settings/services").text
+
+
+@pytest.mark.parametrize("field,value", [("llm.model", ""), ("llm.base_url", "file:///tmp/api"),
+    ("llm.base_url", "https://example.invalid/?key=unsafe"), ("llm.base_url", "https://[bad"),
+    ("llm.base_url", "https://example.invalid:no-port"), ("llm.base_url", "https://bad host/v1"),
+    ("llm.json_mode", "unknown"), ("llm.token_limit_parameter", "unknown"),
+    ("llm.temperature", "nan"), ("llm.temperature", "2.1"), ("llm.timeout", "0")])
+def test_invalid_model_form_retains_input_and_saved_state(settings_env, field, value):
+    path, _, client = settings_env
+    before = path.read_bytes()
+    response = client.post("/settings/model", data=_model_form(path, **{field: value}))
+    assert response.status_code == 400
+    assert path.read_bytes() == before
+    assert 'data-unsaved="true"' in response.text  # Compatibility test must not test stale saved values.
+    assert 'aria-invalid="true"' in response.text
+
+
+def test_model_form_conflict_does_not_overwrite_newer_connection(settings_env):
+    path, _, client = settings_env
+    old = _model_form(path, **{"llm.model": "stale-model"})
+    store = SettingsStore(load_config(path))
+    store.update_config({"llm.model": "new-model"}, store.version())
+    response = client.post("/settings/model", data=old)
+    assert response.status_code == 409
+    assert 'value="stale-model"' in response.text
+    assert 'data-unsaved="true"' in response.text
+    assert load_config(path).llm.model == "new-model"
+
+
+def test_model_save_requires_same_origin_and_authentication(settings_env):
+    path, _, client = settings_env
+    before = path.read_bytes()
+    form = _model_form(path, **{"llm.model": "blocked"})
+    assert client.post("/settings/model", data=form,
+        headers={"Origin": "https://untrusted.example"}).status_code == 403
+    client.cookies.clear()
+    assert client.post("/settings/model", data=form, follow_redirects=False).status_code == 401
+    assert path.read_bytes() == before
+
+
+def test_model_restore_accepts_default_temperature_and_compatibility_options(settings_env):
+    from litradar.settings_fields import validate_restored_config
+    path, _, _ = settings_env
+    cfg = load_config(path)
+    cfg.llm.temperature = None
+    cfg.llm.json_mode = "prompt"
+    cfg.llm.token_limit_parameter = "max_completion_tokens"
+    validate_restored_config(cfg)
+    cfg.llm.json_mode = "unsupported"
+    with pytest.raises(SettingsError):
+        validate_restored_config(cfg)
+
+
+def test_model_catalog_uses_current_form_address_and_saved_key_without_saving(settings_env, monkeypatch):
+    from litradar.credentials import write
+    from litradar.llm import LLMClient
+    path, _, client = settings_env
+    cfg = load_config(path)
+    write(cfg, cfg.llm.api_key_env, 'model-catalog-private-key')
+    before = path.read_bytes()
+
+    def catalog(self):
+        assert self.cfg.base_url == 'https://catalog.example.invalid/v1'
+        assert self.cfg.api_key == 'model-catalog-private-key'
+        return ['vendor/text-model', 'another-model']
+
+    monkeypatch.setattr(LLMClient, 'list_models', catalog)
+    response = client.post('/settings/models', data={
+        'base_url': 'https://catalog.example.invalid/v1/chat/completions/'})
+    assert response.status_code == 200
+    assert response.json()['models'] == ['vendor/text-model', 'another-model']
+    assert 'model-catalog-private-key' not in response.text
+    assert path.read_bytes() == before
+    assert response.headers['cache-control'] == 'no-store'
+    assert client.post('/settings/models', data={'base_url': cfg.llm.base_url},
+        headers={'Origin': 'https://untrusted.example'}).status_code == 403
+    assert client.post('/settings/models', data={'base_url': 'file:///tmp'}).status_code == 400
+    client.cookies.clear()
+    assert client.post('/settings/models', data={'base_url': cfg.llm.base_url}).status_code == 401
+
+
+def test_model_catalog_requires_key_and_preserves_manual_fallback(settings_env, monkeypatch):
+    from litradar.credentials import write
+    from litradar.llm import LLMClient, LLMError
+    path, _, client = settings_env
+    cfg = load_config(path)
+    write(cfg, cfg.llm.api_key_env, None)
+    form = {'base_url': cfg.llm.base_url}
+    assert '先保存模型服务密钥' in client.post('/settings/models', data=form).json()['detail']
+    write(cfg, cfg.llm.api_key_env, 'dummy-key')
+    def unsupported(self):
+        raise LLMError('此服务未提供模型列表接口，可以手动填写模型名称。')
+    monkeypatch.setattr(LLMClient, 'list_models', unsupported)
+    response = client.post('/settings/models', data=form)
+    assert response.status_code == 400 and '手动填写' in response.json()['detail']
+    assert 'name="llm.model"' in client.get('/settings/services').text
+
+
+def test_model_settings_can_be_corrected_independently_of_old_source_settings(settings_env):
+    path, _, client = settings_env
+    store = SettingsStore(load_config(path))
+    store.update_config({'sources.s2_search_enabled': True, 'sources.s2_search_lookback_days': 300},
+                        store.version())
+    response = client.post('/settings/model', data=_model_form(path, **{'llm.model': 'fixed'}))
+    assert response.status_code == 200
+    assert load_config(path).llm.model == 'fixed'
+
+
+def test_model_picker_ignores_old_catalog_and_retains_manual_choice():
+    import shutil
+    import subprocess
+    from pathlib import Path
+    node = shutil.which('node')
+    if not node:
+        pytest.skip('Node.js required for frontend regression')
+    result = subprocess.run([node, str(Path(__file__).parent / 'helpers/model_picker.cjs')],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize('route', ['/settings/groups/new','/settings/services','/settings/reading',
                                   '/settings/schedule','/settings/maintenance'])
 def test_every_settings_page_renders_without_secrets(settings_env, route):
