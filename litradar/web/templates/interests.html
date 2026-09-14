@@ -42,7 +42,7 @@
   <p>检索词必须是英文,中文拿去查 Crossref 会一无所获。多条查询取并集,实测召回多 86%,精确率交给 DeepSeek 精排。</p>
 </div>
 
-<form method="post" action="/interests" class="editor">
+<form method="post" action="{{ group_url('/interests') }}" class="editor">
   <label class="sr-only" for="raw">interests.yaml</label>
   <textarea class="textarea" id="raw" name="raw" spellcheck="false" autocapitalize="off" autocorrect="off">{{ raw }}</textarea>
   <div class="formbar">

@@ -227,12 +227,12 @@ def _summarize_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
                 FROM item i
                 JOIN item_group ig ON ig.item_id = i.id AND ig.group_id = ?
                 LEFT JOIN summary          su ON su.item_id = i.id
-                LEFT JOIN score            sc ON sc.item_id = i.id
+                LEFT JOIN score            sc ON sc.item_id = i.id AND sc.group_id = ?
                 LEFT JOIN item_enrichment  e  ON e.item_id  = i.id
                 WHERE {where} AND i.kind='paper' AND {db.in_window('i')}
                 ORDER BY fs DESC, i.published_at DESC
                 LIMIT ?""",
-            (group_id, *w, limit),
+            (group_id, group_id, *w, limit),
         ).fetchall())
         stat["pending"] = len(rows)
 
@@ -246,13 +246,13 @@ def _summarize_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
                        {stale} AS summary_stale
                 FROM item i
                 JOIN item_group ig ON ig.item_id = i.id AND ig.group_id = ?
-                LEFT JOIN score   sc ON sc.item_id = i.id
+                LEFT JOIN score   sc ON sc.item_id = i.id AND sc.group_id = ?
                 LEFT JOIN summary su ON su.item_id = i.id
                 LEFT JOIN item_enrichment e ON e.item_id = i.id
                 WHERE i.kind='paper' AND {db.in_window('i')}
                 ORDER BY fs DESC, i.published_at DESC
                 LIMIT ?""",
-            (group_id, *w, deep_n),
+            (group_id, group_id, *w, deep_n),
         ).fetchall()) if deep_n > 0 else []
         heads = [r for r in top_rows
                  if force or r["depth"] != "deep" or r["summary_stale"]]

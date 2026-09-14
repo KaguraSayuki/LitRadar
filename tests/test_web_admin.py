@@ -254,6 +254,46 @@ def test_真实get_cfg缓存重载后坏文件可修复(tmp_path, monkeypatch):
 GOOD = "direction: x\nsearch_queries: [a]\nkeywords: {core: [k]}\njournals: {core: []}\n"
 
 
+@pytest.mark.parametrize("route", ["/interests", "/profile"])
+@pytest.mark.parametrize("original", [GOOD, "groups: broken\n"])
+def test_合法多组配置可保存并真实重载(tmp_path, monkeypatch, route, original):
+    target = tmp_path / "interests.yaml"
+    target.write_text(original, encoding="utf-8")
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(yaml.safe_dump({"app": {
+        "db_path": str(tmp_path / "db.sqlite"), "interests": str(target),
+    }, "llm": {"enabled": False}}), encoding="utf-8")
+    monkeypatch.setattr(webapp, "CONFIG_PATH", str(config_file))
+    monkeypatch.setattr(webapp, "_cfg_cache", {})
+    c = TestClient(webapp.app)
+    c.get("/interests?g=org")  # 也覆盖已打开页面的组因为磁盘坏配置而无法加载
+    data = {"groups": [{"slug": "org", "direction": "organic chemistry"},
+                       {"slug": "mat", "direction": "materials"}]}
+    raw = yaml.safe_dump(data)
+    saved = c.post(route + "?g=org", data={"raw": raw}, follow_redirects=False)
+    assert saved.status_code == 303
+    assert target.read_text(encoding="utf-8") == raw
+    assert webapp.get_cfg().interests_data == data
+    assert [g.slug for g in webapp.load_groups(webapp.get_cfg())] == ["org", "mat"]
+    assert c.get(saved.headers["location"]).status_code == 200
+    assert _backups(target)[0].read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("data", [
+    {"groups": [{"slug": "org"}], "direction": "mixed format"},
+    {"groups": [{"slug": "org"}, {"slug": "org"}]},
+    {"groups": [{"slug": "org", "keywords": {"core": [123]}}]},
+    {"groups": []},
+])
+def test_非法多组配置不覆盖也不备份(client, data):
+    target = webapp.get_cfg().interests_file
+    target.write_text(GOOD, encoding="utf-8")
+    response = _save(client, yaml.safe_dump(data))
+    assert response.status_code == 400
+    assert target.read_text(encoding="utf-8") == GOOD
+    assert _backups(target) == []
+
+
 def _save(client, raw: str):
     return client.post("/interests", data={"raw": raw}, headers={"X-Token": TOKEN},
                        follow_redirects=False)

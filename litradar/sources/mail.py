@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import imaplib
 import shutil
+import ssl
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -83,18 +84,22 @@ def imap_criteria(cfg: MailConfig) -> list[str]:
     return crit
 
 
+def open_imap(cfg: MailConfig) -> imaplib.IMAP4_SSL:
+    """采集与 mail-test 共用 TLS 入口,先验证证书/主机名再允许发送密码。"""
+    return imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port, timeout=IMAP_TIMEOUT,
+                            ssl_context=ssl.create_default_context())
+
+
 def _connect(cfg: MailConfig, pwd: str) -> imaplib.IMAP4_SSL:
-    conn = imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port, timeout=IMAP_TIMEOUT)
+    conn = open_imap(cfg)
     conn.login(cfg.imap_user, pwd)
-    conn.select(cfg.imap_folder, readonly=False)
+    conn.select(cfg.imap_folder, readonly=not cfg.imap_mark_seen)
     return conn
 
 
 def _disconnect(conn: imaplib.IMAP4_SSL) -> None:
-    try:
-        conn.close()
-    except Exception:  # noqa: BLE001
-        pass
+    # CLOSE 会永久清除本邮箱所有带 \\Deleted 的邮件,包括其它客户端标的。
+    # LOGOUT 直接结束会话,不 expunge,也不依赖服务器支持 UNSELECT 扩展。
     conn.logout()
 
 

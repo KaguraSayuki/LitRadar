@@ -97,7 +97,10 @@ def test_两组各拿一份_relevance_而中性摘要只算一次(tmp_path):
     cfg = _cfg(tmp_path)
     conn = db.Database(cfg.db_file).connect()
     ids = _ids(cfg)
-    _seed(conn, "Shared paper", groups=[ids["org"], ids["mat"]])
+    iid = _seed(conn, "Shared paper", groups=[ids["org"], ids["mat"]])
+    # 真实流程先排序再摘要。复合 score 主键下漏 group JOIN 会复制同一条 item。
+    db.save_score(conn, iid, group_id=ids["org"], final_score=60)
+    db.save_score(conn, iid, group_id=ids["mat"], final_score=90)
     conn.commit()
     conn.close()
 
@@ -114,6 +117,43 @@ def test_两组各拿一份_relevance_而中性摘要只算一次(tmp_path):
     # 一次整条 + 一次只补 relevance:第二个组没有重算问题/方法/结果/局限
     assert len([c for c in FakeLLM.calls if c.startswith("full:")]) == 1
     assert len([c for c in FakeLLM.calls if c.startswith("relevance:")]) == 1
+
+
+@pytest.mark.parametrize("deep_n", [0, 1])
+def test_共享论文的待处理队列和深度名额只按本组评分(tmp_path, monkeypatch, deep_n):
+    from litradar.rank import load_groups
+
+    cfg = _cfg(tmp_path)
+    cfg.llm.deep_summary_top_n = deep_n
+    ids = _ids(cfg)
+    conn = db.Database(cfg.db_file).connect()
+    low = _seed(conn, "High in materials", groups=list(ids.values()))
+    high = _seed(conn, "High in organic", groups=list(ids.values()))
+    for iid, org, mat in [(low, 1, 100), (high, 90, 2)]:
+        db.save_score(conn, iid, group_id=ids["org"], final_score=org)
+        db.save_score(conn, iid, group_id=ids["mat"], final_score=mat)
+    conn.commit()
+    conn.close()
+    deep_calls, brief_calls = [], []
+
+    def deep(row, prof, llm):
+        deep_calls.append(row["id"])
+        return {"one_liner": "deep", "relevance": prof.slug}
+
+    def brief(rows, llm):
+        brief_calls.extend(r["id"] for r in rows)
+        return {r["id"]: {"one_liner": "brief"} for r in rows}
+
+    monkeypatch.setattr(summarize, "summarize_one", deep)
+    monkeypatch.setattr(summarize, "summarize_brief", brief)
+    out = summarize.run(cfg, limit=2, group=load_groups(cfg)[0], verbose=False)
+    assert out["errors"] == 0
+    assert out["groups"]["org"]["pending"] == 2
+    assert deep_calls == ([high] if deep_n else [])
+    assert brief_calls == ([low] if deep_n else [high, low])
+    conn = db.Database(cfg.db_file).connect()
+    assert conn.execute("SELECT COUNT(*) FROM summary").fetchone()[0] == 2
+    conn.close()
 
 
 def test_第二次运行不再重复花钱(tmp_path):

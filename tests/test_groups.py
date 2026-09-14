@@ -74,10 +74,12 @@ def test_不带组时落到默认组(conn):
     assert db.get_items(conn)[0]["final_score"] == 42.0
 
 
-def test_未知组不会报错只是查不到分(conn):
+def test_未知组返回空集且不自动建组(conn):
     _item(conn)
-    assert len(db.get_items(conn, group_slug="nope")) == 1
-    assert db.get_items(conn, group_slug="nope")[0]["final_score"] is None
+    assert db.get_items(conn, group_slug="nope") == []
+    assert db.count_items(conn, group_slug="nope") == 0
+    assert db.search_items(conn, "Catalysis", group_slug="nope") == []
+    assert db.group_id(conn, "nope") is None
 
 
 # ------------------------------------------------- 忽略按组、收藏全局

@@ -11,6 +11,7 @@
 </div>
 
 <form method="get" action="/search" class="searchbar" role="search">
+  {% if group_slug %}<input type="hidden" name="g" value="{{ group_slug }}">{% endif %}
   <label class="searchbar__field">
     {{ icon('search') }}
     <span class="sr-only">检索词</span>

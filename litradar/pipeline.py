@@ -64,17 +64,21 @@ def _store(conn: sqlite3.Connection, data: dict, *,
 
 def ingest_mail(cfg: Config, *, verbose: bool = True) -> dict:
     """解析 X-MOL 订阅邮件。支持 folder / maildir / imap 三种来源。"""
+    if not cfg.sources.xmol_enabled:
+        return {"skipped": "sources.xmol_enabled=false"}
     database = db.Database(cfg.db_file)
     conn = database.connect()
-    # X-MOL 是**全局来源**:推什么由 X-MOL 网站上的订阅决定,本项目没法按方向
-    # 驱动它。所以它的条目记进所有启用的组,再由各组的规则与关键词决定相关性。
-    group_ids = db.sync_groups(conn, load_groups(cfg))
-    mail_group_ids = [group_ids[g.slug] for g in load_enabled_groups(cfg)
-                      if g.slug in group_ids]
     stat = {"messages": 0, "records": 0, "new": 0, "updated": 0, "errors": 0,
             "mode": cfg.mail.mode}
     started = db.now()
     try:
+        # X-MOL 是全局来源,条目记进所有启用的组。组同步是独立短事务,
+        # 必须在重放/IMAP I/O 前提交,否则收信期间会一直挡住网页反馈写库。
+        group_ids = db.sync_groups(conn, load_groups(cfg))
+        mail_group_ids = [group_ids[g.slug] for g in load_enabled_groups(cfg)
+                          if g.slug in group_ids]
+        conn.commit()
+
         def ingest_records(records, meta, raw: bytes, *, mid: str,
                            live_msg=None) -> None:
             """在一个事务中写入一封邮件；live_msg 存在时成功后才 ack。"""
@@ -459,7 +463,9 @@ def run_all(cfg: Config, *, days: int = 200, verbose: bool = True,
     out: dict[str, Any] = {}
     if verbose:
         print("[1/4] 解析 X-MOL 订阅邮件")
-    out["ingest_mail"] = ingest_mail(cfg, verbose=verbose)
+    out["ingest_mail"] = (ingest_mail(cfg, verbose=verbose)
+                          if cfg.sources.xmol_enabled
+                          else {"skipped": "sources.xmol_enabled=false"})
 
     if verbose:
         print("[2/4] 关键词检索(OpenAlex / Crossref)")

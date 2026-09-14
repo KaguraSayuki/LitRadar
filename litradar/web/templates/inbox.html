@@ -20,29 +20,29 @@
 
 <div class="toolbar">
   <nav class="seg" aria-label="阅读状态">
-    <a href="/?state=new{{ ms }}" class="{{ 'is-on' if state == 'new' }}">未读</a>
-    <a href="/?state=read{{ ms }}" class="{{ 'is-on' if state == 'read' }}">已读</a>
+    <a href="{{ group_url('/?state=new' ~ ms) }}" class="{{ 'is-on' if state == 'new' }}">未读</a>
+    <a href="{{ group_url('/?state=read' ~ ms) }}" class="{{ 'is-on' if state == 'read' }}">已读</a>
     {# 收藏与不感兴趣都是独立的轴(未读/已读都可能被收藏或被否决),所以并列在
        这里而不是另开一级导航。带上条数:空的时候得让人一眼看出来是空,
        而不是以为自己点错了。
        "不感兴趣"必须有这个入口 —— 否则用户点了之后那篇就凭空消失,
        连"我当时为什么否决它"都查不到,更别说撤销。 #}
-    <a href="/?state=starred{{ ms }}" class="{{ 'is-on' if state == 'starred' }}">
+    <a href="{{ group_url('/?state=starred' ~ ms) }}" class="{{ 'is-on' if state == 'starred' }}">
       收藏{% if starred_total %} <span class="seg__n">{{ starred_total }}</span>{% endif %}
     </a>
-    <a href="/?state=ignored{{ ms }}" class="{{ 'is-on' if state == 'ignored' }}">
+    <a href="{{ group_url('/?state=ignored' ~ ms) }}" class="{{ 'is-on' if state == 'ignored' }}">
       不感兴趣{% if ignored_total %} <span class="seg__n">{{ ignored_total }}</span>{% endif %}
     </a>
-    <a href="/?state=all{{ ms }}" class="{{ 'is-on' if state == 'all' }}"
+    <a href="{{ group_url('/?state=all' ~ ms) }}" class="{{ 'is-on' if state == 'all' }}"
        title="仍在考虑范围内的全部条目(不含「不感兴趣」和被规则过滤的)">全部</a>
   </nav>
   {# 阈值按实际分布定:加权后满分约 100,但绝大多数条目落在 40 以下。
      精排覆盖整个窗口之后,高分档才是"雷达真正想让你看的"那一小撮。 #}
   <nav class="seg" aria-label="相关度筛选">
-    <a href="/?state={{ state }}" class="{{ 'is-on' if not min_score }}">全部分数</a>
-    <a href="/?state={{ state }}&min_score=30" class="{{ 'is-on' if min_score == 30 }}">≥ 30</a>
-    <a href="/?state={{ state }}&min_score=40" class="{{ 'is-on' if min_score == 40 }}">≥ 40</a>
-    <a href="/?state={{ state }}&min_score=60" class="{{ 'is-on' if min_score == 60 }}">≥ 60</a>
+    <a href="{{ group_url('/?state=' ~ state) }}" class="{{ 'is-on' if not min_score }}">全部分数</a>
+    <a href="{{ group_url('/?state=' ~ state ~ '&min_score=30') }}" class="{{ 'is-on' if min_score == 30 }}">≥ 30</a>
+    <a href="{{ group_url('/?state=' ~ state ~ '&min_score=40') }}" class="{{ 'is-on' if min_score == 40 }}">≥ 40</a>
+    <a href="{{ group_url('/?state=' ~ state ~ '&min_score=60') }}" class="{{ 'is-on' if min_score == 60 }}">≥ 60</a>
   </nav>
   {% if pages > 1 %}<span class="toolbar__right">第 {{ page_no }} / {{ pages }} 页</span>{% endif %}
 </div>
@@ -66,7 +66,7 @@
 {% elif total > 0 %}
   <div class="empty">
     当前筛选下没有条目。<br>
-    <a href="/">回到未读</a>
+    <a href="{{ group_url('/') }}">回到未读</a>
   </div>
 {% else %}
   <div class="empty">

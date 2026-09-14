@@ -974,8 +974,8 @@ def _read_group_id(conn: sqlite3.Connection, slug: str | None) -> int:
     """读路径用的 group_id:查不到就返回 -1(什么都关联不上)。
 
     读路径**不建组** —— 建组是写路径(pipeline.sync_groups / save_score)的事,
-    在读事务里偷偷 INSERT 只会在回滚时白做。默认组不存在时,条目照常列出,
-    只是没有分数与组级状态,这正是空库该有的样子。
+    在读事务里偷偷 INSERT 只会在回滚时白做。尚未同步的组没有成员,
+    必须返回空集,不能把 -1 当作不分组而显示全库。
     """
     gid = group_id(conn, slug)
     return gid if gid is not None else -1
@@ -1018,7 +1018,7 @@ def _item_filters(*, kind: str | None, state: str | None,
     """get_items 与 count_items 共用同一套筛选条件,防止两处写法漂移
     (漂移会导致分页总数和实际列表对不上)。"""
     where, params = ["1=1"], []
-    if group_id is not None and group_id >= 0:
+    if group_id is not None:
         # 收件箱只放**本组的条目**。不按组成员过滤的话,一个组会看到全库
         # (只是别的组的条目没有分数),分组就白做了。
         where.append("i.id IN (SELECT item_id FROM item_group WHERE group_id = ?)")

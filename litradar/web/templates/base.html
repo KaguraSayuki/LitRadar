@@ -21,13 +21,13 @@
   <link rel="stylesheet" href="/static/style.css?v={{ static_v }}">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%231F6B5A' stroke-width='2.2' stroke-linecap='round'%3E%3Cpath d='M2.29 9.62A10 10 0 1 0 21.31 8.35'/%3E%3Cpath d='M16.24 7.76A6 6 0 1 0 8.23 16.67'/%3E%3Ccircle cx='12' cy='12' r='2' fill='%231F6B5A'/%3E%3Cpath d='m13.41 10.59 5.66-5.66'/%3E%3C/svg%3E">
 </head>
-<body {% block bodyattr %}{% endblock %}>
+<body data-group="{{ group_slug or '' }}" {% block bodyattr %}{% endblock %}>
 
 <header class="topbar">
-  <a class="brand" href="/">{{ icon('radar') }}<span>LitRadar</span></a>
+  <a class="brand" href="{{ group_url('/') }}">{{ icon('radar') }}<span>LitRadar</span></a>
   <nav class="nav" aria-label="主导航">
     {% for key, href, label, ico in nav_items %}
-      <a href="{{ href }}" class="{{ 'is-on' if page == key }}"{% if page == key %} aria-current="page"{% endif %}>{{ label }}</a>
+      <a href="{{ group_url(href) }}" class="{{ 'is-on' if page == key }}"{% if page == key %} aria-current="page"{% endif %}>{{ label }}</a>
     {% endfor %}
   </nav>
   <span class="topbar__spacer"></span>
@@ -61,7 +61,7 @@
      (Crossref 检索早关了,现在是拿它做元数据;滚雪球和 easyScholar 完全没提)。 #}
   <p class="footer__src">
     数据来源 X-MOL 订阅 · Crossref · Semantic Scholar · easyScholar
-    <span class="footer__sep">·</span><a class="footer__link" href="/stats#run">运行记录</a>
+    <span class="footer__sep">·</span><a class="footer__link" href="{{ group_url('/stats#run') }}">运行记录</a>
   </p>
   <p class="footer__note">中文标题与结构化摘要由 DeepSeek 生成,请以原文为准。</p>
 </footer>
@@ -69,7 +69,7 @@
 {# 手机底部标签栏(桌面隐藏) #}
 <nav class="tabbar" aria-label="主导航">
   {% for key, href, label, ico in nav_items %}
-    <a href="{{ href }}" class="{{ 'is-on' if page == key }}"{% if page == key %} aria-current="page"{% endif %}>{{ icon(ico) }}<span>{{ label }}</span></a>
+    <a href="{{ group_url(href) }}" class="{{ 'is-on' if page == key }}"{% if page == key %} aria-current="page"{% endif %}>{{ icon(ico) }}<span>{{ label }}</span></a>
   {% endfor %}
 </nav>
 

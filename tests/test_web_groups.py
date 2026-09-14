@@ -6,6 +6,13 @@
 from __future__ import annotations
 
 import datetime
+import json
+import shutil
+import subprocess
+from copy import deepcopy
+from html.parser import HTMLParser
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
@@ -81,7 +88,7 @@ def test_只有一个组时不显示切换器(tmp_path, monkeypatch):
 def test_切组后记住选择(client):
     client.get("/?g=mat")
 
-    # 页面内的链接不带 ?g=,靠 cookie 才不会点进详情就跳回第一组
+    # 无组参数的新导航仍使用 Cookie 作为默认视图。
     assert client.cookies.get(webapp.GROUP_COOKIE) == "mat"
     assert "Perovskite" in client.get("/").text
 
@@ -309,3 +316,165 @@ def test_全局工作算进每个组的账(tmp_path, monkeypatch):
     c = TestClient(webapp.app)
 
     assert c.post("/admin/run/rank?g=org").status_code == 429
+
+
+class PageElements(HTMLParser):
+    def __init__(self, html):
+        super().__init__()
+        self.elements = []
+        self.feed(html)
+
+    def handle_starttag(self, tag, attrs):
+        self.elements.append((tag, dict(attrs)))
+
+    def attrs(self, tag):
+        return [attrs for name, attrs in self.elements if name == tag]
+
+
+@pytest.mark.parametrize("path", ["/", "/week", "/search?q=Both", "/item/1", "/stats", "/interests"])
+def test_所有页面导航和表单固定渲染时的组(both_client, path):
+    c, cfg, iid, ids = both_client
+    # 页面 URL 本身不含组,但渲染时从 Cookie 选中的组仍必须写入 DOM/链接。
+    c.get("/?g=org")
+    page = PageElements(c.get(path).text)
+    assert page.attrs("body")[0]["data-group"] == "org"
+    links = [a["href"] for a in page.attrs("a") if "href" in a
+             and "groupbar__item" not in a.get("class", "")]
+    for href in links:
+        if href.startswith("/") or href.startswith("?"):
+            assert parse_qs(urlsplit(href).query).get("g") == ["org"], href
+    for form in page.attrs("form"):
+        if form.get("method") == "get":
+            assert any(i.get("name") == "g" and i.get("value") == "org"
+                       for i in page.attrs("input"))
+        else:
+            assert parse_qs(urlsplit(form["action"]).query)["g"] == ["org"]
+    c.get("/?g=mat")
+    # 从旧标签页导航到详情,分数/反馈上下文仍然是 org。
+    details = [href for href in links if href.startswith("/item/")]
+    if details:
+        assert PageElements(c.get(details[0]).text).attrs("body")[0]["data-group"] == "org"
+
+
+@pytest.mark.parametrize("path", ["/?state=all&min_score=30&g=org", "/search?q=Both&g=org"])
+def test_分页保留组和筛选条件(both_client, monkeypatch, path):
+    c, cfg, iid, ids = both_client
+    monkeypatch.setattr(webapp, "PER_PAGE", 1)
+    conn = db.Database(cfg.db_file).connect()
+    for n in range(30):
+        new_id, _ = db.upsert_item(conn, {
+            "kind": "paper", "dedup_key": f"page:{n}", "title": f"Both {n}",
+            "title_norm": f"both {n}", "source": "test", "published_at": TODAY})
+        db.add_to_group(conn, ids["org"], new_id)
+        db.save_score(conn, new_id, group_id=ids["org"], final_score=50)
+    conn.commit()
+    conn.close()
+    page = PageElements(c.get(path).text)
+    pagers = [a["href"] for a in page.attrs("a") if "page=" in a.get("href", "")]
+    assert pagers
+    expected = parse_qs(urlsplit(path).query)
+    for href in pagers:
+        query = parse_qs(urlsplit(href).query)
+        assert all(query.get(k) == v for k, v in expected.items())
+
+
+@pytest.mark.parametrize("referer", ["http://testserver/?g=org", "http://testserver/search?q=Both&g=org"])
+def test_旧页面写请求可由同源Referer恢复组(both_client, referer):
+    c, cfg, iid, ids = both_client
+    c.get("/?g=mat")
+    r = c.post(f"/item/{iid}/action", data={"action": "ignore"}, headers={"Referer": referer})
+    assert r.status_code == 200
+    conn = db.Database(cfg.db_file).connect()
+    states = dict(conn.execute("SELECT group_id, ignored FROM group_state WHERE item_id=?", (iid,)))
+    conn.close()
+    assert states.get(ids["org"]) == 1
+    assert states.get(ids["mat"], 0) == 0
+
+
+def test_跨源Referer不能覆盖默认组(both_client):
+    c, cfg, iid, ids = both_client
+    c.get("/?g=mat")
+    r = c.post(f"/item/{iid}/action", data={"action": "ignore"},
+               headers={"Referer": "https://other.example/?g=org"})
+    assert r.status_code == 200
+    conn = db.Database(cfg.db_file).connect()
+    assert dict(conn.execute("SELECT group_id, ignored FROM group_state")) == {ids["mat"]: 1}
+    conn.close()
+
+
+@pytest.mark.parametrize("path", ["/item/1/action", "/admin/run/rank"])
+def test_写请求中的失效组不会静默改投其他组(both_client, monkeypatch, path):
+    c, cfg, iid, ids = both_client
+    calls = []
+    monkeypatch.setattr(webapp.rank, "run", lambda *a, **kw: calls.append(kw))
+    c.get("/?g=mat")
+    r = c.post(path + "?g=removed", data={"action": "ignore"})
+    assert r.status_code == 400
+    assert calls == []
+    conn = db.Database(cfg.db_file).connect()
+    assert conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0] == 0
+    conn.close()
+
+
+@pytest.mark.parametrize("path", ["/", "/week", "/search?q=Both"])
+def test_新配置组同步前页面为空且读请求不建组(both_client, path):
+    c, cfg, iid, ids = both_client
+    cfg.interests_data = deepcopy(TWO_GROUPS)
+    cfg.interests_data["groups"].append({"slug": "new", "name": "New"})
+    c.get("/?g=new")
+    page = c.get(path)
+    assert page.status_code == 200
+    assert "Both groups" not in page.text
+    conn = db.Database(cfg.db_file).connect()
+    assert db.group_id(conn, "new") is None
+    assert db.count_items(conn, group_slug="new") == 0
+    conn.close()
+
+
+@pytest.mark.parametrize("stage", ["search", "rank", "summarize", "all"])
+def test_真实前端脚本的反馈撤销及流水线重试都沿用页面组(both_client, monkeypatch, stage):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("前端执行回归需要 Node.js 18+;其余 Web 测试不依赖 Node")
+    c, cfg, iid, ids = both_client
+    c.get("/?g=org")
+    # 有意使用不含 g 的页面 URL,保证脚本读取渲染上下文而不是猜 URL/Cookie。
+    body = PageElements(c.get("/").text).attrs("body")[0]
+    c.get("/?g=mat")
+    result = subprocess.run(
+        [node, str(Path(__file__).parent / "helpers" / "web_context.cjs")],
+        input=json.dumps({"itemId": iid, "stage": stage, "group": body["data-group"],
+                          "state": body["data-state"]}),
+        text=True, capture_output=True, check=True,
+    )
+    requests = json.loads(result.stdout)
+    assert len(requests) == 4  # ignore, undo, 第一次 run, 密码重试
+    calls, limits = [], []
+    cfg.admin.guarded_stages = (stage,)
+
+    def password(request, cfg):
+        if not request.headers.get("X-Admin-Password"):
+            raise webapp.HTTPException(401, "password", headers={"X-Admin-Password-Required": "1"})
+
+    def run(*a, **kw):
+        calls.append(kw["group"].slug)
+        return {"errors": 0}
+
+    monkeypatch.setattr(webapp, "require_admin_password", password)
+    monkeypatch.setattr(webapp, "require_stage_limits", lambda cfg, stage, slug: limits.append(slug))
+    monkeypatch.setattr(webapp.pipeline, "ingest_keyword_search", run)
+    monkeypatch.setattr(webapp.rank, "run", run)
+    monkeypatch.setattr(webapp.summarize, "run", run)
+    monkeypatch.setattr(webapp.pipeline, "run_all", run)
+    for n, req in enumerate(requests):
+        assert parse_qs(urlsplit(req["url"]).query)["g"] == ["org"]
+        response = c.post(req["url"], data=req["data"], headers=req["headers"])
+        assert response.status_code == (401 if n == 2 else 200)
+        if n < 2:
+            conn = db.Database(cfg.db_file).connect()
+            states = dict(conn.execute("SELECT group_id, ignored FROM group_state"))
+            conn.close()
+            assert states.get(ids["org"]) == 1 - n
+            assert states.get(ids["mat"], 0) == 0
+    assert calls == limits == ["org"]
+    assert c.cookies.get(webapp.GROUP_COOKIE) == "mat"  # 写请求不切换默认视图
