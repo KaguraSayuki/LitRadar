@@ -1,5 +1,22 @@
 /* Progressive settings forms retain their inputs after validation and auth errors. */
 (() => {
+  // Reveal the relevant fields without clearing values in collapsed sections.
+  const mailMode = document.getElementById('mail.mode');
+  mailMode?.addEventListener('change', () => {
+    document.getElementById('mail-connection').open = mailMode.value === 'imap';
+  });
+  document.addEventListener('invalid', event => {
+    let section = event.target.closest('details');
+    while (section) {
+      section.open = true;
+      section = section.parentElement.closest('details');
+    }
+  }, true);
+  document.addEventListener('click', event => {
+    document.querySelectorAll('.direction-menu[open]').forEach(menu => {
+      if (!menu.contains(event.target)) menu.open = false;
+    });
+  });
   async function action(url, body, password) {
     const headers = password ? {'X-Admin-Password':password} : {};
     const response = await fetch(url, {method:'POST', body, headers});
@@ -16,7 +33,8 @@
     document.getElementById('query-rows').append(document.getElementById('query-template').content.cloneNode(true));
   });
   document.addEventListener('click', event => {
-    if (event.target.matches('[data-remove-query]')) event.target.closest('.query-row').remove();
+    const remove = event.target.closest('[data-remove-query]');
+    if (remove) remove.closest('.query-row').remove();
   });
   document.querySelectorAll('[data-add-pair]').forEach(button => button.addEventListener('click', () => {
     const rows = document.getElementById(button.dataset.addPair);

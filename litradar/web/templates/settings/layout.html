@@ -1,14 +1,49 @@
 {% extends "base.html" %}
-{% block title %}设置 · LitRadar{% endblock %}
+{% from '_macros.html' import icon %}
+{% set categories = [('groups','研究方向','target'),('services','数据与邮箱','plug'),('reading','AI 与阅读','sliders'),('schedule','自动更新','clock'),('maintenance','访问与维护','lock')] %}
+{% set descriptions = {
+  'groups': '分别管理不同课题的检索与阅读偏好。',
+  'services': '连接文献服务，选择你需要的数据来源。',
+  'reading': '调整文献排序、摘要和期刊信息的呈现方式。',
+  'schedule': '按你的节奏，持续关注新的研究进展。',
+  'maintenance': '管理访问方式、配置备份与实例信息。'
+} %}
+{% block title %}{{ self.heading() }} · LitRadar{% endblock %}
+{% block mainclass %}main--settings{% endblock %}
 {% block body %}
-<div class="page-head"><div><h1>{% block heading %}设置{% endblock %}</h1><p class="page-sub">保存设置后，下次更新使用新设置。保存不会启动检索、排序或摘要。</p></div></div>
-<nav class="settings-nav" aria-label="设置分类">
-{% for key, label in [('groups','研究方向'),('services','数据与邮箱'),('reading','AI 与阅读'),('schedule','自动更新'),('maintenance','访问与维护')] %}
-<a href="/settings/{{ key }}" class="{{ 'is-on' if section == key }}" {% if section == key %}aria-current="page"{% endif %}>{{ label }}</a>
-{% endfor %}
-</nav>
-{% if message %}<p class="flash flash--ok" role="status">{{ message }}</p>{% endif %}
-{% if errors %}<div class="flash flash--err" role="alert"><div><strong>尚未保存，原设置已保留。</strong>{% for key, value in errors.items() %}<p>{{ value }}</p>{% endfor %}{% if errors.get('') %}<a href="{{ request.url.remove_query_params('k') }}" target="_blank" rel="noopener">在新标签页打开当前设置，对照保留的输入</a>{% endif %}</div></div>{% endif %}
-{% block settings_body %}{% endblock %}
+<div class="settings-shell">
+  <aside class="settings-sidebar">
+    <p class="settings-sidebar__title">工作区设置</p>
+    <nav class="settings-nav" aria-label="设置分类">
+      {% for key,label,symbol in categories %}
+      <a href="/settings/{{ key }}" class="{{ 'is-on' if section == key }}" {% if section == key %}aria-current="page"{% endif %}>{{ icon(symbol) }}<span>{{ label }}</span></a>
+      {% endfor %}
+    </nav>
+    <details class="settings-mobile-nav">
+      <summary>{{ icon('sliders') }}<span>设置<span class="settings-mobile-nav__divider">/</span>{% for key,label,symbol in categories if section == key %}{{ label }}{% endfor %}</span>{{ icon('chevron-right') }}</summary>
+      <nav aria-label="设置分类">
+        {% for key,label,symbol in categories %}
+        <a href="/settings/{{ key }}" class="{{ 'is-on' if section == key }}" {% if section == key %}aria-current="page"{% endif %}>{{ icon(symbol) }}{{ label }}</a>
+        {% endfor %}
+      </nav>
+    </details>
+    <p class="settings-sidebar__note">保存只修改设置。<br>需要立即获取文献时，<br>单独运行一次更新。</p>
+  </aside>
+  <div class="settings-content">
+    <header class="settings-head">
+      <div>{% block breadcrumb %}{% endblock %}<h1>{% block heading %}设置{% endblock %}</h1><p class="page-sub">{% block description %}{{ descriptions.get(section, '') }}{% endblock %}</p></div>
+      <div class="settings-head__action">{% block heading_action %}{% endblock %}</div>
+    </header>
+    {% if message %}<div class="flash flash--ok" role="status">{{ icon('check-circle') }}<span>{{ message }}</span></div>{% endif %}
+    {% if errors %}
+    <div class="flash flash--err" role="alert">
+      {{ icon('alert') }}<div><strong>尚未保存，原设置已保留。</strong>
+      {% for key,value in errors.items() %}<p>{{ value }}</p>{% endfor %}
+      {% if errors.get('') %}<a href="{{ request.url.remove_query_params('k') }}" target="_blank" rel="noopener">在新标签页打开当前设置，对照保留的输入</a>{% endif %}</div>
+    </div>
+    {% endif %}
+    {% block settings_body %}{% endblock %}
+  </div>
+</div>
 <script src="/static/settings.js?v={{ static_v }}" defer></script>
 {% endblock %}

@@ -14,12 +14,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#FFFFFF" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#1C201E" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#1C1F27" media="(prefers-color-scheme: dark)">
   <title>{% block title %}LitRadar{% endblock %}</title>
   {# 在样式加载前读回上次手动选的主题,避免刷新时闪一下 #}
   <script>(function(){try{var t=localStorage.getItem('litradar-theme');if(t)document.documentElement.setAttribute('data-theme',t)}catch(e){}})();</script>
   <link rel="stylesheet" href="/static/style.css?v={{ static_v }}">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%231F6B5A' stroke-width='2.2' stroke-linecap='round'%3E%3Cpath d='M2.29 9.62A10 10 0 1 0 21.31 8.35'/%3E%3Cpath d='M16.24 7.76A6 6 0 1 0 8.23 16.67'/%3E%3Ccircle cx='12' cy='12' r='2' fill='%231F6B5A'/%3E%3Cpath d='m13.41 10.59 5.66-5.66'/%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%234164D5' stroke-width='2.2' stroke-linecap='round'%3E%3Cpath d='M2.29 9.62A10 10 0 1 0 21.31 8.35'/%3E%3Cpath d='M16.24 7.76A6 6 0 1 0 8.23 16.67'/%3E%3Ccircle cx='12' cy='12' r='2' fill='%234164D5'/%3E%3Cpath d='m13.41 10.59 5.66-5.66'/%3E%3C/svg%3E">
 </head>
 <body data-group="{{ group_slug or '' }}" {% block bodyattr %}{% endblock %}>
 
@@ -49,7 +49,7 @@
   </button>
 </header>
 
-<main class="main">
+<main class="main {% block mainclass %}{% endblock %}">
 {% if page in ('inbox', 'week', 'search') and rank_notice %}
 <p class="notice">{{ rank_notice }}</p>
 {% endif %}
