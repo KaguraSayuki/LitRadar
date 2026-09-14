@@ -16,6 +16,7 @@ personalized ranking, and structured Chinese summaries.
 | [设计记录](docs/litradar-design.md) | 主要技术选择、方案调整与尚未实现的功能 |
 | [Semantic Scholar API Key 申请参考](docs/s2-api-key-application.md) | 与当前实现相符的英文申请草稿及用量估算方法 |
 | [贡献约定](CONTRIBUTING.md) | 提交说明、验证范围与用户体验原则 |
+| [网页设置方案（草案）](docs/web-settings-plan.md) | 面向非编程用户的配置流程与实施范围，尚未实现 |
 
 ## 主要功能
 
