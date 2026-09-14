@@ -1,86 +1,52 @@
-# ============================================================================
-# LitRadar 检索词与偏好 —— 示例模板
-# ----------------------------------------------------------------------------
-# 用法: cp interests.example.yaml interests.yaml 然后按自己的方向改。
-# 真实的 interests.yaml 已在 .gitignore 中排除,不会进版本库。
+# LitRadar 研究方向与检索偏好示例
+# 复制为 interests.yaml，按自己的方向调整示例，并替换尖括号中的占位内容。
+# 请检查期刊、排除词与种子是否适用。
+# 真实 interests.yaml 不进入版本库。
 #
-# 下面每个字段都会被代码实际读取;用不到的可以留空列表。
+# 本文件采用单方向格式，对应固定的 default 组。
+# 多方向配置使用顶层 groups: 列表，每组包含下方的画像字段，并可设置：
+#   slug：稳定标识；name：显示名称；enabled：是否参加默认流水线；
+#   llm_rank：是否进行本组 LLM 精排。
+# 从旧配置转换时保留原组的 slug: default，以继续使用已有成员、分数和反馈。
+# groups: 不能与顶层的单方向画像字段混写。
 #
-# ── 多方向(订阅组) ─────────────────────────────────────────────────────────
-# 本文件默认是**单方向**格式:整份文件就是一组,对应的组 slug 固定为 default。
-# 想同时跟多个方向,就把整份文件换成 groups: 形态 —— 每组一套检索词、关键词、
-# 期刊白名单与排序偏好。规则过滤与 BM25 每组各算(本地计算,不花钱);只有
-# LLM 精排是按组花钱的,所以它可以用 llm_rank 单独关掉。
-#
-# groups:
-#   - slug: organic          # 稳定标识:改名不要改它,否则等于换了一个组
-#     name: 有机合成方法学    # 省略 slug 时从 name 派生
-#     direction: >
-#       这一组的研究方向描述。
-#     search_queries:
-#       - '"N-H insertion" diazo aniline asymmetric'
-#     s2_queries:
-#       - '"N-H insertion" + diazo + aniline'
-#     keywords:
-#       core: [metal carbene]
-#       bonus: [enantioselective]
-#     journals:
-#       core: [Organic Letters]
-#     llm_rank: true         # 本组是否跑 LLM 精排(花钱开关)
-#     enabled: true          # false = 临时停掉这个方向
-#   - slug: materials
-#     name: 材料化学
-#     direction: >
-#       另一组的方向描述。
-#
-# ⚠️ 用了 groups: 之后,同一层就不要再写单方向字段(direction / keywords / …),
-#    校验会直接报错 —— 两者混写无法判断哪个生效。
-# ============================================================================
+# 完整分组示例和网页添加步骤见 docs/subscription-groups.md。
+# 规则与 BM25 在本地计算；精排及方向性摘要可能按组产生模型调用费用。
+# 关闭 llm_rank 只停止精排，摘要仍由全局 LLM 设置控制。
 
-# 研究方向(中文可读,会拼进 LLM 精排与摘要的 prompt)
+# 研究方向描述，用于精排和方向性摘要。请将关键内容放在前 300 个字符内。
 direction: >
-  <在这里写你的研究方向。中文可读即可,它会拼进 LLM 精排与摘要的 prompt。> 示例:有机合成方法学 / 过渡金属催化。以 XX 为底物,经 XX 催化构建 XX 中间体,
+  关注有机合成方法学与过渡金属催化，重点研究金属卡宾参与的 N–H 插入反应，
+  以及相关串联反应的区域选择性和对映选择性。
 
-# ── 检索词(必须英文,多条取并集) ─────────────────────────────────────────
-# 实测(45 天窗口、按 DOI 去重):单条宽查询 100 篇 → 4 条并集 186 篇(+86%)。
-# 收益在【召回】不在精确率 —— 拆开后单条精确率反而略降。精确交给 LLM 精排。
+# Crossref 和 OpenAlex 的英文检索式，多条查询取并集。
+# 以下是有机合成方向的示例，使用前请按研究范围调整。
 search_queries:
-  - "<英文检索词,多条取并集>"
-  - 'example: "N-H insertion" diazo aniline asymmetric'
-  - 'example: "aza-Claisen" rearrangement tandem carbene'
+  - '"N-H insertion" diazo aniline asymmetric'
+  - '"aza-Claisen" rearrangement tandem carbene'
 
-# ── Semantic Scholar bulk 检索词 ──────────────────────────────────────────────
-# ⚠️ 这个端点**必须用查询语法**,裸词会被当短语匹配而返回 0 条:
-#       "N-H insertion" + diazo + aniline      -> 命中 3
-#       diazo carbene N-H insertion aniline    -> 命中 0   ← 直接抄上面那行会失败
-#   语法:+ = AND,| = OR,双引号 = 短语,- = 排除。
-#
-# 为什么值得单独配:Crossref 是模糊匹配(召回高、噪声大),bulk 是精确 AND
-# (召回低、准确率高)。两条腿互补,用 DOI 合并。实测 ("para-selective" |
-# "para-allylation") + aniline 命中 14,含 "Asymmetric para-Functionalization
-# of Anilines Via Chiral Phosphoric..."。
+# Semantic Scholar 布尔查询：+ 为与，| 为或，双引号表示短语，- 表示排除。
+# 与 search_queries 分开配置；例如："N-H insertion" + diazo + aniline。
 s2_queries:
-  - '"<英文短语>" + <词> + <词>'
-  - '("<说法A>" | "<说法B>") + <词>'
-  # + 是 AND,| 是 OR,双引号是短语
+  - '"N-H insertion" + diazo + aniline'
+  - '"aza-Claisen" + carbene'
 
-# ── 关键词(规则打分用) ────────────────────────────────────────────────────
+# 关键词偏好，core 和 bonus 参与规则与关键词排序。
 keywords:
   core:
-  - <核心关键词,命中即高分>
   - metal carbene
   - N-H insertion
   bonus:
-  - <加分关键词>
   - enantioselective
   - copper catalysis
+  # 当前研究难点，为 LLM 判断相关性提供背景。
   current_challenges:
-  - <你当前实验卡在哪 —— 能对症的论文会被 LLM 显著加权>
+  - <当前研究难点>
+  # 希望优先关注的主题。
   boost_topics:
-  - <希望优先命中的主题>
+  - <优先关注的主题>
 
-# ── 非论文记录:按标题【前缀】排除 ──────────────────────────────────────────
-# Crossref 会登记同行评审与更正声明。用前缀而非子串,避免误伤正当标题。
+# 按标题前缀排除非论文记录或更正声明，避免对标题全文作过宽匹配。
 exclude_title_prefixes:
   - "review for"
   - "author response for"
@@ -94,8 +60,8 @@ exclude_title_prefixes:
   - "editorial"
   - "retraction"
 
-# ── 排除方向(子串匹配,命中直接丢弃,省 LLM 额度) ─────────────────────────
-# ⚠️ 只放【通用领域词】。不要从单篇论文标题抄词组 —— 那是过拟合,会误杀相关论文。
+# 通用排除词，按子串匹配；请检查是否会误排本方向需要的文献。
+# 命中后在本组标记规则排除，条目仍保留在数据库中。
 negative:
   - "supplementary material"
   - "polymerization"
@@ -112,7 +78,7 @@ negative:
   - "clinical trial"
   - "biomarker discovery"
 
-# ── 期刊白名单(issn 已通过 Crossref 逐本反查核实) ────────────────────────
+# 期刊偏好及对应 ISSN。名单用于规则加分，ISSN 可用于来源检索过滤。
 journals:
   core:
   - Journal of the American Chemical Society
@@ -206,42 +172,40 @@ journals:
     - 1434-193X
     - 1099-0690
 
-# ── 重点关注作者 ────────────────────────────────────────────────────────────
+# 关注作者，可填写姓或全名。
 authors_watch:
-  - "<重点关注作者,填姓或全名都可以>"
+  - "<关注作者的姓或全名>"
 
-# ── 引用滚雪球的种子(前向:顺着这些文献往下滚) ────────────────────────
-# 取自开题报告的参考文献 —— 都是本方向已经沉淀下来的工作。
-# ⚠️ 种子的年份很关键:近一两年的新论文被引 0-1 次,滚不出东西。
-# 选 2014-2023 这一批,每篇每年都有十几次被引,才能滚出东西来。
+# 被引追踪种子。下面是示例 DOI，请替换为与本方向相关且有持续被引的论文。
+# 系统检索引用这些种子的文献；种子本身较新或被引较少时，结果可能较少。
 seed_dois:
-  # 2017 Organic Letters — Chiral Cyclic Ligand-Enabled Iridium-Catalyzed Asymmetric Arylation of
+  # 2017 Organic Letters
   - 10.1021/acs.orglett.7b01631
-  # 2020 Advanced Synthesis & Catalysis — Pastor I. Anion-Dependent Imidazolium-Based Catalysts for Allylation o
+  # 2020 Advanced Synthesis & Catalysis
   - 10.1002/adsc.202000102
-  # 2023 Organic Letters — Regio- and Stereoselective Allylation of Anilines with Aryl Allenes in
+  # 2023 Organic Letters
   - 10.1021/acs.orglett.3c01764
-  # 2020 Chemical Society Reviews — Recent progress on donor and donor–donor carbenes
+  # 2020 Chemical Society Reviews
   - 10.1039/c9cs00542k
-  # 2016 Chemical Science — Enantioselective synthesis of α-alkenyl α-amino acids via N–H insertio
+  # 2016 Chemical Science
   - 10.1039/c5sc03558a
-  # 2016 Advanced Synthesis & Catalysis — Enantioselective Copper-Catalyzed Intramolecular N−H Bond Insertion: S
+  # 2016 Advanced Synthesis & Catalysis
   - 10.1002/adsc.201600390
-  # 2019 Chemical Science — Enantioselective carbene insertion into the N–H bond of benzophenone i
+  # 2019 Chemical Science
   - 10.1039/c9sc03354h
-  # 2019 Science — Highly enantioselective carbene insertion into N–H bonds of aliphatic 
+  # 2019 Science
   - 10.1126/science.aaw9939
-  # 2022 ACS Catalysis — Enantioselective Synthesis of Unnatural Carbamate-Protected α-Alkyl Am
+  # 2022 ACS Catalysis
   - 10.1021/acscatal.2c03937
-  # 2022 Nature Catalysis — Enantioselective synthesis of amino acids from ammonia
+  # 2022 Nature Catalysis
   - 10.1038/s41929-022-00779-2
-  # 2015 Chemical Communications — Myoglobin-catalyzed intermolecular carbene N–H insertion with arylamin
+  # 2015 Chemical Communications
   - 10.1039/c4cc08753d
-  # 2018 Chemical Science — Blue light-promoted photolysis of aryldiazoacetates
+  # 2018 Chemical Science
   - 10.1039/c8sc01165f
-  # 2021 Nature Chemistry — Dual-function enzyme catalysis for enantioselective carbon–nitrogen bo
+  # 2021 Nature Chemistry
   - 10.1038/s41557-021-00794-z
-  # 2019 ACS Catalysis — A Tandem Iridium-Catalyzed “Chain-Walking”/Cope Rearrangement Sequence
+  # 2019 ACS Catalysis
   - 10.1021/acscatal.9b00118
-  # 2020 Chemical Communications — Nickel(II)-catalyzed asymmetric thio-Claisen rearrangement of α-diazo 
+  # 2020 Chemical Communications
   - 10.1039/d0cc04590j

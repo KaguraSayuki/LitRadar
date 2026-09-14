@@ -1,468 +1,242 @@
 # LitRadar
 
-个人文献雷达 —— 面向化学研究者的自托管文献追踪工具。聚合订阅邮件与开放学术 API，
-使用 LLM 完成个性化排序与中文结构化摘要，在局域网 Web 界面中阅读与反馈。
+LitRadar 是面向化学研究者的个人文献追踪工具。它汇集订阅邮件与学术 API 的文献信息，
+按研究方向排序并生成中文摘要，提供自托管的 Web 阅读与反馈界面。
 
-> A self-hosted, single-user literature radar for chemists: multi-source ingestion,
-> LLM re-ranking with explanations, and structured Chinese summaries.
+A self-hosted, single-user literature radar for chemists, with multi-source discovery,
+personalized ranking, and structured Chinese summaries.
 
-## 功能特性
+## 文档导航
 
-- **多源采集**：X-MOL 订阅邮件解析、Semantic Scholar 布尔检索、引用滚雪球、Crossref 检索（可选），所有来源按 DOI 去重合并
-- **多订阅组**：一个人可以同时跟几个方向，每组各有一套检索词、关键词、期刊白名单与排序，LLM 精排可按组开关；条目池共享（同一篇只存一份），收件箱按方向分开看
-- **元数据富化**：Crossref 权威元数据、Semantic Scholar 摘要与引用数、easyScholar 期刊等级（影响因子 / 中科院分区 / 北核等）
-- **三阶段排序**：规则过滤 → BM25 粗排 → DeepSeek listwise 精排，每篇输出分数与"为什么推荐"的中文理由
-- **中文结构化摘要**：问题 / 方法 / 关键结果 / 局限 / 对研究的用处；关键数字与英文原文逐字核验，推断内容显式标注
-- **反馈闭环**：收藏 / 已读 / 不感兴趣三态反馈分别落库，手动决定与自动规则解耦，并参与后续精排
-- **轻量自托管**：FastAPI + SQLite + 原生前端（零构建），systemd 定时任务 + nginx 反向代理
+| 文档 | 内容 |
+|---|---|
+| [订阅组配置](docs/subscription-groups.md) | 添加研究方向、转换旧配置、分组操作与摘要复用 |
+| [部署与维护](docs/deployment.md) | Linux、macOS、Windows 部署，以及访问保护和版本更新 |
+| [实现架构](docs/architecture.md) | 模块职责、数据流、表结构与开发约定 |
+| [设计记录](docs/litradar-design.md) | 主要技术选择、方案调整与尚未实现的功能 |
+| [Semantic Scholar API Key 申请参考](docs/s2-api-key-application.md) | 与当前实现相符的英文申请草稿及用量估算方法 |
 
-## 工作原理
+## 主要功能
 
+- **多源采集**：解析 X-MOL 订阅邮件，使用 Semantic Scholar 检索文献、追踪种子文献的被引记录，并可接入 Crossref 和 OpenAlex 检索。
+- **多订阅组**：为不同研究方向分别设置检索式、关键词、期刊与排序偏好。文献条目共享，分组保存分数、忽略状态与方向性说明。
+- **元数据补全**：补充原文摘要、引用数、作者、期刊与开放获取链接；可选展示 easyScholar 提供的期刊等级。
+- **个性化排序**：依次进行规则过滤、BM25 粗排和 LLM 精排，并展示推荐理由。LLM 精排可按组关闭。
+- **中文摘要**：提供简要摘要与包含问题、方法、关键结果、局限的深度摘要，另按组生成“对研究的用处”。
+- **阅读反馈**：支持收藏、已读、不感兴趣与撤销操作，后续精排可参考收藏和忽略记录。
+- **轻量部署**：采用 FastAPI、SQLite 和服务端模板，无需前端构建；支持命令行及定时运行。
+
+## 工作流程与数据源
+
+```text
+订阅邮件 / 文献检索 / 被引追踪
+              ↓
+      DOI 去重与分组入库
+              ↓
+   补全摘要、引用数与期刊信息
+              ↓
+    规则过滤 → BM25 → LLM 精排
+              ↓
+      中文摘要 → 阅读与反馈
 ```
-X-MOL 订阅邮件 (.eml / IMAP) ─┐
-Semantic Scholar 布尔检索 ────┤                ┌─ 富化：摘要 / 引用数 / 期刊等级
-引用滚雪球（种子文献被引）────┼→ DOI 去重入库 ─┤
-Crossref 关键词检索（可选）───┘    (SQLite)    └─ 排序：规则 → BM25 → LLM 精排
-                                                        ↓
-                                          中文结构化摘要 → Web 界面 / 反馈
-```
 
-### 数据源
+| 数据源 | 在本项目中的用途 | 启用条件 |
+|---|---|---|
+| X-MOL 订阅邮件 | 解析用户收到的文献推荐邮件 | 默认开启，可读取本地邮件或通过 IMAP 接入 |
+| Semantic Scholar | 布尔检索、被引追踪、摘要及引用数补全 | 本项目的检索与被引追踪需要 `S2_API_KEY`；按 DOI 补全可尝试匿名访问 |
+| Crossref | 补全期刊、ISSN、作者等元数据，也可进行关键词检索 | 元数据补全默认开启，关键词检索默认关闭 |
+| easyScholar | 期刊等级、影响因子等展示信息 | 需要 `EASYSCHOLAR_SECRET_KEY`，结果按刊名缓存 |
+| OpenAlex | 可选关键词检索 | 默认关闭，启用时需配置 `OPENALEX_API_KEY` |
+| DeepSeek | 精排、中文摘要与方向性说明 | 需要 `DEEPSEEK_API_KEY`，调用费用取决于模型和用量 |
 
-| 环节 | 数据源 | 说明 | 成本 |
-|---|---|---|---|
-| 精选 | X-MOL 订阅邮件 | 仅解析用户自己收到的订阅邮件，不抓取网站 | 免费 |
-| 检索 | Semantic Scholar `/paper/search/bulk` | 精确布尔查询，召回主力 | 免费（建议申请 Key） |
-| 检索 | 引用滚雪球 `/paper/{id}/citations` | 沿种子文献的被引关系，发现关键词覆盖不到的工作 | 免费 |
-| 检索 | Crossref 关键词检索 | 模糊匹配，召回高、噪声大，默认关闭 | 免费 |
-| 富化 | Crossref | 期刊全称 / ISSN / 作者等权威元数据 | 免费 |
-| 富化 | Semantic Scholar `/paper/batch` | 按 DOI 批量补摘要与引用数 | 免费 |
-| 富化 | easyScholar 开放接口 | 影响因子、中科院分区、北核、CSCD 等期刊等级 | 按次计额，结果本地缓存 |
-| 排序 / 摘要 | DeepSeek `deepseek-chat` | listwise 精排与结构化摘要 | 低 |
-| 可选 | OpenAlex | 2026 年起为 API Key + 额度制，默认关闭 | 额度制 |
+本项目只解析 X-MOL 订阅邮件，不抓取其网站。各 API 的访问条件、额度与收费以服务提供方为准。
 
 ## 快速开始
 
-环境要求：Python ≥ 3.11。Linux / macOS / Windows 都能运行，差别只在虚拟环境的可执行
-文件目录（Windows 是 `Scripts\`，POSIX 是 `bin/`）和几个命令名，下面分开给。
+需要 Python 3.11 或更高版本，支持 Linux、macOS 和 Windows。
 
 ### Linux / macOS
 
 ```bash
 git clone https://github.com/KaguraSayuki/LitRadar.git
 cd LitRadar
-
-# 1. 安装
 python3 -m venv .venv
-.venv/bin/pip install -e .
+.venv/bin/python -m pip install -e .
 
-# 2. 配置（三个文件均不入库，仅提交对应的 .example）
-cp config.example.yaml   config.yaml
+cp config.example.yaml config.yaml
 cp interests.example.yaml interests.yaml
-cp .env.example          .env && chmod 600 .env
-#    编辑 .env：至少填写 DEEPSEEK_API_KEY；邮件接入需 IMAP_PASSWORD
+cp .env.example .env
+chmod 600 .env
+```
 
-# 3. 初始化数据库
+按下方“配置说明”填写密钥、检索式和研究偏好，然后运行：
+
+```bash
 .venv/bin/litradar init-db
-
-# 4. 运行完整流水线（采集 → 富化 → 排序 → 摘要）
+.venv/bin/litradar check
 .venv/bin/litradar run
-
-# 5. 启动 Web 服务
-.venv/bin/uvicorn litradar.web.app:app --host 127.0.0.1 --port 8090
+.venv/bin/python -m uvicorn litradar.web.app:app --host 127.0.0.1 --port 8090
 ```
 
 ### Windows（PowerShell）
 
-Windows 上没有 `python3` / `cp` / `chmod`，虚拟环境的可执行文件也在 `Scripts\` 而不是
-`bin/`；照抄下面这份即可：
-
 ```powershell
 git clone https://github.com/KaguraSayuki/LitRadar.git
 cd LitRadar
-
-# 1. 安装（`-e .` 末尾那个点是"当前目录"，别漏）
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install -e .
 
-# 2. 配置
-Copy-Item config.example.yaml    config.yaml
+Copy-Item config.example.yaml config.yaml
 Copy-Item interests.example.yaml interests.yaml
-Copy-Item .env.example           .env
-#    编辑 .env：至少填写 DEEPSEEK_API_KEY；邮件接入需 IMAP_PASSWORD
+Copy-Item .env.example .env
+```
 
-# 3. 初始化数据库
+完成配置后运行：
+
+```powershell
 .venv\Scripts\litradar.exe init-db
-
-# 4. 运行完整流水线（采集 → 富化 → 排序 → 摘要）
+.venv\Scripts\litradar.exe check
 .venv\Scripts\litradar.exe run
-
-# 5. 启动 Web 服务
 .venv\Scripts\python.exe -m uvicorn litradar.web.app:app --host 127.0.0.1 --port 8090
 ```
 
-> 想用激活也可以：`.venv\Scripts\Activate.ps1`，之后直接敲 `litradar` / `python`。
-> 若报 `running scripts is disabled on this system`，先在当前窗口执行
-> `Set-ExecutionPolicy -Scope Process RemoteSigned`。上面那种"写全路径"的写法
-> 不需要激活，也就不会撞到执行策略。
->
-> 虚拟环境目录名可以自己取（有人习惯就叫 `venv`），但下文一律按 `.venv` 写；
-> 换了名字记得把命令里的路径一起替换。
->
-> 另外，下文各处的 `litradar xxx` 都按"已激活虚拟环境"来写。没激活就把前缀补全：
-> Windows 用 `.venv\Scripts\litradar.exe xxx`，Linux / macOS 用 `.venv/bin/litradar xxx`。
+以上命令直接调用虚拟环境中的程序，无需先激活环境。Windows 上可通过文件属性中的
+“安全”页限制 `.env` 的访问权限。
 
-浏览器访问 `http://127.0.0.1:8090`。首次使用建议先运行 `litradar check`
-体检配置、密钥、数据库与各 API 连通性。
-
-`.env` 的权限在不同平台上含义不同：POSIX 上请保持 `chmod 600`（`litradar check`
-会检查）；Windows 上 `chmod` 只能切换只读位，实际由文件 ACL 决定，请通过资源管理器
-或 `icacls .env /inheritance:r /grant:r "%USERNAME%:R"` 限制访问。
+启动后访问 [本机 Web 界面](http://127.0.0.1:8090)。下文使用简写 `litradar`；
+若未激活虚拟环境，请替换为 `.venv/bin/litradar` 或 `.venv\Scripts\litradar.exe`。
 
 ## 配置说明
 
-| 文件 | 用途 |
-|---|---|
-| `.env` | 密钥：DeepSeek / Semantic Scholar / easyScholar / IMAP / 接口口令 |
-| `config.yaml` | 运行参数：端口、时间窗、数据源开关、排序权重、期刊等级展示规则 |
-| `interests.yaml` | 研究画像：检索式、关键词、期刊白名单、关注作者、滚雪球种子；多方向时用 `groups:` |
+| 文件 | 用途 | 示例 |
+|---|---|---|
+| `.env` | API 密钥、IMAP 授权码、接口口令与管理员密码哈希 | [.env.example](.env.example) |
+| `config.yaml` | 数据源开关、运行窗口、排序参数与期刊等级展示 | [config.example.yaml](config.example.yaml) |
+| `interests.yaml` | 研究方向、检索式、关键词、期刊、作者与种子文献 | [interests.example.yaml](interests.example.yaml) |
 
-各字段在示例文件中均有详细注释，以下仅列关键约定：
+首次使用时，将示例中的占位内容替换为自己的研究方向，并检查示例期刊、排除词和种子
+文献是否适用。使用默认的 Semantic Scholar 检索需要填写 `S2_API_KEY`；使用 LLM
+精排与摘要需要填写 `DEEPSEEK_API_KEY`。IMAP 和期刊等级密钥仅在使用对应功能时填写。
 
-- **时间窗只有一个来源**：`app.pipeline_window_days`（默认 200 天），命令行、定时任务与
-  Web 界面按钮共用。它必须 ≥ 抓取窗口 `sources.s2_search_lookback_days`，否则新抓取的
-  文献会落在排序窗口之外，始终处于"未评分"状态
-- **两套检索词分开配置**：Crossref 使用自然语言（`search_queries`），Semantic Scholar
-  必须使用其查询语法（`s2_queries`：`+` 与、`|` 或、双引号短语、`-` 排除）。裸词会被
-  当作整句短语匹配，可能静默返回 0 条结果，因此两者不能共用
-- **多条查询取并集**：扩大召回优先增加查询条数而非放宽单条精度，精确率交给 LLM 精排兜底
-- **排序权重**：使用 `ranking.weights.llm/coarse/rule`，兼容早期的 `w_llm/w_coarse/w_rule`。
-  权重须为非负有限数值且总和大于 0；两种写法冲突时会在加载配置时报告错误
-- 检索词与偏好可在 Web 界面 `/interests` 直接编辑，保存前校验 YAML 字段及列表元素类型并
-  自动备份原文件。旧文件存在字段类型错误时仍可打开编辑页修复
+配置时需要注意以下几点：
+
+- **运行窗口**：`app.pipeline_window_days` 默认 200 天，CLI、定时任务和网页按钮共用。
+  建议不小于检索回溯窗口 `sources.s2_search_lookback_days`（默认 180 天），以便新采集
+  的文献进入排序与摘要范围；临时运行可用 `--days` 覆盖。
+- **检索式**：`search_queries` 用于 Crossref 和 OpenAlex；`s2_queries` 用于 Semantic
+  Scholar，使用 `+`、`|`、双引号和 `-` 表达与、或、短语及排除条件。两类检索式分别配置，
+  同一来源的多条查询取并集。
+- **排序权重**：使用 `ranking.weights.llm/coarse/rule`。权重必须是非负有限数值，且
+  总和大于零；兼容早期的 `w_llm/w_coarse/w_rule`，两种写法冲突时会报错。
+- **在线编辑**：网页“检索词与偏好”（`/interests`）可编辑整份 `interests.yaml`。
+  保存时校验格式并备份原文件，保留最近 5 份备份。
 
 ### 多订阅组
 
-一个人不必只有一个方向。`interests.yaml` 支持 `groups:`，每组各有一套检索词、关键词、
-期刊白名单与滚雪球种子；**规则过滤与 BM25 每组各算**（本地计算，不花钱），
-**LLM 精排按组开关**（`llm_rank`）。摘要的方向性说明也按组生成，共享的中性内容只生成一份。
+添加分组的入口也是“检索词与偏好”：将配置改为 `groups:` 列表，为每个方向填写一组
+设置。当前界面通过 YAML 编辑分组，没有单独的“新增分组”按钮；配置多个可用组后，
+页面顶部会显示切换器。
 
-```yaml
-groups:
-  - slug: organic          # 稳定标识:改名不要改它,否则等于换了一个组
-    name: 有机合成方法学
-    direction: >
-      这一组的研究方向描述(会进精排与摘要的 prompt)。
-    search_queries: ['"N-H insertion" diazo aniline']
-    keywords: {core: [metal carbene]}
-    journals: {core: [Organic Letters]}
-    llm_rank: true         # 本组是否跑 LLM 精排
-  - slug: materials
-    name: 材料化学
-    llm_rank: false        # 这一组只按规则 + BM25 排,不花精排费用
-  - slug: old
-    name: 暂停的方向
-    enabled: false         # 临时停掉,不采集也不排序(历史分值保留)
-```
-
-要点：
-
-- **不写 `groups:` 就是单方向**（整份文件即一组），老配置**无需改动**即可继续用；
-  它对应的组 slug 固定为 `default`，与升级前入库的历史数据一致
-- **条目池共享、收件箱分开**：一篇文献被两组都命中时只存一行，但两组各自给它打分，
-  收件箱只显示本组捞到的条目
-- **摘要只算一次**：问题 / 方法 / 关键结果 / 局限与方向无关，一份共享；
-  只有"对研究的用处"（relevance）按组各写一行。`summarize --force` 在一轮内也只重算
-  每篇共享摘要一次，并补齐参与组的说明；各组的深度摘要需求会合并，避免先写简要再升级
-- 本组缺少说明时留空。升级旧库会把可确定归属的单方向说明迁入 `default`，
-  其他组不会回退显示它。修改 `direction` 后，下次同步会使本组说明失效并在摘要阶段补写，
-  中性摘要与其他组说明保留；仅改 `name` 不重算。方向比较采用提示词实际读取的前 300 字
-- **X-MOL 是全局来源**：推什么由 X-MOL 网站上的订阅决定，本项目没法按方向驱动它，
-  所以它的条目进所有**启用**的组，再由各组规则判断相关性
-- **花费护栏按组计数**：`admin.cooldown_seconds` / `admin.daily_limit` 是"每组每天"，
-  一次运行只算当前组（见「安全与合规」）
-- 网页顶部有组切换器（只有一个组时不显示）；`?g=<slug>` 也能直接切。每个页面的导航、
-  反馈和流水线请求都保留该页的组，另一标签页切组不会改写它的操作；Cookie 用于默认选择
-- 显式 `slug` 支持中文及 URL 保留字符，页面链接和 Cookie 会自动编码；不能包含控制字符、
-  无效 Unicode 或超过 256 字节的 UTF-8 文本。建议写明稳定的 slug，改显示名时保留它
-- `llm_rank: false` 的组显示正常的关键词分与关闭提示；已启用精排的组调用失败时才显示失败提示
-- 新组尚未同步入库或采集到条目时显示空列表
-- 命令行加 `--group <slug>` 可只跑一组：`litradar rank --group organic`
+旧的单方向配置可以继续使用，对应的固定标识是 `default`。从旧配置转换时，保留原组
+的 `slug: default`，即可继续访问原有成员、分数与反馈。完整示例及操作步骤见
+[订阅组配置](docs/subscription-groups.md)。
 
 ## 邮件接入
 
-X-MOL 的「私人定制」订阅由其网站开通，本项目只解析投递到你邮箱的订阅邮件。
-支持三种模式（`mail.mode`）：
+在 X-MOL 网站开通订阅后，可通过 `mail.mode` 选择接入方式：
 
-- **`folder`（默认）**：将邮件导出为 `.eml` 放入 `data/inbox/`，处理后自动移至 `data/inbox/processed/`
-- **`maildir`**：读取标准 Maildir 目录
-- **`imap`**：直连收件箱，仅读取匹配 `imap_search` 的邮件
-
-注意事项：
-
-- Outlook 个人账号已禁用 IMAP 密码登录（能力声明含 `LOGINDISABLED`，仅支持 OAuth2）。
-  推荐在 Outlook 中设置转发规则，把发件人含 `newsletter.x-mol.com` 的邮件转发至支持
-  授权码登录的邮箱（QQ / 163 / 126 / 飞书 / 腾讯企业邮箱均实测可用），再以该邮箱接入
-- 配置完成后用 `litradar mail-test` 做只读连通性测试：报告匹配邮件数并实际解析一封
-  展示提取结果，不标记已读、不改动任何邮件
-- IMAP 采集与连通性测试均验证服务器证书和主机名。退出会话不清除已标删除的邮件；
-  `imap_mark_seen: false` 时以只读方式选中邮箱
-- `sources.xmol_enabled: false` 会跳过完整流水线和 `ingest mail` 的邮件采集（包括本地
-  邮件与历史原文重放）；`mail-test`、`parse` 仍可用于显式诊断
-- 每封邮件的原文、条目和完成标记在同一事务中写入，全部成功后才确认邮件；入库失败会
-  回滚本封的写入，留待下次重试。升级后的首次邮件采集会从数据库原文重放旧版未标记
-  完成的邮件，即使邮件已移入 processed 或被 IMAP 标为已读，也能补齐遗漏条目
-
-## 命令行
-
-```bash
-litradar init-db        # 初始化数据库
-litradar ingest all     # 采集：邮件 + 检索 + 滚雪球
-litradar enrich         # 富化：补摘要、引用数、期刊等级
-litradar rank           # 三阶段排序
-litradar summarize      # 生成中文摘要（默认补缺失及原文已变化的摘要，--force 全量重做）
-litradar run            # 完整流水线（以上全部）
-                        # ingest / rank / summarize / run 都支持 --group <slug> 只跑一组
-litradar stats          # 数据统计
-litradar mail-test      # IMAP 连通性测试（只读）
-litradar admin-password # 设置/清除花钱阶段的管理员密码（只存哈希）
-litradar check          # 体检:配置 / 密钥 / 数据库 / 网络 / LLM 连通性
-litradar parse          # 仅解析邮件（调试解析器用）
-
-python -m pytest tests/ -q   # 运行测试
-```
-
-Web 界面的「统计」页也可手动触发各阶段。
-
-检索、排序和摘要的单组异常不会阻止其它组完成；`ingest`、`rank`、`summarize`、`run`
-只要任一阶段汇总的 `errors` 非零，就返回退出码 1，供 systemd 或脚本识别失败。
-正常完成及可选来源/LLM 的配置性跳过返回 0。
-
-测试使用临时数据库和模拟网络/LLM。安装 Node.js 18+ 时，pytest 还会执行实际前端脚本的
-反馈、撤销与流水线重试回归；未安装 Node 时仅跳过这 4 个脚本执行用例。
-
-## 设计要点
-
-**排序：LLM 主导的三阶段漏斗。** 最终分 = 0.85 × LLM + 0.10 × BM25 + 0.05 × 规则。
-规则层负责硬性过滤（排除词）与加分（核心词 / 期刊白名单 / 关注作者）；BM25 粗排仅
-提供送入 LLM 的批次顺序，默认不截断候选（`llm.rerank_top_k: 0`），避免弱信号对强信号
-行使否决权；DeepSeek 分批 listwise 打分，各批共用同一评分标准。期刊匹配做了缩写归一
-（`Org. Lett.` ↔ `Organic Letters` 等，有测试覆盖）。
-单批 LLM 请求失败时继续处理后续批次，保留已成功的结果，失败批次使用既有的规则与粗排降级逻辑。
-
-**DOI 一致性。** 检索、富化和入库统一使用小写 DOI。旧数据库首次连接时会自动合并仅
-DOI 写法不同的条目，保留关联元数据、评分、摘要和反馈；有冲突的手动状态按最新反馈决定。
-
-**引用滚雪球：增量累积 + 共被引标注。** 以 `interests.yaml` 中 `seed_dois` 为种子，
-沿"引用了种子的论文"方向发现换了说法、关键词覆盖不到的新工作。每轮只刷新最久未查的
-少量种子以规避限流，引用关系持久化于 `seed_cite` 表，共被引数跨全部种子与历史轮次累积；
-共被引作为质量标注展示（`滚雪球 ×2`），默认不作为准入门槛。种子宜选被引仍活跃的文献，
-过新的论文被引数不足，滚不出结果。
-
-**摘要防幻觉。** 摘要中 `key_results` 出现的每个数字与英文原文逐字比对，未命中者标注
-⚠️ 提示核对；允许模型合理推断（如原文未明说的研究动机），但推断内容显式标注"（推断）"，
-与原文事实区分。
-摘要同时保存原文指纹；原文补齐或改变后会刷新简要或深度摘要，单独更新引用数不会触发重做。
-
-**反馈三态分流。** 收藏免疫后续规则过滤——之后收紧检索词也不会移除明确的手动决定；
-不感兴趣移入独立页签、可逐条恢复；被规则否决的条目以"已否决"状态可见而非静默消失。
-任何条目都能追溯"为什么在 / 不在这个列表里"。
-
-**期刊等级本地缓存。** easyScholar 按刊名查询且按次计额，结果缓存于 `journal_rank` 表，
-按配置中的别名目标查询、去重及复用缓存；只有接口明确返回无结果才缓存为空，网络、限流、
-认证或协议错误留待下次重试。旧版无法区分故障的空缓存会在升级时清理一次。
-展示字段与标签压缩规则（`化学1区` → `化1`）在
-`config.yaml` 的 `journal_rank` 段配置；刊名在入库时统一清洗（HTML 实体、换行符）。
-
-这一项**可选**：不配 `EASYSCHOLAR_SECRET_KEY`（见 `.env.example`）就整段跳过，一个请求
-都不发，卡片上只是没有影响因子/分区标签，其余流程照常，不会报错。所以 `litradar check`
-会把这一项单独列出来——缺密钥时给明确告警，而不是让你对着一个全绿的体检结果猜为什么
-卡片上没有分区。密钥变量名可用 `journal_rank.api_key_env` 改名。
-
-- **当前实现**（模块划分、数据流、表结构、不变量、如何加数据源）：
-  [docs/architecture.md](docs/architecture.md)
-- **设计推演记录**（实现前的方案与改动过程，保留原貌）：
-  [docs/litradar-design.md](docs/litradar-design.md)
-
-## 部署
-
-`deploy/` 里的单元文件与 nginx 示例是 **Linux/systemd 专用**，其中的项目路径需要按你的
-实际部署目录改写；macOS 与 Windows 请用下面各自的等价方案。三者的共同点是：
-Web 服务只绑 `127.0.0.1:8090`，每日流水线在固定时间跑 `litradar run`
-（时间窗来自 `config.yaml` 的 `app.pipeline_window_days`，不要在调度器里另设窗口）。
-
-### Linux（systemd + nginx）
-
-`deploy/` 提供 systemd 模板单元（`%i` 为运行用户，单元文件不含具体用户名）与 nginx
-反代示例：
-
-```bash
-sudo cp deploy/litradar-web.service    /etc/systemd/system/litradar@.service
-sudo cp deploy/litradar-daily@.service /etc/systemd/system/
-sudo cp deploy/litradar-daily@.timer   /etc/systemd/system/
-sudo systemctl daemon-reload
-
-sudo systemctl enable --now litradar@$(whoami).service      # Web 服务
-sudo systemctl enable --now litradar-daily@$(whoami).timer  # 每日流水线
-
-systemctl list-timers 'litradar*'
-journalctl -u litradar@$(whoami).service -f
-```
-
-> 三个单元必须以模板名（带 `@`）安装。`litradar-daily@.service` 使用 `User=%i`，
-> 以非模板名安装会使 `%i` 为空，systemd 拒绝启动。
-
-应用默认仅绑定 `127.0.0.1:8090`；局域网访问建议经 nginx 反向代理
-（见 `deploy/litradar-nginx.conf`）。
-
-### macOS（launchd）
-
-`~/Library/LaunchAgents/com.litradar.daily.plist`：
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>com.litradar.daily</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/Users/你的用户名/LitRadar/.venv/bin/litradar</string>
-    <string>run</string>
-  </array>
-  <key>WorkingDirectory</key><string>/Users/你的用户名/LitRadar</string>
-  <key>StandardOutPath</key><string>/Users/你的用户名/LitRadar/data/launchd.log</string>
-  <key>StandardErrorPath</key><string>/Users/你的用户名/LitRadar/data/launchd.err</string>
-  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>7</integer>
-    <key>Minute</key><integer>5</integer></dict>
-</dict></plist>
-```
-
-```bash
-launchctl load  ~/Library/LaunchAgents/com.litradar.daily.plist
-launchctl start com.litradar.daily          # 立刻手动跑一次
-launchctl unload ~/Library/LaunchAgents/com.litradar.daily.plist
-```
-
-Web 服务同样可以用 launchd 常驻（把 `ProgramArguments` 换成
-`.venv/bin/uvicorn`、`litradar.web.app:app`、`--host`、`127.0.0.1`、`--port`、`8090`，
-并加 `<key>KeepAlive</key><true/>`）。macOS 的 `launchd` 在进程重载时会自动重启，
-`WorkingDirectory` 必须写在项目根，否则 `config.yaml` 找不到。
-
-### Windows（任务计划程序）
-
-用 PowerShell 的 `*-ScheduledTask` cmdlet 注册比 `schtasks /TR` 少一层引号转义，
-且能直接指定工作目录（**必须指定**，否则读不到 `config.yaml`）：
-
-```powershell
-# Web 服务:登录时启动,只绑回环地址
-$web = New-ScheduledTaskAction -Execute "C:\LitRadar\.venv\Scripts\python.exe" `
-  -Argument "-m uvicorn litradar.web.app:app --host 127.0.0.1 --port 8090" `
-  -WorkingDirectory "C:\LitRadar"
-Register-ScheduledTask -TaskName "LitRadarWeb" -Action $web `
-  -Trigger (New-ScheduledTaskTrigger -AtLogOn) -RunLevel Limited
-
-# 每日流水线:每天 07:05
-$daily = New-ScheduledTaskAction -Execute "C:\LitRadar\.venv\Scripts\litradar.exe" `
-  -Argument "run" -WorkingDirectory "C:\LitRadar"
-Register-ScheduledTask -TaskName "LitRadarDaily" -Action $daily `
-  -Trigger (New-ScheduledTaskTrigger -Daily -At 07:05) -RunLevel Limited
-
-Start-ScheduledTask      -TaskName "LitRadarDaily"   # 立刻跑一次
-Get-ScheduledTaskInfo    -TaskName "LitRadarDaily"   # 上次结果 / 下次运行时间
-Unregister-ScheduledTask -TaskName "LitRadarDaily" -Confirm:$false
-```
-
-不传 `-User` / `-Password` 时任务默认**只在当前用户登录后**才会运行；要完全无人
-值守，需要补上凭据，或把 Web 服务注册成 Windows 服务（例如用 NSSM 包装
-`.venv\Scripts\python.exe -m uvicorn ...`）。
-
-关于 Windows 的两点实测注意：
-
-- **控制台编码**：任务计划把输出重定向时，Python 会退回 ANSI 代码页（英文系统
-  cp1252），中文日志会抛 `UnicodeEncodeError`。`litradar` 已在入口把标准输出/错误
-  固定为 UTF-8 并把编码错误降级为替换字符；若你自己写包装脚本，建议同时设
-  `PYTHONUTF8=1`。
-- **单实例锁**：Windows 上用的是 `msvcrt` 字节范围锁，POSIX 上是 `fcntl.flock`，
-  两者都由系统在进程结束时释放，所以任务被强杀不会留下需要手工清理的死锁。
-  两个平台都以 `data/litradar.lock` 为同一把锁，Web 按钮与定时任务因此不会互相
-  抢 API 限流。
-
-局域网访问仍然建议在前面放一层反向代理（Windows 可用 Caddy/IIS，macOS 可用
-Caddy/nginx），不要直接把服务绑到 `0.0.0.0`。
-
-## 安全与合规
-
-- 本项目**不抓取 X-MOL 网站**（其 `robots.txt` 禁止爬取检索页），仅解析用户自己
-  收到的订阅邮件；X-MOL 站内订阅照常使用
-- 定位为单用户自托管，无账号体系，默认仅绑定回环地址。如需绑定非回环地址，
-  必须设置 `LITRADAR_TOKEN` 接口口令（访问时带 `?k=<token>`）—— 没设时
-  `/admin/run/*` 会直接拒绝手动触发（fail closed），而不是放行给同网段
-- **花钱接口有三层护栏**（默认只作用于 `rank` / `summarize` / `all`）：
-  1. `LITRADAR_TOKEN` 接口口令（长期凭据，可放 URL）；
-  2. **管理员密码**（`litradar admin-password` 设置，存 PBKDF2 哈希），每次运行
-     花钱阶段时在网页上再输一次，用完即忘；
-  3. **频率护栏**：`admin.cooldown_seconds` 冷却 + `admin.daily_limit` 每日上限
-     （默认每阶段 3 次）。账本用 `run_log`，所以命令行与定时任务跑的同样计入 ——
-     上限约束的是"这一天这个阶段一共跑了几次"，不是"网页上点了几次"。
-     配了多个订阅组时**按组各算**：一次运行只算当前组，在 A 组点满不会吃掉 B 组的额度；
-     邮件采集与富化不按方向跑，它们的记录计入每个组。
-  第 2 层是**步进验证（sudo 模式），不是 2FA**：两个凭据都是"你知道的东西"。
-  三层都可关（不设密码 / 把限制设为 0），`litradar check` 会如实报出当前状态
-- 不建议将服务暴露于公网：订阅邮件内容面向订阅者本人，公网暴露构成对非授权用户的再分发
-- 密钥仅通过环境变量传入（`.env`，POSIX 建议权限 600，Windows 用 ACL 限制），不写入配置文件；
-  `.env`、`config.yaml`、`interests.yaml`、`data/` 均已被 `.gitignore` 排除
-
-## 已知限制
-
-| 限制 | 说明 |
+| 模式 | 行为 |
 |---|---|
-| X-MOL 邮件仅含少量精选 | 订阅邮件为 teaser（通常每封 2 条），全量召回依赖检索与滚雪球 |
-| Semantic Scholar 限流 | 约 1 req/s 且偶发 429；免费申请 API Key 可获独立配额（申请材料见 `docs/`） |
-| Crossref 摘要覆盖不全 | ACS 系期刊常缺摘要，故以 Semantic Scholar 为摘要主力 |
-| 数字核验非完备 | 可标记多数数字不一致，但不保证捕获全部幻觉 |
-| 不含专利与预印本 | 现有数据源均不提供；数据模型已预留 `item.kind` 维度供将来扩展 |
-| Windows 支持仅部分实机验证 | 已在真实 Windows 上验证：安装、`pip install -e .`、Web 服务正常启动；锁的 `msvcrt` 分支、任务计划程序、完整流水线尚未在实机跑过，只有模拟测试覆盖 |
+| `folder`（默认） | 读取 `data/inbox/` 中的 `.eml` 文件，成功处理后默认移入 `data/inbox/processed/` |
+| `maildir` | 读取标准 Maildir 目录 |
+| `imap` | 连接邮箱，按 `imap_search` 筛选邮件；默认只采集未读邮件，并在处理成功后标为已读 |
 
-## 目录结构
+IMAP 客户端使用用户名和密码或授权码登录，当前未实现 OAuth2。若邮箱仅支持 OAuth2，
+可将订阅邮件转发到支持 IMAP 授权码登录的邮箱。配置后运行 `litradar mail-test`，
+查看匹配数量和最近最多 5 封邮件的解析结果；该命令不标记已读、不移动邮件、不写入数据库。
 
+IMAP 连接会验证服务器证书和主机名，退出时不会清除已标记删除的邮件。
+`imap_mark_seen: false` 时以只读方式选中邮箱，每轮仍需读取符合搜索条件的邮件并去重。
+
+每封邮件的原文、解析条目与完成标记在同一事务中写入，提交成功后才确认邮件。
+入库失败会回滚本封写入并留待重试。升级后的采集也会重放数据库中尚未标记完成的原文，
+以补齐旧版处理不完整的记录。
+
+`sources.xmol_enabled: false` 会关闭邮件采集及历史原文重放。显式运行 `mail-test`
+或 `parse` 仍可用于诊断。
+
+## 常用命令
+
+| 命令 | 用途 |
+|---|---|
+| `litradar init-db` | 初始化数据库 |
+| `litradar ingest all` | 采集邮件、检索文献并追踪被引记录；可用 `mail` 或 `search` 选择采集类型 |
+| `litradar enrich` | 补全文献元数据与期刊等级 |
+| `litradar rank` | 运行规则、BM25 与可选的 LLM 排序 |
+| `litradar summarize` | 补齐缺失或原文已变化的摘要；`--force` 重做本轮范围内的摘要 |
+| `litradar run` | 依次执行采集、补全、排序和摘要 |
+| `litradar stats` | 查看全库统计 |
+| `litradar mail-test` | 只读检查邮件接入 |
+| `litradar admin-password` | 设置管理员密码；`--clear` 清除已设置的密码 |
+| `litradar check` | 检查配置、密钥、数据库与外部服务连通性 |
+| `litradar parse` | 解析邮件并输出结果，不入库 |
+
+`ingest`、`rank`、`summarize`、`run` 支持 `--group <slug>`。该选项限定检索、排序与
+摘要使用的组；邮件采集和元数据补全仍是全局阶段。网页“统计”页也可手动运行这些阶段。
+
+检索、排序或摘要中的某个组出现异常时，其余组仍可继续。上述命令在阶段汇总的
+`errors` 非零时返回退出码 1；正常完成及配置性跳过返回 0。部分接口或 LLM 批次失败
+可能只记录告警，因此排查缺失结果时还应查看输出和运行记录。
+
+## 排序、摘要与反馈
+
+默认排序权重为 `0.85 × LLM + 0.10 × BM25 + 0.05 × 规则`。规则层识别排除条件，
+并根据关键词、期刊和关注作者等信息加分；BM25 决定候选顺序，默认不截断通过规则的
+候选（`llm.rerank_top_k: 0`）。LLM 以批次评分并给出中文理由。
+
+LLM 未启用或未配置密钥时使用关键词和规则分，界面会说明当前状态。已启用精排但条目
+缺少 LLM 结果时，界面会标记；失败批次不会覆盖已成功的批次。
+
+同一篇文献的中性摘要由各组共享，“对研究的用处”按组生成。关闭某组的 `llm_rank`
+只停止该组的精排，摘要阶段仍可能产生调用费用。原文摘要补齐或变化后会刷新生成内容；
+仅更新引用数不会触发重做。
+
+关键结果中的数字会与原文摘要核对，无法匹配的数字标为待核对；模型推断须明确标注。
+这些检查不能保证摘要完全准确，阅读时仍应参考原文。
+
+收藏与已读状态全局共享，不感兴趣和规则排除按组保存。收藏条目不会被后续规则自动
+排除；忽略的条目可恢复，规则排除的条目也可在对应视图中查看。
+
+## 部署与维护
+
+长期运行可使用 [部署与维护](docs/deployment.md) 中的 systemd、launchd 或任务计划
+程序方案。Web 服务默认监听 `127.0.0.1:8090`；局域网访问可通过反向代理提供 HTTPS，
+并设置接口口令与管理员密码。
+
+`.env`、`config.yaml`、`interests.yaml` 和 `data/` 均已排除在版本控制之外。
+它们包含本机配置或个人数据，需要单独备份。项目面向个人使用，没有多用户账号与权限体系。
+
+## 限制与验证
+
+- 订阅邮件只覆盖部分文献；检索结果也受来源收录范围、摘要可用性和 API 限流影响。
+- 当前没有专利采集或专利分析功能，也没有专门的预印本订阅源；学术 API 的返回结果仍需结合研究偏好筛选。
+- 自动摘要不能替代原文阅读；数字核验无法识别所有内容错误。
+- Windows 已验证安装与 Web 启动；任务计划、完整流水线和锁的 Windows 分支仍主要依赖模拟测试。
+
+开发测试使用临时数据库及模拟网络、邮件和 LLM，不需要真实 API 密钥：
+
+```bash
+python -m pip install pytest
+python -m pytest tests/ -q
 ```
-litradar/
-├── litradar/
-│   ├── cli.py                  命令行入口
-│   ├── config.py               配置加载（密钥仅走环境变量）
-│   ├── db.py                   SQLite schema 与读写
-│   ├── http.py                 统一 UA、限流、重试
-│   ├── lock.py                 流水线互斥锁
-│   ├── normalize.py            DOI / 标题 / 日期 / 作者归一化
-│   ├── sources/
-│   │   ├── xmol_email.py       X-MOL 邮件解析（含回归测试）
-│   │   ├── mail.py             邮件接入：folder / maildir / imap
-│   │   ├── crossref_search.py  Crossref 检索与富化
-│   │   ├── semanticscholar.py  S2 检索 / 摘要 / 滚雪球
-│   │   ├── easyscholar.py      easyScholar 期刊等级客户端
-│   │   └── openalex_search.py  OpenAlex 检索（可选）
-│   ├── enrich.py               富化编排
-│   ├── journal_rank.py         期刊等级缓存与标签压缩
-│   ├── rank.py                 三阶段排序
-│   ├── summarize.py            结构化中文摘要与数字核验
-│   ├── llm.py                  DeepSeek 客户端
-│   ├── pipeline.py             流水线编排
-│   └── web/                    FastAPI + Jinja2（无前端构建）
-├── config.example.yaml         运行配置示例
-├── interests.example.yaml      研究画像示例
-├── deploy/                     systemd 单元与 nginx 配置（Linux 专用）
-├── docs/                       设计文档与 API Key 申请材料
-├── fixtures/                   邮件解析回归样本（真实 .eml）
-└── tests/                      单元与回归测试（pytest）
-```
 
-## 致谢
+安装 Node.js 18 或更高版本后，pytest 还会运行前端反馈、撤销与重试脚本的回归用例；
+未安装时跳过相应脚本用例。
 
-- [Crossref](https://www.crossref.org/)、[Semantic Scholar](https://www.semanticscholar.org/)、[OpenAlex](https://openalex.org/) 提供开放学术元数据
-- [easyScholar](https://www.easyscholar.cc/) 提供期刊等级数据
-- 排序与摘要由 [DeepSeek](https://www.deepseek.com/) 模型驱动
+## 致谢与许可证
 
-## 许可证
+感谢 [Crossref](https://www.crossref.org/)、[Semantic Scholar](https://www.semanticscholar.org/)、
+[OpenAlex](https://openalex.org/) 和 [easyScholar](https://www.easyscholar.cc/) 提供数据服务，
+以及 [DeepSeek](https://www.deepseek.com/) 提供模型服务。
 
 本项目基于 [MIT License](LICENSE) 开源。
