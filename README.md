@@ -13,6 +13,7 @@ personalized ranking, and structured Chinese summaries.
 | [网页设置指南](docs/web-settings.md) | 首次设置、服务接入、研究方向、预览、阅读偏好与自动更新 |
 | [订阅组配置](docs/subscription-groups.md) | 添加研究方向、转换旧配置、分组操作与摘要复用 |
 | [部署与维护](docs/deployment.md) | Linux、macOS、Windows 部署，以及访问保护和版本更新 |
+| [更新记录](CHANGELOG.md) | 版本变化、兼容范围与升级注意事项 |
 | [实现架构](docs/architecture.md) | 模块职责、数据流、表结构与开发约定 |
 | [设计记录](docs/litradar-design.md) | 主要技术选择、方案调整与尚未实现的功能 |
 | [Semantic Scholar API Key 申请参考](docs/s2-api-key-application.md) | 与当前实现相符的英文申请草稿及用量估算方法 |
