@@ -13,7 +13,7 @@ import json
 import os
 import sqlite3
 
-from . import db
+from . import db, progress
 from .config import Config
 from .sources import crossref_search, easyscholar, openalex_search, semanticscholar
 
@@ -181,7 +181,8 @@ def _journal_ranks(conn, cfg: Config, *, verbose: bool = True) -> dict:
             need.append(target)
     need = need[:max(0, cfg.journal_rank.max_lookups)]
 
-    for name in need:
+    for index, name in enumerate(need):
+        progress.report('查询期刊等级', index, len(need))
         # name 已经是最终目标,按该目标请求并缓存。
         stat["jr_checked"] += 1
         try:
@@ -228,11 +229,13 @@ def run(cfg: Config, *, limit: int = 300, verbose: bool = True) -> dict:
         if cfg.sources.s2_enabled and dois:
             for s in range(0, len(dois), semanticscholar.BATCH_SIZE):
                 chunk = dois[s:s + semanticscholar.BATCH_SIZE]
+                progress.report('Semantic Scholar · 补全摘要与引用', s, len(dois))
                 if verbose:
                     print(f"  S2 批量 {s + 1}-{s + len(chunk)} / {len(dois)}…")
                 s2_map.update(semanticscholar.fetch_many_by_doi(
                     chunk, interval=cfg.sources.s2_min_interval, verbose=verbose))
                 stat["s2_batches"] += 1
+                progress.report('Semantic Scholar · 已完成查询', s + len(chunk), len(dois))
             stat["s2_hits"] = len(s2_map)
 
         # ---- 2. 批量取 Crossref(元数据/期刊全称/ISSN)----
@@ -240,13 +243,16 @@ def run(cfg: Config, *, limit: int = 300, verbose: bool = True) -> dict:
         if cfg.sources.crossref_enabled and dois:
             for s in range(0, len(dois), crossref_search.BATCH_SIZE):
                 chunk = dois[s:s + crossref_search.BATCH_SIZE]
+                progress.report('Crossref · 补全文献信息', s, len(dois))
                 if verbose:
                     print(f"  Crossref 批量 {s + 1}-{s + len(chunk)} / {len(dois)}…")
                 cr_map.update(crossref_search.fetch_many_by_doi(chunk, cfg.sources.mailto))
                 stat["cr_batches"] += 1
+                progress.report('Crossref · 已完成查询', s + len(chunk), len(dois))
             stat["cr_hits"] = len(cr_map)
 
         # ---- 3. 合并入库 ----
+        progress.report(f'正在保存 {len(rows)} 篇文献的补全结果')
         for row in rows:
             iid, doi = int(row["id"]), row["doi"]
             stat["checked"] += 1

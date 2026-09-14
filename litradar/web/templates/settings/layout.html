@@ -30,6 +30,8 @@
     <p class="settings-sidebar__note">保存只修改设置。<br>需要立即获取文献时，<br>单独运行一次更新。</p>
   </aside>
   <div class="settings-content">
+    {% include 'partials/authorization.html' %}
+    <div data-auth-protected>
     <header class="settings-head">
       <div>{% block breadcrumb %}{% endblock %}<h1>{% block heading %}设置{% endblock %}</h1><p class="page-sub">{% block description %}{{ descriptions.get(section, '') }}{% endblock %}</p></div>
       <div class="settings-head__action">{% block heading_action %}{% endblock %}</div>
@@ -43,6 +45,8 @@
     </div>
     {% endif %}
     {% block settings_body %}{% endblock %}
+    </div>
+    {% block settings_progress %}{% endblock %}
   </div>
 </div>
 <script src="/static/settings.js?v={{ static_v }}" defer></script>

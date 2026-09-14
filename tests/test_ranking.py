@@ -360,7 +360,11 @@ def test_精排部分失败的条目不反超(tmp_path, monkeypatch):
     monkeypatch.setattr(rank, "llm_rerank",
                         lambda *a, **kw: {ok_id: (60.0, "相关")})
 
-    rank.run(cfg, days=30, verbose=False)
+    from litradar import progress
+    events = []
+    with progress.observe(events.append):
+        progress.run_stage('rank', lambda: rank.run(cfg, days=30, verbose=False))
+    assert events[-1]['status'] == 'partial', 'Missing AI scores must not appear as a fully successful run'
 
     conn = db.Database(cfg.db_file).connect()
     got = {r["item_id"]: r for r in conn.execute(

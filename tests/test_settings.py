@@ -20,11 +20,12 @@ def settings_env(tmp_path, monkeypatch):
     monkeypatch.setattr(web, "CONFIG_PATH", str(path))
     from litradar.credentials import write
     from litradar.passwords import hash_password
-    from litradar.web.access import SESSION_COOKIE, session_value
+    from litradar.web.access import SESSION_COOKIE, session_value, ADMIN_COOKIE, admin_value
     cfg = load_config(path)
     write(cfg, cfg.app.admin_password_env, hash_password("test-password", iterations=1000))
     client = TestClient(web.app)
     client.cookies.set(SESSION_COOKIE, session_value(load_config(path)))
+    client.cookies.set(ADMIN_COOKIE, admin_value(load_config(path)))
     return path, interests, client
 
 
@@ -467,7 +468,7 @@ def test_new_general_queries_reopen_as_editable_conditions():
     assert rows[0]['all']==['organic','photocatalysis']
 
 
-def test_action_button_does_not_shadow_destination_and_auth_retry_keeps_action():
+def test_authorized_save_preserves_action_destination_and_refreshes_revision():
     import json
     import shutil
     import subprocess
@@ -478,9 +479,9 @@ def test_action_button_does_not_shadow_destination_and_auth_retry_keeps_action()
     result=subprocess.run([node,str(Path(__file__).parent/'helpers/settings_context.cjs')],
                           capture_output=True,text=True,check=True)
     data=json.loads(result.stdout)
-    assert [r['url'] for r in data['requests']]==['/settings/group-action?slug=default']*2
+    assert [r['url'] for r in data['requests']]==['/settings/group-action?slug=default']
     assert all(r['body']=={'version':'v1','action':'copy'} for r in data['requests'])
-    assert data['requests'][1]['headers']['X-Admin-Password']=='test-password'
+    assert 'headers' not in data['requests'][0]
     assert data['destination'].endswith('?saved=1') and data['busy']==''
 
 

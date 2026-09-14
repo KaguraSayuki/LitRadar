@@ -1,0 +1,8 @@
+{% extends 'base.html' %}
+{% block title %}验证后进入设置 · LitRadar{% endblock %}
+{% block body %}
+<div class="access-unlock-page">
+  <header class="page-head"><div><h1>进入设置</h1><p class="page-sub">设置包含服务凭据和运行偏好，请先验证访问密码。</p></div></header>
+  {% include 'partials/authorization.html' %}
+</div>
+{% endblock %}

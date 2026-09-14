@@ -49,5 +49,7 @@
 {% endfor %}
 </div>
 {% if entries %}<p class="settings-footnote">{{ icon('clock') }}<span>更新会执行检索、邮件采集、补全、排序和摘要；AI 调用可能产生费用。邮件与补全为全局阶段。</span></p>{% endif %}
-<pre class="console" id="run-out" role="status" hidden></pre>
+
 {% endblock %}
+
+{% block settings_progress %}{% include 'partials/pipeline.html' %}{% endblock %}

@@ -16,7 +16,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import db
+from . import db, progress
 from .config import Config
 from .llm import LLMClient, LLMError, validate_scores
 
@@ -656,6 +656,7 @@ def llm_rerank(rows: list[tuple[sqlite3.Row, float, dict]], prof: Profile,
 
     for start in range(0, len(rows), bs):
         batch = rows[start:start + bs]
+        progress.report(f'{prof.name} · AI 评分，第 {start // bs + 1} 批', start, len(rows))
         listing = "\n".join(_format_item(i + 1, r) for i, (r, _, _) in enumerate(batch))
         prompt = RERANK_PROMPT.format(
             direction=prof.direction[:400],
@@ -677,6 +678,8 @@ def llm_rerank(rows: list[tuple[sqlite3.Row, float, dict]], prof: Profile,
         except (LLMError, ValueError, KeyError, TypeError) as e:
             print(f"  [warn] 精排批次 {start//bs+1} 失败: {e}")
             continue
+        finally:
+            progress.report(f'{prof.name} · AI 评分，已处理 {start + len(batch)} 篇', start + len(batch), len(rows))
     return out
 
 
@@ -701,6 +704,7 @@ def _rank_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
             (group_id, f"-{days} days", f"-{days} days"),
         ).fetchall())
         stat["candidates"] = len(rows)
+        progress.report(f'{prof.name} · 正在筛选 {len(rows)} 篇文献')
 
         kept, dropped = rule_filter(rows, prof)
         stat["after_rule"] = len(kept)
@@ -766,6 +770,7 @@ def _rank_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
             llm_scores = llm_rerank(kept, prof, cfg, llm,
                                     liked=liked, disliked=disliked)
             stat["llm_scored"] = len(llm_scores)
+            stat["llm_failed"] = len(kept) - len(llm_scores)
         else:
             stat["llm_skipped"] = "未配置 API key 或已禁用"
 

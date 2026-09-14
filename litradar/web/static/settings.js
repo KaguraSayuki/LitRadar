@@ -69,14 +69,8 @@
       if (!menu.contains(event.target)) menu.open = false;
     });
   });
-  async function action(url, body, password) {
-    const headers = password ? {'X-Admin-Password':password} : {};
-    const response = await fetch(url, {method:'POST', body, headers});
-    if (response.status === 401 && response.headers.get('X-Admin-Password-Required')) {
-      const value = prompt('请输入管理员密码');
-      if (value) return action(url, body, value);
-      throw new Error('已取消。');
-    }
+  async function action(url, body) {
+    const response = await window.litradarAuth.fetch(url, {method:'POST', body});
     const result = await response.json();
     if (!response.ok) throw new Error(result.detail || '操作失败，请稍后再试。');
     return result;
@@ -151,18 +145,11 @@
     } catch(error){output.textContent=error.message;}
     finally {button.disabled=false;}
   });
-  async function submit(form, submitter, password) {
+  async function submit(form, submitter) {
     const body = new FormData(form);
     if (submitter?.name) body.set(submitter.name, submitter.value);
-    const headers = {};
-    if (password) headers['X-Admin-Password'] = password;
     // A button named "action" shadows HTMLFormElement.action.
-    const response = await fetch(form.getAttribute('action') || location.href, {method: 'POST', body, headers});
-    if (response.status === 401 && response.headers.get('X-Admin-Password-Required')) {
-      const value = prompt('输入管理员密码以保存设置');
-      if (value) return submit(form, submitter, value);
-      return;
-    }
+    const response = await window.litradarAuth.fetch(form.getAttribute('action') || location.href, {method: 'POST', body});
     if (response.redirected) {
       const destination = new URL(response.url);
       if (form.id === 'model-settings' || form.id === 'model-credential') destination.hash = 'model-connection';
@@ -193,29 +180,6 @@
       try { await submit(form, event.submitter); }
       catch (_) { alert('未能确认保存结果。您的输入仍保留，请在新标签页查看设置后再试。'); }
       finally { delete form.dataset.busy; }
-    });
-  });
-  document.querySelectorAll('[data-run-group]').forEach(button => {
-    button.addEventListener('click', async () => {
-      if (!confirm('更新将执行检索、邮件采集、补全、排序和摘要；AI 调用可能产生费用。现在开始？')) return;
-      const output = document.getElementById('run-out');
-      output.hidden = false;
-      button.disabled = true;
-      output.textContent = '正在更新，请稍候…';
-      const url = '/admin/run/all?g=' + encodeURIComponent(button.dataset.runGroup);
-      try {
-        let response = await fetch(url, {method:'POST'});
-        if (response.status === 401 && response.headers.get('X-Admin-Password-Required')) {
-          const password = prompt('输入管理员密码以运行更新');
-          if (!password) { output.textContent = '已取消。'; return; }
-          response = await fetch(url, {method:'POST', headers:{'X-Admin-Password':password}});
-        }
-        const result = await response.json();
-        output.textContent = response.ok
-          ? '更新已结束。请在文献列表查看结果，并在统计页检查各阶段运行记录。'
-          : result.detail || '更新未完成，请在统计页检查运行记录。';
-      } catch (_) { output.textContent = '连接中断，请在统计页查看运行记录后再试。'; }
-      finally { button.disabled = false; }
     });
   });
 })();

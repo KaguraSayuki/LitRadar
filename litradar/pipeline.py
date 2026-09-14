@@ -5,7 +5,7 @@ import json
 import sqlite3
 from typing import Any
 
-from . import db, enrich, rank, summarize
+from . import db, enrich, progress, rank, summarize
 from .config import Config, read_secret
 from .normalize import normalize_doi, title_norm
 from .rank import (Profile, load_enabled_groups, load_groups,
@@ -156,7 +156,9 @@ def ingest_mail(cfg: Config, *, verbose: bool = True) -> dict:
             "SELECT message_id, received_at, subject, raw FROM raw_email "
             "WHERE processed_at IS NULL ORDER BY id"
         ).fetchall()
+        progress.report('正在检查待处理邮件', 0)
         for old in pending:
+            progress.report('正在恢复未处理邮件', stat['messages'])
             stat["messages"] += 1
             try:
                 records, meta = xmol_email.parse_bytes(old["raw"])
@@ -172,7 +174,9 @@ def ingest_mail(cfg: Config, *, verbose: bool = True) -> dict:
             }
             ingest_records(records, replay_meta, old["raw"], mid=old["message_id"])
 
+        progress.report('正在收取订阅邮件', stat['messages'])
         for msg in mail.iter_messages(cfg.mail):
+            progress.report('正在解析订阅邮件', stat['messages'])
             stat["messages"] += 1
             try:
                 records, meta = xmol_email.parse_bytes(msg.raw)
@@ -189,6 +193,7 @@ def ingest_mail(cfg: Config, *, verbose: bool = True) -> dict:
             mid = meta.get("message_id") or msg.source_ref
             ingest_records(records, meta, msg.raw, mid=mid, live_msg=msg)
 
+        progress.report('邮件处理完成', stat['messages'], stat['messages'])
         db.log_run(conn, "ingest_mail", "ok", stat, started_at=started)
         conn.commit()
     except Exception as e:  # noqa: BLE001
@@ -242,7 +247,8 @@ def _ingest_snowball(conn: sqlite3.Connection, cfg: Config, prof: Profile,
     # ---- 1. 刷新最久没查的几个种子 ----
     todo = db.pick_seeds_to_query(conn, seeds, cfg.sources.snowball_seeds_per_run,
                                  group_id=group_id)
-    for seed in todo:
+    for index, seed in enumerate(todo):
+        progress.report(f'{prof.name} · 检索种子文献的引用', index, len(todo))
         got = semanticscholar.fetch_citations(
             f"DOI:{seed}", year=yr, since=cutoff.isoformat(),
             limit=cfg.sources.snowball_per_seed,
@@ -302,7 +308,8 @@ def _ingest_group(conn, cfg: Config, prof: Profile, group_id: int, *,
         if cfg.sources.crossref_search_enabled:
             # 多查询并集 —— 实测单查询 100 篇 → 4 条查询并集 186 篇(+86%),
             # 收益在**召回**而不在精确率(精确率反而略降),精确交给 LLM 精排。
-            for q in queries:
+            for index, q in enumerate(queries):
+                progress.report(f'{prof.name} · Crossref，检索第 {index + 1} 项', index, len(queries))
                 got = crossref_search.search(
                     q,
                     lookback_days=cfg.sources.crossref_lookback_days,
@@ -326,7 +333,8 @@ def _ingest_group(conn, cfg: Config, prof: Profile, group_id: int, *,
                 yr = cfg.sources.s2_search_year or f"{cutoff.year}-{date.today().year}"
                 stat["s2_year"] = yr
                 stat["s2_since"] = cutoff.isoformat()
-                for q in prof.s2_queries:
+                for index, q in enumerate(prof.s2_queries):
+                    progress.report(f'{prof.name} · Semantic Scholar，检索第 {index + 1} 项', index, len(prof.s2_queries))
                     got = semanticscholar.search_bulk(
                         q,
                         year=yr,
@@ -340,7 +348,8 @@ def _ingest_group(conn, cfg: Config, prof: Profile, group_id: int, *,
                     raw += got
 
                 # 期刊定向的宽查询:替代 Crossref 原来的 ISSN 白名单覆盖
-                for q in prof.s2_venue_queries:
+                for index, q in enumerate(prof.s2_venue_queries):
+                    progress.report(f'{prof.name} · Semantic Scholar 期刊检索，检索第 {index + 1} 项', index, len(prof.s2_venue_queries))
                     got = semanticscholar.search_bulk(
                         q,
                         year=yr,
@@ -356,7 +365,8 @@ def _ingest_group(conn, cfg: Config, prof: Profile, group_id: int, *,
 
         openalex_key = read_secret(cfg.sources.openalex_api_key_env) or ""
         if cfg.sources.openalex_enabled and openalex_key:
-            for q in queries:
+            for index, q in enumerate(queries):
+                progress.report(f'{prof.name} · OpenAlex，检索第 {index + 1} 项', index, len(queries))
                 got = openalex_search.search(
                     q,
                     lookback_days=cfg.sources.openalex_lookback_days,
@@ -462,21 +472,23 @@ def run_all(cfg: Config, *, days: int = 200, verbose: bool = True,
     """
     out: dict[str, Any] = {}
     if verbose:
-        print("[1/4] 解析 X-MOL 订阅邮件")
-    out["ingest_mail"] = (ingest_mail(cfg, verbose=verbose)
+        print("[1/5] 解析 X-MOL 订阅邮件")
+    out["ingest_mail"] = progress.run_stage('mail', lambda: (ingest_mail(cfg, verbose=verbose)
                           if cfg.sources.xmol_enabled
-                          else {"skipped": "sources.xmol_enabled=false"})
+                          else {"skipped": "sources.xmol_enabled=false"}))
 
     if verbose:
-        print("[2/4] 关键词检索(OpenAlex / Crossref)")
-    out["ingest_search"] = ingest_keyword_search(cfg, verbose=verbose, group=group)
+        print("[2/5] 关键词检索(OpenAlex / Crossref)")
+    out["ingest_search"] = progress.run_stage('search', lambda: ingest_keyword_search(cfg, verbose=verbose, group=group))
 
     if verbose:
-        print("[3/4] 富化(补摘要/引用数)")
-    out["enrich"] = enrich.run(cfg, verbose=verbose)
+        print("[3/5] 富化(补摘要/引用数)")
+    out["enrich"] = progress.run_stage('enrich', lambda: enrich.run(cfg, verbose=verbose))
 
     if verbose:
-        print("[4/4] 排序 + 摘要")
-    out["rank"] = rank.run(cfg, days=days, verbose=verbose, group=group)
-    out["summarize"] = summarize.run(cfg, days=days, verbose=verbose, group=group)
+        print("[4/5] 排序")
+    out["rank"] = progress.run_stage('rank', lambda: rank.run(cfg, days=days, verbose=verbose, group=group))
+    if verbose:
+        print("[5/5] 摘要")
+    out["summarize"] = progress.run_stage('summarize', lambda: summarize.run(cfg, days=days, verbose=verbose, group=group))
     return out

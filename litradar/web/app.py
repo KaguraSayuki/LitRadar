@@ -18,7 +18,7 @@ from fastapi.templating import Jinja2Templates
 from markupsafe import Markup
 from starlette.datastructures import QueryParams, URL
 
-from .. import credentials, db, execution, journal_rank, pipeline, rank, summarize
+from .. import credentials, db, execution, journal_rank, pipeline, progress, rank, summarize
 from ..config import Config, load_config
 from ..lock import AlreadyRunning, single_instance
 from ..normalize import days_ago
@@ -191,7 +191,7 @@ def require_same_origin(request: Request) -> None:
         raise HTTPException(403, "跨源请求被拒绝")
 
 
-# 前端靠它区分"该弹密码框"与"口令(URL token)不对" —— 两者都是 401。
+# Distinguish an expired operation grant from an invalid reading/API token.
 ADMIN_PASSWORD_HEADER = "X-Admin-Password"
 ADMIN_PASSWORD_REQUIRED_HEADER = "X-Admin-Password-Required"
 
@@ -219,8 +219,8 @@ def require_admin_password(request: Request, cfg: Config) -> None:
     与 require_token 同样是"设了就校验":没配密码就不拦 —— 但那种状态下
     ``litradar check`` 会明确告诉你花钱接口没有这道闸。
     """
-    from .access import logged_in
-    if logged_in(request, cfg):
+    from .access import admin_expires
+    if admin_expires(request, cfg):
         return
     stored = cfg.app.admin_password_hash
     if not stored:
@@ -228,7 +228,7 @@ def require_admin_password(request: Request, cfg: Config) -> None:
     got = request.headers.get(ADMIN_PASSWORD_HEADER, "")
     if not verify_password(got, stored):
         raise HTTPException(
-            401, "需要管理员密码",
+            401, "操作授权已过期，请在页面内验证密码后继续。",
             headers={ADMIN_PASSWORD_REQUIRED_HEADER: "1"},
         )
 
@@ -302,19 +302,33 @@ async def remember_token(request: Request, call_next):
     否则页面内的链接(``/item/5``)不带 token,一点就 401 —— 那样这个口令
     根本没法用。cookie 里存的就是 token 本身,服务端不保存任何会话状态。
     """
-    from .access import logged_in, protect_access_log
+    from .access import logged_in, protect_access_log, locked_page
     protect_access_log()
     cfg = get_cfg()
-    public = request.url.path in ("/healthz", "/setup", "/login") or request.url.path.startswith("/static/")
+    public = request.url.path in ("/healthz", "/setup", "/login", "/access/unlock") or request.url.path.startswith("/static/")
     if not public and request.method == "GET":
-        if cfg.app.admin_password_hash and not cfg.app.token and not logged_in(request, cfg):
+        if (cfg.app.admin_password_hash and not cfg.app.token and not logged_in(request, cfg)
+                and not request.url.path.startswith(("/admin/", "/access/"))):
             return RedirectResponse("/login", status_code=303)
         if (cfg.config_file and not cfg.interests_file.exists()
                 and not cfg.app.admin_password_hash and not cfg.app.token):
             return RedirectResponse("/setup", status_code=303)
-    resp = await call_next(request)
+    protected = request.url.path.startswith('/settings') or request.url.path == '/interests'
+    if protected and request.method == 'GET' and cfg.app.admin_password_hash:
+        try:
+            require_token(request)
+            require_admin_password(request, cfg)
+        except HTTPException as error:
+            if error.headers and error.headers.get(ADMIN_PASSWORD_REQUIRED_HEADER):
+                resp = locked_page(request)
+            else:
+                resp = JSONResponse({'detail': error.detail}, status_code=error.status_code)
+        else:
+            resp = await call_next(request)
+    else:
+        resp = await call_next(request)
     resp.headers.setdefault('Referrer-Policy', 'same-origin')
-    if request.url.path.startswith(("/settings", "/setup", "/login")):
+    if request.url.path.startswith(("/settings", "/interests", "/setup", "/login", "/access", "/admin", "/stats")):
         resp.headers["Cache-Control"] = "no-store"
         # no-referrer makes native navigation POSTs send Origin: null, which
         # the CSRF guard correctly rejects. Only the one-time code redirect
@@ -348,6 +362,8 @@ def ctx(request: Request, **kw) -> dict:
     cfg = get_cfg()
     group = active_group(request, cfg)
     ranking = _ranking_status(cfg, group)
+    from .access import admin_expires
+    import time
     base = {
         "request": request,
         "today": datetime.now(ZoneInfo(cfg.app.timezone)).date().isoformat(),
@@ -363,6 +379,10 @@ def ctx(request: Request, **kw) -> dict:
         }.get(ranking, ""),
         "static_v": _static_version(),
         "home_label": HOME_LABEL,
+        "admin_required": bool(cfg.app.admin_password_hash),
+        "admin_expires_at": admin_expires(request, cfg),
+        "server_time": time.time(),
+        "guarded_stages": [stage for stage in execution.STAGES if execution.guarded(cfg, stage)],
     }
     base.update(kw)
     return base
@@ -671,11 +691,9 @@ def interests_save(request: Request, raw: str = Form(...), version: str = Form("
 
     cfg = get_cfg()
     from ..settings import SettingsStore, atomic_write
-    from .access import logged_in
     if not cfg.app.admin_password_hash and not cfg.app.token:
         raise HTTPException(403, "请先通过一次性设置链接设置访问密码。")
-    if not logged_in(request, cfg):
-        require_admin_password(request, cfg)
+    require_admin_password(request, cfg)
     require_exposure_safe(cfg)
 
     def fail(msg: str, status: int = 400):
@@ -782,7 +800,7 @@ def item_action(request: Request, item_id: int, action: str = Form(...)):
 
 
 @app.post("/admin/run/{stage}")
-def admin_run(request: Request, stage: str, days: int = 0):
+def admin_run(request: Request, stage: str, days: int = 0, background: bool = False):
     # 流水线可能调用付费模型,运行前检查:
     #   口令 → 同源 → 暴露检查 →(花钱阶段)密码 →(花钱阶段)冷却 + 每日上限。
     # 前端显式传入当前页面的 ?g=,口令 Cookie 仍随同源 fetch 自动发送。
@@ -790,6 +808,8 @@ def admin_run(request: Request, stage: str, days: int = 0):
     require_same_origin(request)
     cfg = get_cfg()
     require_exposure_safe(cfg)
+    if stage not in execution.STAGES:
+        raise HTTPException(400, f"未知阶段: {stage}")
     # 当前组(切换器/`?g=` 决定的那个)。记账与执行要用同一个组,否则"在 A 组
     # 点了一下"会算到所有组头上,上限自然就不准了。
     prof = active_group(request, cfg, require_known=True)
@@ -800,33 +820,56 @@ def admin_run(request: Request, stage: str, days: int = 0):
     # 导致网页点"排序"只覆盖最近一个月,更早的条目永远是"未评分"。
     if days <= 0:
         days = cfg.app.pipeline_window_days
-    # 和 CLI 用同一把锁(同一个文件),否则网页按钮会绕过它:定时任务正在
-    # enrich 时点一下,两边互抢 Semantic Scholar 的 1 req/s 限流,表现为
-    # "批量全部返回空"。双击按钮同理,会并发跑两份。
+    def check():
+        if execution.guarded(cfg, stage):
+            require_stage_limits(cfg, stage, gslug)
+
+    def operation():
+        # The credential context belongs to the worker, not the request thread.
+        with credentials.snapshot(cfg):
+            from .. import enrich
+            if stage == "all":
+                return pipeline.run_all(cfg, days=days, group=prof)
+            operations = {
+                "mail": lambda: pipeline.ingest_mail(cfg),
+                "search": lambda: pipeline.ingest_keyword_search(cfg, group=prof),
+                "enrich": lambda: enrich.run(cfg),
+                "rank": lambda: rank.run(cfg, days=days, group=prof),
+                "summarize": lambda: summarize.run(cfg, days=days, group=prof),
+            }
+            return progress.run_stage(stage, operations[stage])
+
     try:
-        with single_instance(cfg.db_file.parent / "litradar.lock"), credentials.snapshot(cfg):
-            if execution.guarded(cfg, stage):
-                require_stage_limits(cfg, stage, gslug)
-            # mail 与 enrich 是全局的(不按方向跑),不受当前组影响
-            if stage == "mail":
-                out = pipeline.ingest_mail(cfg)
-            elif stage == "search":
-                out = pipeline.ingest_keyword_search(cfg, group=prof)
-            elif stage == "enrich":
-                from .. import enrich
-                out = enrich.run(cfg)
-            elif stage == "rank":
-                out = rank.run(cfg, days=days, group=prof)
-            elif stage == "summarize":
-                out = summarize.run(cfg, days=days, group=prof)
-            elif stage == "all":
-                out = pipeline.run_all(cfg, days=days, group=prof)
-            else:
-                raise HTTPException(400, f"未知阶段: {stage}")
+        if background:
+            from .jobs import JobStore
+            state = JobStore(cfg).start(request.headers.get('X-Run-ID', ''), stage,
+                                       prof, days, operation, check)
+            return JSONResponse(state, status_code=202)
+        # Keep the synchronous API for scripts; both paths share the CLI lock.
+        with single_instance(cfg.db_file.parent / "litradar.lock"):
+            check()
+            out = operation()
     except AlreadyRunning:
         # CLI 那边跳过就完了;网页上必须把"没跑"说清楚,否则用户会一直点
         raise HTTPException(409, "另一个任务正在运行,请稍后再试")
     return JSONResponse(out)
+
+
+@app.get('/admin/jobs/current')
+def current_job(request: Request):
+    require_token(request)
+    from .jobs import JobStore
+    return JSONResponse(JobStore(get_cfg()).snapshot())
+
+
+@app.get('/admin/jobs/{job_id}')
+def job_status(request: Request, job_id: str):
+    require_token(request)
+    from .jobs import JobStore
+    state = JobStore(get_cfg()).snapshot(job_id)
+    if state is None:
+        raise HTTPException(404, '找不到这次运行，请查看最近运行记录。')
+    return JSONResponse(state)
 
 
 from .settings import router as settings_router

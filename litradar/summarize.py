@@ -6,7 +6,7 @@ import json
 import re
 import sqlite3
 
-from . import db
+from . import db, progress
 from .config import Config
 from .llm import LLMClient, LLMError, validate_items, validate_text
 from .rank import Profile, load_enabled_groups, load_groups, load_interests
@@ -90,7 +90,8 @@ def summarize_relevance(rows: list[sqlite3.Row], prof: Profile,
     整条摘要的中性部分已经算过了,换组重算整套会白花 LLM 的钱。
     """
     out: dict[int, str] = {}
-    for row in rows:
+    for index, row in enumerate(rows):
+        progress.report(f'{prof.name} · 生成方向说明', index, len(rows))
         prompt = RELEVANCE_PROMPT.format(
             title=row["title"],
             abstract=(row["abstract"] or "")[:2000] or "(无摘要,只有标题)",
@@ -104,6 +105,8 @@ def summarize_relevance(rows: list[sqlite3.Row], prof: Profile,
                 raise
             print(f"  [warn] relevance 失败 #{row['id']}: {e}")
             continue
+        finally:
+            progress.report(f'{prof.name} · 方向说明，已处理 {index + 1} 篇', index + 1, len(rows))
         if text:
             out[int(row["id"])] = text
     return out
@@ -264,7 +267,8 @@ def _summarize_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
                 head_ids.add(int(r["id"]))
         rest = [r for r in rows if int(r["id"]) not in head_ids]
 
-        for r in heads:
+        for index, r in enumerate(heads):
+            progress.report(f'{prof.name} · 生成深度摘要', index, len(heads))
             if verbose:
                 print(f"  [{prof.name}] 深度摘要 #{r['id']}: {r['title'][:48]}…")
             try:
@@ -284,13 +288,18 @@ def _summarize_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
             except LLMError as e:
                 print(f"  [warn] 摘要失败: {e}")
                 stat["skipped"] += 1
+                stat["deep_failed"] = stat.get("deep_failed", 0) + 1
+            finally:
+                progress.report(f'{prof.name} · 深度摘要，已处理 {index + 1} 篇', index + 1, len(heads))
 
         bs = 10
         for s in range(0, len(rest), bs):
             chunk = rest[s:s + bs]
+            progress.report(f'{prof.name} · 生成简要摘要，第 {s // bs + 1} 批', s, len(rest))
             if verbose:
                 print(f"  [{prof.name}] 批量摘要 {s + 1}-{s + len(chunk)} / {len(rest)}…")
             brief = summarize_brief(chunk, llm)
+            progress.report(f'{prof.name} · 简要摘要，已处理 {s + len(chunk)} 篇', s + len(chunk), len(rest))
             if not brief:
                 stat["brief_failed"] += len(chunk)
                 continue
