@@ -1,5 +1,5 @@
 [Unit]
-Description=LitRadar Web (个人化学文献雷达)
+Description=LitRadar Web and Scheduler (个人化学文献雷达)
 After=network-online.target
 Wants=network-online.target
 
@@ -7,10 +7,11 @@ Wants=network-online.target
 Type=simple
 User=%i
 WorkingDirectory=/srv/Work/LitRadar
-EnvironmentFile=/srv/Work/LitRadar/.env
+# 应用自行读取配置旁的 .env 和私有凭据文件，支持网页更换密钥。
+# 如在此通过 EnvironmentFile/Environment 注入凭据，将显示为部署管理。
 # 只绑本机 —— 对外由 nginx 反代(见 deploy/litradar-nginx.conf)。
 # 直接绑 0.0.0.0 会绕过 nginx 的 TLS 与口令保护。
-ExecStart=/srv/Work/LitRadar/.venv/bin/uvicorn litradar.web.app:app \
+ExecStart=/srv/Work/LitRadar/.venv/bin/litradar serve \
     --host 127.0.0.1 --port 8090
 Restart=on-failure
 RestartSec=5
@@ -21,7 +22,7 @@ PrivateTmp=true
 PrivateDevices=true
 ProtectHome=read-only
 # 整个文件系统只读,只放开项目目录:网页端可以在线编辑项目根下的
-# interests.yaml(以及旁边的 .bak 备份 / .tmp 临时文件),data/ 也在这里面。
+# config.yaml、interests.yaml、私有凭据及备份，data/ 也在这里面。
 ProtectSystem=strict
 ReadWritePaths=/srv/Work/LitRadar
 
