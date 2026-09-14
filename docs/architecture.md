@@ -190,6 +190,7 @@ DOI 大小写在建键前统一处理，入库时清洗刊名并过滤非 HTTP(S
 | `/settings/schedule` / `/settings/maintenance` | 每日计划、状态、访问与恢复 |
 | `/setup` / `/login` / `/logout` | 一次性初始化与访问会话 |
 | `POST /access/unlock` / `GET /access/status` | 验证或读取固定 5 分钟操作授权 |
+| `POST /access/lock` | 清除当前浏览器的操作授权，保留阅读登录 |
 | `GET /stats` | 当前组统计与相关运行记录 |
 | `POST /admin/run/{stage}` | 手动运行所选阶段；网页发送 `background=1` 和 `X-Run-ID`，返回 202；脚本默认保持同步 |
 | `GET /admin/jobs/current` / `GET /admin/jobs/{id}` | 查看最近一次或指定手动任务的持久化进度 |
@@ -227,6 +228,9 @@ HttpOnly Cookie；操作授权使用不同签名用途的 5 分钟 Cookie，换�
 设置读取在服务端先验证短授权；写入、测试和预览同时要求访问权限、同源和短授权。
 前端倒计时过期时隐藏并锁定编辑区域，保留原 DOM 输入；重新验证后恢复。状态轮询
 不续期，服务器仍逐次校验写入，防止靠修改页面计时绕过授权。
+解锁状态不保存在全局配置中，各浏览器使用自己的 Cookie。退出授权仅清除当前浏览器
+的短 Cookie；同源 BroadcastChannel 通知其他标签页锁定，重新解锁时各页读取服务端
+状态。退出前发出的旧状态请求不能重新解锁界面；无通道支持时仍有定期查询和前台刷新。
 
 `serve` 启动独立调度子进程，Web worker 不注册计划；独立部署可运行 `scheduler`。
 调度终身持有专用锁，执行时取得流水线锁并持久认领当天日期。忙时不认领，失败或

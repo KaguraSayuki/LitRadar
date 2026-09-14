@@ -6,6 +6,7 @@ const vm = require('node:vm');
 
 (async () => {
   let clock = 0, serverNow = 1000, grant = 1300, accepted = true, rejectWrite = false;
+  let holdStatus = false, statusResponse, failLock = false, channel;
   const nodes = new Map(), timers = [], writes = [];
   const node = name => {
     if (!nodes.has(name)) nodes.set(name, {dataset:{}, value:'draft remains', handlers:{},
@@ -16,13 +17,27 @@ const vm = require('node:vm');
   const form = node('[data-auth-form]'), panel = node('[data-auth-panel]');
   const draft = node('[data-auth-protected]');
   const context = {performance:{now:() => clock},
+    BroadcastChannel: class {
+      constructor() {channel = this; this.messages = [];}
+      postMessage(message) {this.messages.push(message);}
+      addEventListener(type, handler) {this.receive = handler;}
+    },
     FormData: class extends Map {constructor(){super([['password', node('input[type="password"]').value]]);}},
     document: {body:{dataset:{adminRequired:'true',adminExpires:'1300',serverTime:'1000'}},
       querySelector:node, addEventListener() {}},
     window:{addEventListener() {}}, location:{reload(){throw Error('unexpected reload');}},
     setInterval: (fn, ms) => {timers.push({fn,ms});},
     fetch: async (url, options) => {
-      if (url === '/access/status') return {ok:true,json:async () => ({required:true, expires_at:grant, server_time:serverNow})};
+      if (url === '/access/status') {
+        const result = {required:true, expires_at:grant, server_time:serverNow};
+        if (holdStatus) return new Promise(resolve => {statusResponse = () => resolve({ok:true,json:async () => result});});
+        return {ok:true,json:async () => result};
+      }
+      if (url === '/access/lock') {
+        if (failLock) throw Error('Connection failed');
+        grant = 0;
+        return {ok:true,json:async () => ({required:true, expires_at:0, server_time:serverNow})};
+      }
       if (url === '/access/unlock') {
         if (accepted) grant = serverNow + 300;
         return {ok:accepted, json:async () => accepted ? {expires_at:grant,server_time:serverNow} : {detail:'密码不正确'}};
@@ -74,5 +89,32 @@ const vm = require('node:vm');
   assert.equal(writes[2].url, writes[1].url);
   assert.equal(writes[2].options.body, writes[1].options.body);
   assert.equal(panel.hidden, false);
+  // A status request from before exit must not reopen the editor afterward.
+  holdStatus = true;
+  const stale = context.window.litradarAuth.refresh();
+  const exit = node('[data-auth-lock]').handlers.submit;
+  await exit({preventDefault(){}});
+  assert.equal(draft.hidden, true);
+  assert.equal(draft.value, 'draft remains');
+  assert.match(node('[data-auth-heading]').textContent, /已退出/);
+  assert.equal(channel.messages.at(-1), 'locked');
+  statusResponse(); await stale; holdStatus = false;
+  assert.equal(context.window.litradarAuth.valid(), false);
+  assert.equal(draft.hidden, true);
+  // Other tabs get a notification, then validate the shared browser cookie.
+  grant = serverNow + 300;
+  await channel.receive({data:'changed'});
+  assert.equal(draft.hidden, false);
+  failLock = true;
+  const broadcasts = channel.messages.length;
+  await exit({preventDefault(){}});
+  assert.equal(node('[data-auth-lock-error]').hidden, false);
+  assert.equal(channel.messages.length, broadcasts);
+  assert.equal(node('button[type="submit"]').disabled, false);
+  grant = 0;
+  await channel.receive({data:'locked'});
+  assert.equal(draft.hidden, true);
+  assert.equal(context.window.litradarAuth.valid(), false);
+  assert.equal(writes.length, 3); // Exiting never replays pending settings operations.
   process.stdout.write('authorization passed');
 })().catch(error => {console.error(error);process.exitCode=1;});

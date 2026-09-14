@@ -107,6 +107,44 @@ def test_unlock_redirect_and_cookie_invalidation(owner):
     assert client.post('/admin/run/rank').status_code == 401
 
 
+def test_operation_grants_and_exit_are_isolated_between_browsers(owner, monkeypatch):
+    first, _ = owner
+    second = TestClient(web.app)
+    assert second.post('/login', data={'password': 'test-password'}, follow_redirects=False).status_code == 303
+    first_reading = first.cookies.get(access.SESSION_COOKIE)
+    second_grant = second.cookies.get(access.ADMIN_COOKIE)
+    assert first.cookies.get(access.ADMIN_COOKIE) != second_grant
+    monkeypatch.setattr(web.rank, 'run', lambda *a, **kw: {'scored': 0})
+    response = first.post('/access/lock', headers={'Accept': 'application/json'})
+    assert response.status_code == 200 and response.json()['expires_at'] == 0
+    assert access.ADMIN_COOKIE not in first.cookies
+    assert first.cookies.get(access.SESSION_COOKIE) == first_reading
+    assert first.get('/').status_code == 200
+    assert first.post('/admin/run/rank').status_code == 401
+    assert 'id="model-settings"' not in first.get('/settings/services').text
+    assert second.cookies.get(access.ADMIN_COOKIE) == second_grant
+    assert second.get('/access/status').json()['expires_at'] > 0
+    assert second.post('/admin/run/rank').status_code == 200
+    # Unlocking A does not unlock B, even with the same address/user-agent/password.
+    second.post('/access/lock', headers={'Accept': 'application/json'})
+    assert first.post('/access/unlock', data={'password': 'test-password'},
+                      headers={'Accept': 'application/json'}).status_code == 200
+    assert second.get('/access/status').json()['expires_at'] == 0
+    assert second.post('/admin/run/rank').status_code == 401
+    assert first.post('/admin/run/rank').status_code == 200
+
+
+def test_operation_exit_requires_same_origin_and_supports_native_form(owner):
+    client, _ = owner
+    grant = client.cookies.get(access.ADMIN_COOKIE)
+    assert client.post('/access/lock', headers={'Origin': 'https://elsewhere.invalid'}).status_code == 403
+    assert client.cookies.get(access.ADMIN_COOKIE) == grant
+    response = client.post('/access/lock', data={'next': '/stats?g=default'}, follow_redirects=False)
+    assert response.status_code == 303 and response.headers['location'] == '/stats?g=default'
+    assert access.ADMIN_COOKIE not in client.cookies
+    assert client.get('/stats').status_code == 200
+
+
 def test_background_progress_survives_expiry_and_prevents_duplicate_runs(owner, monkeypatch):
     client, cfg = owner
     entered, release = threading.Event(), threading.Event()

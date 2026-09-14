@@ -161,6 +161,23 @@ def authorization_status(request: Request):
             "required": bool(cfg.app.admin_password_hash)}
 
 
+@router.post("/access/lock")
+async def lock_operations(request: Request):
+    from . import app as web
+    from fastapi.responses import JSONResponse
+    web.require_same_origin(request)
+    cfg = web.get_cfg()
+    if 'application/json' in request.headers.get('accept', ''):
+        response = JSONResponse({"expires_at": 0, "server_time": time.time(),
+                                 "required": bool(cfg.app.admin_password_hash)})
+    else:
+        form = await request.form()
+        response = RedirectResponse(safe_next(str(form.get('next', '/settings'))), status_code=303)
+    # Clear only this browser's operation grant; reading and other clients continue.
+    response.delete_cookie(ADMIN_COOKIE, secure=request.url.scheme == 'https', samesite='strict', httponly=True)
+    return response
+
+
 def issue_setup_link(cfg, url: str) -> str:
     from urllib.parse import urlsplit
     parsed = urlsplit(url)
