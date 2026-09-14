@@ -10,7 +10,7 @@ import pytest
 
 from litradar import db, rank, summarize
 from litradar.config import Config
-from litradar.llm import DeepSeek, LLMError
+from litradar.llm import LLMClient, LLMError
 
 
 def _error(kind):
@@ -32,7 +32,7 @@ def _response(data):
 def _client(monkeypatch, effects):
     create = Mock(side_effect=effects)
     client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
-    monkeypatch.setattr(DeepSeek, "_client_or_raise", lambda *_: client)
+    monkeypatch.setattr(LLMClient, "_client_or_raise", lambda *_: client)
     return create
 
 
@@ -41,7 +41,7 @@ def test_sdk_errors_use_application_exception(monkeypatch, kind):
     error = _error(kind)
     _client(monkeypatch, [error])
     with pytest.raises(LLMError) as caught:
-        DeepSeek(Config().llm).json("system", "user")
+        LLMClient(Config().llm).json("system", "user")
     assert caught.value.__cause__ is error
 
 
@@ -89,7 +89,56 @@ def test_brief_summary_returns_no_results_on_timeout(tmp_path, monkeypatch):
     conn = _seed(cfg, 1)
     rows = conn.execute("SELECT * FROM item").fetchall()
     _client(monkeypatch, [_error("timeout")])
-    assert summarize.summarize_brief(rows, DeepSeek(cfg.llm)) == {}
+    assert summarize.summarize_brief(rows, LLMClient(cfg.llm)) == {}
+    conn.close()
+
+
+@pytest.mark.parametrize("bad", [{"scores": ["invalid"]}, {"scores": [
+    {"id": 1, "score": 80, "reason": "valid prefix"},
+    {"id": 2, "score": 101, "reason": "invalid score"}]}])
+def test_malformed_rank_batch_is_not_partially_saved_and_later_batch_continues(tmp_path, monkeypatch, bad):
+    cfg = Config()
+    cfg.app.db_path = str(tmp_path / "rank.db")
+    cfg.llm.api_key_env = "LITRADAR_TEST_LLM_KEY"
+    cfg.llm.rerank_batch_size = 5
+    monkeypatch.setenv(cfg.llm.api_key_env, "fake-key")
+    conn = _seed(cfg, 6)
+    _client(monkeypatch, [_response(bad), _response({"scores": [
+        {"id": 1, "score": 90, "reason": "valid next batch"}]})])
+    result = rank.run(cfg, verbose=False)
+    assert result["llm_scored"] == 1
+    scores = [row[0] for row in conn.execute("SELECT llm_score FROM score")]
+    assert scores.count(None) == 5 and scores.count(90) == 1
+    conn.close()
+
+
+@pytest.mark.parametrize("bad", [{"items": ["invalid"]}, {"items": [
+    {"id": 1, "title_zh": "中文标题", "one_liner": "正确"},
+    {"id": 1, "title_zh": "重复编号", "one_liner": "错误"}]}, {"items": [
+    {"id": 1, "title_zh": "中文标题", "one_liner": {"text": "错误结构"}}]}])
+def test_malformed_brief_result_is_retryable(tmp_path, monkeypatch, bad):
+    cfg = Config()
+    cfg.app.db_path = str(tmp_path / "brief.db")
+    conn = _seed(cfg, 1)
+    rows = conn.execute("SELECT * FROM item").fetchall()
+    _client(monkeypatch, [_response(bad)])
+    assert summarize.summarize_brief(rows, LLMClient(cfg.llm)) == {}
+    conn.close()
+
+
+def test_malformed_deep_and_relevance_text_are_rejected(tmp_path, monkeypatch):
+    cfg = Config()
+    cfg.app.db_path = str(tmp_path / "deep.db")
+    conn = _seed(cfg, 1)
+    rows = conn.execute("SELECT * FROM item").fetchall()
+    _client(monkeypatch, [_response({"title_zh": "标题", "one_liner": ["错误"]}),
+        _response({"relevance": {"text": "错误"}})])
+    client = LLMClient(cfg.llm)
+    prof = rank.Profile.from_dict({})
+    with pytest.raises(LLMError):
+        summarize.summarize_one(rows[0], prof, client)
+    with pytest.raises(LLMError):
+        summarize.summarize_relevance(rows, prof, client)
     conn.close()
 
 

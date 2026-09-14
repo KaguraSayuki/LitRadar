@@ -1,0 +1,43 @@
+{% from 'settings/_macros.html' import field, section_head %}
+{% set model_state = service_states.llm %}
+<section class="settings-panel" id="model-connection">
+  {{ section_head('默认模型连接', '接入任何符合 OpenAI Chat Completions 协议、能返回有效 JSON 的文本模型。', 'sparkles') }}
+  <form id="model-settings" method="post" action="/settings/model" class="settings-form" data-settings-form data-unsaved="{{ 'true' if model_unsaved else 'false' }}">
+    <input type="hidden" name="version" value="{{ model_version }}">
+    <div class="form-grid">
+      {% for f in model_fields if not f.advanced %}
+        {% if f.key == 'llm.model' %}
+        <div class="model-picker">
+          {{ field(f,model_values,errors) }}
+          <button type="button" class="btn btn--soft" id="fetch-models">获取模型</button>
+          <div class="settings-field" id="model-list-field" hidden>
+            <label for="available-models">选择可用模型</label>
+            <select id="available-models" disabled><option value="">请选择模型</option></select>
+          </div>
+        </div>
+        {% else %}{{ field(f,model_values,errors) }}{% endif %}
+      {% endfor %}
+    </div>
+    <p class="hint">填写地址、保存密钥后可获取模型列表；也可以直接输入模型名称。</p>
+    <p id="model-list-result" class="settings-result" role="status"></p>
+    <div class="settings-actions model-preset"><button type="button" class="btn btn--quiet" id="model-preset-deepseek">填入 DeepSeek 预设</button><span class="hint">填入后仍需保存</span></div>
+    <details class="settings-disclosure" {% if errors %}open{% endif %}>
+      <summary>高级兼容选项</summary>
+      <div class="form-grid">{% for f in model_fields if f.advanced %}{{ field(f,model_values,errors) }}{% endfor %}</div>
+    </details>
+    <div class="settings-actions model-save"><button class="btn btn--soft" type="submit">保存连接设置</button><span class="hint">保存后，新任务使用此连接</span></div>
+  </form>
+  <hr class="settings-divider">
+  <form id="model-credential" method="post" action="/settings/credentials/llm" class="settings-form" data-settings-form>
+    <input type="hidden" name="credential_version" value="{{ credential_version }}">
+    <div class="model-key-state"><strong>API 密钥</strong><span class="settings-badge {{ 'settings-badge--active' if model_state.configured }}">{{ '已设置' if model_state.configured else '未设置' }}</span></div>
+    {% if model_state.managed %}
+    <div class="settings-field"><label class="sr-only" for="credential-llm">新的 API 密钥</label><input type="password" id="credential-llm" name="secret" autocomplete="new-password" placeholder="留空保持原值"></div>
+    <div class="settings-actions model-save"><button class="btn btn--soft" name="action" value="save">保存密钥</button><button class="btn btn--quiet" name="action" value="clear" data-confirm="清除模型密钥？下次调用将无法使用此服务。">清除密钥</button><span class="hint">密钥独立保存，页面不会回显</span></div>
+    {% else %}<p class="hint">{{ model_state.source }}，更换密钥请联系维护代理。</p>{% endif %}
+  </form>
+  <hr class="settings-divider">
+  <button class="btn" type="button" data-check-service="llm">{{ icon('check-circle') }}测试兼容性</button>
+  <p class="hint">先保存连接设置和密钥。测试会发送一个评分与摘要小样例，可能产生少量费用。</p>
+  <p id="check-llm" class="settings-result" role="status"></p>
+</section>

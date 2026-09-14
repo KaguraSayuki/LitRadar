@@ -6,6 +6,7 @@ import hmac
 import os
 import re
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote
@@ -17,7 +18,7 @@ from fastapi.templating import Jinja2Templates
 from markupsafe import Markup
 from starlette.datastructures import QueryParams, URL
 
-from .. import db, journal_rank, pipeline, rank, summarize
+from .. import credentials, db, execution, journal_rank, pipeline, progress, rank, summarize
 from ..config import Config, load_config
 from ..lock import AlreadyRunning, single_instance
 from ..normalize import days_ago
@@ -111,37 +112,25 @@ def _static_version() -> str:
 
 CONFIG_PATH = os.environ.get("LITRADAR_CONFIG")
 
-# 预加载 config(单用户,配置很少变;改动后重启即可)
+# Retained for compatibility with integrations that clear the former cache.
 _cfg_cache: dict[str, Any] = {}
 
 
 def get_cfg() -> Config:
-    """加载配置。顺带重读 .env,让新填的 API key 无需重启服务即可生效。
-
-    用 load_env_file() 而不是 load_dotenv(override=True):后者会让 .env
-    覆盖真实环境变量,把 systemd / 命令行传入的配置清掉(实测导致鉴权失效)。
-    """
-    from ..config import load_env_file
-
-    load_env_file()
-
-    if "cfg" not in _cfg_cache:
-        _cfg_cache["cfg"] = load_config(CONFIG_PATH)
-    return _cfg_cache["cfg"]
+    """Read a fresh configuration and credential snapshot for each operation."""
+    return load_config(CONFIG_PATH)
 
 
 def require_token(request: Request) -> None:
-    """极简口令校验 —— 没有账号、没有会话、没有登录页。
-
-    - 未设 LITRADAR_TOKEN:不校验(默认只绑 127.0.0.1,本就访问不到)
-    - 设了   :所有请求需带 ?k=<token> 或 X-Token 头
-
-    为什么还要留这个:``/admin/run/*`` 会真的消耗你的 DeepSeek 额度。
-    如果绑 0.0.0.0 又完全不设防,同网段任何人都能把钱烧掉。
-    """
+    """Accept an owner session or the legacy API token; health remains public."""
     cfg = get_cfg()
+    from .access import logged_in
+    if logged_in(request, cfg):
+        return
     expected = cfg.app.token
     if not expected:
+        if cfg.app.admin_password_hash:
+            raise HTTPException(401, "请先登录 LitRadar。")
         return
     got = (request.query_params.get("k")
            or request.headers.get("X-Token", "")
@@ -159,7 +148,7 @@ def require_same_origin(request: Request) -> None:
     为什么需要:``/admin/run/*`` 是不带 CSRF token 的简单 POST。就算没设口令
     (默认只绑 127.0.0.1,看起来"外面进不来"),你在浏的任意网页都能往
     ``http://127.0.0.1:8090/admin/run/all`` 发一个无需预检的跨源 POST,
-    照样把 DeepSeek 额度烧掉。
+    照样把 AI 额度烧掉。
 
     浏览器在非 GET 请求上一定会带 Origin,且这个头改不了;curl / 定时脚本
     不带,所以"没有 Origin 就放行"不会挡住正常的自动化。
@@ -202,18 +191,7 @@ def require_same_origin(request: Request) -> None:
         raise HTTPException(403, "跨源请求被拒绝")
 
 
-# 阶段名 → run_log 里记的名字。"all" 展开成它实际会跑的每个阶段,这样
-# "先点 rank 再点 all" 也会被冷却拦住(它确实会再跑一次 rank 花钱)。
-_STAGE_LOG_NAMES: dict[str, tuple[str, ...]] = {
-    "mail": ("ingest_mail",),
-    "search": ("ingest_search",),
-    "enrich": ("enrich",),
-    "rank": ("rank",),
-    "summarize": ("summarize",),
-    "all": ("ingest_mail", "ingest_search", "enrich", "rank", "summarize"),
-}
-
-# 前端靠它区分"该弹密码框"与"口令(URL token)不对" —— 两者都是 401。
+# Distinguish an expired operation grant from an invalid reading/API token.
 ADMIN_PASSWORD_HEADER = "X-Admin-Password"
 ADMIN_PASSWORD_REQUIRED_HEADER = "X-Admin-Password-Required"
 
@@ -225,7 +203,7 @@ def require_exposure_safe(cfg: Config) -> None:
     同网段任何人都能点着按钮烧额度。既然"对外必须带口令"是本项目写明的约定,
     就让它 fail closed。
     """
-    if cfg.app.token or cfg.app.is_loopback:
+    if cfg.app.token or cfg.app.admin_password_hash or cfg.app.is_loopback:
         return
     raise HTTPException(
         403,
@@ -241,73 +219,28 @@ def require_admin_password(request: Request, cfg: Config) -> None:
     与 require_token 同样是"设了就校验":没配密码就不拦 —— 但那种状态下
     ``litradar check`` 会明确告诉你花钱接口没有这道闸。
     """
+    from .access import admin_expires
+    if admin_expires(request, cfg):
+        return
     stored = cfg.app.admin_password_hash
     if not stored:
         return
     got = request.headers.get(ADMIN_PASSWORD_HEADER, "")
     if not verify_password(got, stored):
         raise HTTPException(
-            401, "需要管理员密码",
+            401, "操作授权已过期，请在页面内验证密码后继续。",
             headers={ADMIN_PASSWORD_REQUIRED_HEADER: "1"},
         )
 
 
 def require_stage_limits(cfg: Config, stage: str,
                          group_slug: str | None = None) -> None:
-    """冷却 + 每日上限。账本用 run_log,所以 CLI 与定时任务跑的也计入。
-
-    口令解决不了"点多少次":误点、写错的循环脚本、泄露的凭据都能反复花钱。
-    这里把单日损失封顶。
-    """
-    limits = cfg.admin
-    if not limits.cooldown_seconds and not limits.daily_limit:
-        return
-    names = _STAGE_LOG_NAMES.get(stage, (stage,))
-    conn = db.Database(cfg.db_file).connect()
+    """Translate the shared execution policy into an HTTP response."""
     try:
-        rows = db.recent_stage_runs(conn, names, group_slug=group_slug)
-    finally:
-        conn.close()
-
-    now = datetime.now(timezone.utc).astimezone()
-    today = now.date()
-    times = []
-    per_stage: dict[str, int] = {}
-    for name, raw in rows:
-        try:
-            when = datetime.fromisoformat(raw)
-        except (TypeError, ValueError):
-            continue          # 历史脏数据不该让闸门失效或 500
-        times.append(when)
-        if when.astimezone().date() == today:
-            per_stage[name] = per_stage.get(name, 0) + 1
-    if not times:
-        return
-
-    if limits.cooldown_seconds:
-        last = max(times)
-        waited = (now - last).total_seconds()
-        if waited < limits.cooldown_seconds:
-            retry = int(limits.cooldown_seconds - waited) + 1
-            raise HTTPException(
-                429,
-                f"「{stage}」刚跑过,还要等 {retry} 秒(admin.cooldown_seconds="
-                f"{limits.cooldown_seconds})",
-                headers={"Retry-After": str(retry)},
-            )
-
-    if limits.daily_limit and per_stage:
-        # ``all`` 会记下 5 个子阶段各一行,所以这里取**单个子阶段的最大次数**,
-        # 不能求和 —— 求和的话跑一次 all 就变成 5 次,第二次就被自己拦下了。
-        busiest, count = max(per_stage.items(), key=lambda kv: kv[1])
-        if count >= limits.daily_limit:
-            raise HTTPException(
-                429,
-                f"「{stage}」今天已经跑了 {count} 次(阶段 {busiest}),达到上限 "
-                f"admin.daily_limit={limits.daily_limit};"
-                " 要再跑请调大该值,或等明天",
-            )
-
+        execution.check_limits(cfg, stage, group_slug)
+    except execution.ExecutionLimit as error:
+        headers = {"Retry-After": str(error.retry)} if error.retry else None
+        raise HTTPException(429, str(error), headers=headers) from None
 
 
 # 记住口令用的 cookie 名。这不是"登录会话",只是省得每次点链接都重带 ?k=。
@@ -369,12 +302,44 @@ async def remember_token(request: Request, call_next):
     否则页面内的链接(``/item/5``)不带 token,一点就 401 —— 那样这个口令
     根本没法用。cookie 里存的就是 token 本身,服务端不保存任何会话状态。
     """
-    resp = await call_next(request)
+    from .access import logged_in, protect_access_log, locked_page
+    protect_access_log()
+    cfg = get_cfg()
+    public = request.url.path in ("/healthz", "/setup", "/login", "/access/unlock") or request.url.path.startswith("/static/")
+    if not public and request.method == "GET":
+        if (cfg.app.admin_password_hash and not cfg.app.token and not logged_in(request, cfg)
+                and not request.url.path.startswith(("/admin/", "/access/"))):
+            return RedirectResponse("/login", status_code=303)
+        if (cfg.config_file and not cfg.interests_file.exists()
+                and not cfg.app.admin_password_hash and not cfg.app.token):
+            return RedirectResponse("/setup", status_code=303)
+    protected = request.url.path.startswith('/settings') or request.url.path == '/interests'
+    if protected and request.method == 'GET' and cfg.app.admin_password_hash:
+        try:
+            require_token(request)
+            require_admin_password(request, cfg)
+        except HTTPException as error:
+            if error.headers and error.headers.get(ADMIN_PASSWORD_REQUIRED_HEADER):
+                resp = locked_page(request)
+            else:
+                resp = JSONResponse({'detail': error.detail}, status_code=error.status_code)
+        else:
+            resp = await call_next(request)
+    else:
+        resp = await call_next(request)
+    resp.headers.setdefault('Referrer-Policy', 'same-origin')
+    if request.url.path.startswith(("/settings", "/interests", "/setup", "/login", "/access", "/admin", "/stats")):
+        resp.headers["Cache-Control"] = "no-store"
+        # no-referrer makes native navigation POSTs send Origin: null, which
+        # the CSRF guard correctly rejects. Only the one-time code redirect
+        # needs to suppress even same-origin referrers.
+        resp.headers["Referrer-Policy"] = ("no-referrer" if request.url.path == '/setup'
+            and request.query_params.get('code') else "same-origin")
     k = request.query_params.get("k")
     expected = get_cfg().app.token
     if k and expected and hmac.compare_digest(k, expected):
         resp.set_cookie(COOKIE_NAME, k, httponly=True, samesite="lax",
-                        max_age=60 * 60 * 24 * 180)
+                        secure=request.url.scheme == "https", max_age=60 * 60 * 24 * 180)
     # Cookie 只记住默认视图;已有页面的导航和写请求各自携带渲染时的组。
     g = request.query_params.get("g")
     if g and request.method == "GET" and resp.status_code < 400:
@@ -397,21 +362,27 @@ def ctx(request: Request, **kw) -> dict:
     cfg = get_cfg()
     group = active_group(request, cfg)
     ranking = _ranking_status(cfg, group)
+    from .access import admin_expires
+    import time
     base = {
         "request": request,
-        "today": date.today().isoformat(),
+        "today": datetime.now(ZoneInfo(cfg.app.timezone)).date().isoformat(),
         "groups": ui_groups(cfg),
         "group": group,
         "group_slug": group.slug if group else None,
         "group_url": lambda url: _group_url(url, group.slug if group else None),
         "llm_ready": ranking == "ready",
         "rank_notice": {
-            "group_disabled": "本组已关闭 DeepSeek 精排，新排序只使用关键词和规则分。",
-            "disabled": "已关闭 DeepSeek，新排序只使用关键词和规则分。",
-            "no_key": "还没配 DeepSeek API Key，新排序只使用关键词和规则分。",
+            "group_disabled": "本组已关闭 AI 精排，新排序只使用关键词和规则分。",
+            "disabled": "已关闭 AI，新排序只使用关键词和规则分。",
+            "no_key": "尚未设置模型 API 密钥，新排序只使用关键词和规则分。",
         }.get(ranking, ""),
         "static_v": _static_version(),
         "home_label": HOME_LABEL,
+        "admin_required": bool(cfg.app.admin_password_hash),
+        "admin_expires_at": admin_expires(request, cfg),
+        "server_time": time.time(),
+        "guarded_stages": [stage for stage in execution.STAGES if execution.guarded(cfg, stage)],
     }
     base.update(kw)
     return base
@@ -671,6 +642,8 @@ def _editor_profile(cfg: Config):
 def interests_page(request: Request, saved: int = 0):
     require_token(request)
     cfg = get_cfg()
+    from ..settings import SettingsStore
+    version = SettingsStore(cfg).version()
     raw = cfg.interests_file.read_text(encoding="utf-8") if cfg.interests_file.exists() else ""
     prof, existing_errors = _editor_profile(cfg)
     # Keep a syntactically valid but historically malformed file editable; the
@@ -680,7 +653,7 @@ def interests_page(request: Request, saved: int = 0):
                + "；".join(existing_errors)) if existing_errors else None
     return templates.TemplateResponse(request, "interests.html", ctx(
         request, raw=raw, prof=prof, saved=bool(saved), error=warning,
-        page="interests"))
+        page="settings", version=version))
 
 
 # interests.yaml 的大小上限。正常配置约 12KB,512KB 已经宽出几十倍 ——
@@ -693,7 +666,7 @@ INTERESTS_BACKUPS = 5
 def _backup_stamp() -> str:
     from datetime import datetime
 
-    return datetime.now().strftime("%Y%m%d-%H%M%S")
+    return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
 
 
 def _backup_interests(target: Path) -> None:
@@ -701,27 +674,33 @@ def _backup_interests(target: Path) -> None:
 
     以前只有一层 ``.bak``:连续两次坏保存,第二次会把好配置的备份也盖掉。
     """
-    import shutil
+    from ..settings import atomic_write
 
-    shutil.copy2(target, target.with_name(f"{target.name}.{_backup_stamp()}.bak"))
+    atomic_write(target.with_name(f"{target.name}.{_backup_stamp()}.bak"),
+                 target.read_bytes(), backup=False)
     # 文件名里的时间戳按字典序就是时间序,排完序删最早的
     for old in sorted(target.parent.glob(f"{target.name}.*.bak"))[:-INTERESTS_BACKUPS]:
         old.unlink(missing_ok=True)
 
 
 @app.post("/interests")
-def interests_save(request: Request, raw: str = Form(...)):
+def interests_save(request: Request, raw: str = Form(...), version: str = Form("")):
     require_token(request)
     require_same_origin(request)
     import yaml
 
     cfg = get_cfg()
+    from ..settings import SettingsStore, atomic_write
+    if not cfg.app.admin_password_hash and not cfg.app.token:
+        raise HTTPException(403, "请先通过一次性设置链接设置访问密码。")
+    require_admin_password(request, cfg)
+    require_exposure_safe(cfg)
 
-    def fail(msg: str):
+    def fail(msg: str, status: int = 400):
         prof, _ = _editor_profile(cfg)
         return templates.TemplateResponse(request, "interests.html", ctx(
             request, raw=raw, prof=prof, saved=False,
-            error=msg, page="interests"), status_code=400)
+            error=msg, page="settings", version=version), status_code=status)
 
     # 0) 大小上限,先于一切解析
     if len(raw.encode("utf-8")) > MAX_INTERESTS_BYTES:
@@ -742,17 +721,15 @@ def interests_save(request: Request, raw: str = Form(...)):
     group = active_group(request, cfg)
     # 3) 写前备份 —— 覆盖配置不可逆,必须留后路
     target = cfg.interests_file
-    if target.exists():
-        _backup_interests(target)
-
-    # 4) 原子写入:先写同目录的临时文件,再 rename 换掉正式文件。
-    #    直接 write_text 写到一半崩溃会留下半个文件 —— 整份配置就没了。
-    tmp = target.with_name(target.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(raw)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, target)
+    store = SettingsStore(cfg)
+    try:
+        with store.locked():
+            store.check(version)
+            if target.exists():
+                _backup_interests(target)
+            atomic_write(target, raw.encode('utf-8'), backup=False)
+    except SettingsError as error:
+        return fail(str(error), status=error.status)
     _cfg_cache.clear()               # 让下次请求重新加载
     return RedirectResponse(_group_url("/interests?saved=1", group.slug if group else None),
                             status_code=303)
@@ -778,7 +755,8 @@ async def profile_redirect_post(request: Request):
     body = (await request.body()).decode("utf-8", "replace")
     raw = (parse_qs(body).get("raw") or [""])[0]
     if raw:
-        return interests_save(request, raw=raw)
+        version = (parse_qs(body).get("version") or [""])[0]
+        return interests_save(request, raw=raw, version=version)
     group = active_group(request, get_cfg())
     return RedirectResponse(_group_url("/interests", group.slug if group else None),
                             status_code=303)
@@ -822,47 +800,99 @@ def item_action(request: Request, item_id: int, action: str = Form(...)):
 
 
 @app.post("/admin/run/{stage}")
-def admin_run(request: Request, stage: str, days: int = 0):
-    # 这里是唯一会真的花钱的入口(DeepSeek 额度),闸门一个都不能少:
+def admin_run(request: Request, stage: str, days: int = 0, background: bool = False):
+    # 流水线可能调用付费模型,运行前检查:
     #   口令 → 同源 → 暴露检查 →(花钱阶段)密码 →(花钱阶段)冷却 + 每日上限。
     # 前端显式传入当前页面的 ?g=,口令 Cookie 仍随同源 fetch 自动发送。
     require_token(request)
     require_same_origin(request)
     cfg = get_cfg()
     require_exposure_safe(cfg)
+    if stage not in execution.STAGES:
+        raise HTTPException(400, f"未知阶段: {stage}")
     # 当前组(切换器/`?g=` 决定的那个)。记账与执行要用同一个组,否则"在 A 组
     # 点了一下"会算到所有组头上,上限自然就不准了。
     prof = active_group(request, cfg, require_known=True)
     gslug = prof.slug if prof else None
-    if stage in cfg.admin.guarded_stages:
+    if execution.guarded(cfg, stage):
         require_admin_password(request, cfg)
-        require_stage_limits(cfg, stage, gslug)
     # days=0 表示"用配置里的统一窗口"。之前这里默认 30,而抓取窗口是 180+,
     # 导致网页点"排序"只覆盖最近一个月,更早的条目永远是"未评分"。
     if days <= 0:
         days = cfg.app.pipeline_window_days
-    # 和 CLI 用同一把锁(同一个文件),否则网页按钮会绕过它:定时任务正在
-    # enrich 时点一下,两边互抢 Semantic Scholar 的 1 req/s 限流,表现为
-    # "批量全部返回空"。双击按钮同理,会并发跑两份。
+    def check():
+        if execution.guarded(cfg, stage):
+            require_stage_limits(cfg, stage, gslug)
+
+    def operation():
+        # The credential context belongs to the worker, not the request thread.
+        with credentials.snapshot(cfg):
+            from .. import enrich
+            if stage == "all":
+                return pipeline.run_all(cfg, days=days, group=prof)
+            operations = {
+                "mail": lambda: pipeline.ingest_mail(cfg),
+                "search": lambda: pipeline.ingest_keyword_search(cfg, group=prof),
+                "enrich": lambda: enrich.run(cfg),
+                "rank": lambda: rank.run(cfg, days=days, group=prof),
+                "summarize": lambda: summarize.run(cfg, days=days, group=prof),
+            }
+            return progress.run_stage(stage, operations[stage])
+
     try:
+        if background:
+            from .jobs import JobStore
+            state = JobStore(cfg).start(request.headers.get('X-Run-ID', ''), stage,
+                                       prof, days, operation, check)
+            return JSONResponse(state, status_code=202)
+        # Keep the synchronous API for scripts; both paths share the CLI lock.
         with single_instance(cfg.db_file.parent / "litradar.lock"):
-            # mail 与 enrich 是全局的(不按方向跑),不受当前组影响
-            if stage == "mail":
-                out = pipeline.ingest_mail(cfg)
-            elif stage == "search":
-                out = pipeline.ingest_keyword_search(cfg, group=prof)
-            elif stage == "enrich":
-                from .. import enrich
-                out = enrich.run(cfg)
-            elif stage == "rank":
-                out = rank.run(cfg, days=days, group=prof)
-            elif stage == "summarize":
-                out = summarize.run(cfg, days=days, group=prof)
-            elif stage == "all":
-                out = pipeline.run_all(cfg, days=days, group=prof)
-            else:
-                raise HTTPException(400, f"未知阶段: {stage}")
+            check()
+            out = operation()
     except AlreadyRunning:
         # CLI 那边跳过就完了;网页上必须把"没跑"说清楚,否则用户会一直点
         raise HTTPException(409, "另一个任务正在运行,请稍后再试")
     return JSONResponse(out)
+
+
+@app.get('/admin/jobs/current')
+def current_job(request: Request):
+    require_token(request)
+    from .jobs import JobStore
+    return JSONResponse(JobStore(get_cfg()).snapshot())
+
+
+@app.get('/admin/jobs/{job_id}')
+def job_status(request: Request, job_id: str):
+    require_token(request)
+    from .jobs import JobStore
+    state = JobStore(get_cfg()).snapshot(job_id)
+    if state is None:
+        raise HTTPException(404, '找不到这次运行，请查看最近运行记录。')
+    return JSONResponse(state)
+
+
+from .settings import router as settings_router
+from .access import router as access_router
+from ..settings import SettingsError
+
+
+@app.exception_handler(SettingsError)
+async def settings_error(request: Request, error: SettingsError):
+    return JSONResponse({"detail": str(error), "field": error.field}, status_code=error.status)
+
+app.include_router(settings_router)
+app.include_router(access_router)
+
+
+def _local_time(raw):
+    try:
+        value = datetime.fromisoformat(raw)
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(ZoneInfo(get_cfg().app.timezone)).strftime('%Y-%m-%d %H:%M')
+    except (ValueError,TypeError):
+        return raw or '—'
+
+
+templates.env.filters['local_time'] = _local_time

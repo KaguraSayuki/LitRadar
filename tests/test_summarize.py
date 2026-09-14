@@ -42,6 +42,26 @@ def _cfg(tmp_path, top_n: int = 1) -> Config:
     return cfg
 
 
+def test_failed_deep_summary_shows_partial_progress_instead_of_skipped(tmp_path, monkeypatch):
+    from litradar import progress
+    from litradar.llm import LLMError
+    cfg = _cfg(tmp_path)
+    conn = db.Database(cfg.db_file).connect()
+    _seed(conn, 'Model failure example')
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(summarize, 'LLMClient', _FakeLLM)
+    def fail(*args):
+        raise LLMError('Temporary model failure')
+    monkeypatch.setattr(summarize, 'summarize_one', fail)
+    events = []
+    with progress.observe(events.append):
+        result = progress.run_stage('summarize', lambda: summarize.run(cfg, verbose=False))
+    assert result['skipped'] == 1
+    assert events[-1]['status'] == 'partial'
+    assert [(e['current'], e['total']) for e in events if e['kind'] == 'progress'] == [(0, 1), (1, 1)]
+
+
 def _patch(monkeypatch) -> tuple[list, list]:
     """把两条 LLM 路径换成记录调用的假实现。"""
     deep_ids: list[int] = []
@@ -56,7 +76,7 @@ def _patch(monkeypatch) -> tuple[list, list]:
         brief_ids.extend(int(r["id"]) for r in rows)
         return {int(r["id"]): {"title_zh": "浅", "one_liner": "浅"} for r in rows}
 
-    monkeypatch.setattr(summarize, "DeepSeek", _FakeLLM)
+    monkeypatch.setattr(summarize, "LLMClient", _FakeLLM)
     monkeypatch.setattr(summarize, "summarize_one", fake_one)
     monkeypatch.setattr(summarize, "summarize_brief", fake_brief)
     return deep_ids, brief_ids

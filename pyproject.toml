@@ -1,7 +1,7 @@
 [project]
 name = "litradar"
-version = "0.1.0"
-description = "个人化学文献雷达 —— 多源文献采集、DeepSeek 个性化精排与中文结构化摘要,自托管局域网 Web 界面"
+version = "0.2.0"
+description = "个人化学文献雷达 —— 多源文献采集、AI 个性化精排与中文结构化摘要,自托管局域网 Web 界面"
 license = {text = "MIT"}
 requires-python = ">=3.11"
 dependencies = [
@@ -14,6 +14,7 @@ dependencies = [
     "openai>=1.30",
     "python-dotenv>=1.0",
     "python-multipart>=0.0.9",
+    "tzdata>=2024.1",
 ]
 
 [project.scripts]

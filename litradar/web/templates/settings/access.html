@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% from 'settings/_macros.html' import section_head %}
+{% block title %}{{ '首次设置' if mode == 'setup' else '登录' }} · LitRadar{% endblock %}
+{% block bodyattr %}class="access-page"{% endblock %}
+{% block body %}
+<div class="access-brand">{{ icon('radar') }}</div>
+<header class="access-head">
+  <h1>{{ '开始你的文献工作区' if mode == 'setup' else '欢迎回来' }}</h1>
+  <p>{{ '先设置访问密码，再连接服务、添加研究方向。' if mode == 'setup' else '登录 LitRadar，继续关注与你的研究相关的文献。' }}</p>
+</header>
+{% if error %}<div class="flash flash--err" role="alert">{{ icon('alert') }}<span>{{ error }}</span></div>{% endif %}
+<div class="access-card settings-form">
+{% if ready %}
+  <form method="post" action="{{ '/setup' if mode == 'setup' else '/login' }}">
+    <div class="settings-field"><label for="password">{{ '设置访问密码' if mode == 'setup' else '访问密码' }}</label><input type="password" id="password" name="password" minlength="8" maxlength="512" required autocomplete="{{ 'new-password' if mode == 'setup' else 'current-password' }}" placeholder="{{ '至少 8 位' if mode == 'setup' else '输入你的访问密码' }}"></div>
+    {% if mode == 'setup' %}<div class="settings-field"><label for="confirm">再次输入密码</label><input type="password" id="confirm" name="confirm" required autocomplete="new-password" placeholder="再次输入以确认"></div>{% endif %}
+    <button class="btn btn--primary" type="submit">{{ '保存密码并继续' if mode == 'setup' else '登录' }}{{ icon('chevron-right') }}</button>
+  </form>
+{% else %}
+  <p>请打开启动实例时提供的一次性设置链接。链接有效期为 30 分钟，只有持有链接的人可以完成首次设置。</p>
+  <details class="settings-disclosure"><summary>交给安装或维护代理</summary><p>使用此实例的同一份配置执行 <code>litradar -c 配置文件路径 setup-link --url 实际访问地址</code>，将私有链接交给实例所有者。</p></details>
+{% endif %}
+</div>
+<p class="access-note">{{ icon('lock') }}你的个人文献工作区</p>
+{% endblock %}

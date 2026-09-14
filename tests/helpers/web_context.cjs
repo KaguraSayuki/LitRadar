@@ -10,24 +10,29 @@ const vm = require('node:vm');
   const box = { classList: classes };
   const row = { classList: classes, parentNode: {}, isConnected: true };
   const button = { innerHTML: 'Run' };
+  const empty = () => ({dataset:{},querySelector:empty,replaceChildren(){},append(){},
+    setAttribute(){},removeAttribute(){},scrollIntoView(){}});
+  const panel = empty();
   const context = vm.createContext({
-    URL, FormData, console,
-    setTimeout: () => 1, clearTimeout() {},
-    window: { location: { href: 'http://testserver/' }, prompt: () => 'test-password' },
+    URL, FormData, console, crypto: require('node:crypto').webcrypto, Uint8Array,
+    setTimeout: () => 1, clearTimeout() {}, setInterval() {},
+    location: { href: 'http://testserver/' },
+    window: { location: { href: 'http://testserver/' } },
     document: {
-      body: { dataset: { group: input.group, state: input.state } },
+      body: { dataset: { group: input.group, state: input.state, guardedStages: input.stage } },
       getElementById: id => id.startsWith('acts-') ? box : id.startsWith('card-') ? row : {},
-      querySelectorAll: () => [button],
+      querySelectorAll: () => [], querySelector: () => panel, createElement: empty, addEventListener() {},
     },
     fetch: async (url, options) => {
+      if (url === '/admin/jobs/current') return {ok:true,json:async () => null};
       requests.push({ url, data: options.body ? Object.fromEntries(options.body) : {},
                       headers: options.headers || {} });
-      const challenge = url.startsWith('/admin/') && !options.headers;
-      return { ok: !challenge, status: challenge ? 401 : 200,
-               headers: { get: () => challenge ? '1' : null }, text: async () => '{}' };
+      return {ok:true,status:202,text:async () => '{}',json:async () => ({status:'running',steps:[]})};
     },
   });
+  context.window.litradarAuth = {fetch: (...args) => context.fetch(...args)};
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../../litradar/web/static/app.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../../litradar/web/static/pipeline.js'), 'utf8'), context);
   // Rendering and animation are outside this test; retain the real action/undo/run handlers.
   context._swapActs = () => box;
   let undo;

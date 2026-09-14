@@ -78,16 +78,17 @@
 </div>
 
 <h2 id="run">手动运行流水线</h2>
-<div class="panel">
-  <div class="steps">
-    <button type="button" class="btn" onclick="litradarRun('mail', this)"><span class="step-n">1</span>解析邮件</button>
-    <button type="button" class="btn" onclick="litradarRun('search', this)"><span class="step-n">2</span>关键词检索</button>
-    <button type="button" class="btn" onclick="litradarRun('enrich', this)"><span class="step-n">3</span>富化</button>
-    <button type="button" class="btn" onclick="litradarRun('rank', this)"><span class="step-n">4</span>排序</button>
-    <button type="button" class="btn" onclick="litradarRun('summarize', this)"><span class="step-n">5</span>摘要</button>
-    <button type="button" class="btn btn--primary" onclick="litradarRun('all', this)">{{ icon('play') }}全部运行</button>
+<div class="panel pipeline-panel">
+  {% include 'partials/authorization.html' %}
+  <div class="steps" aria-label="选择运行阶段">
+    <button type="button" class="btn" data-run-stage="mail"><span class="step-n">1</span>解析邮件</button>
+    <button type="button" class="btn" data-run-stage="search"><span class="step-n">2</span>关键词检索</button>
+    <button type="button" class="btn" data-run-stage="enrich"><span class="step-n">3</span>补全文献</button>
+    <button type="button" class="btn" data-run-stage="rank"><span class="step-n">4</span>排序</button>
+    <button type="button" class="btn" data-run-stage="summarize"><span class="step-n">5</span>摘要</button>
+    <button type="button" class="btn btn--primary" data-run-stage="all">{{ icon('play') }}全部运行</button>
   </div>
-  <pre class="console" id="run-out">还没运行。排序和摘要会调用 DeepSeek,按量计费。</pre>
+  {% include 'partials/pipeline.html' %}
 </div>
 
 <h2>最近运行</h2>
@@ -98,7 +99,7 @@
     <div class="run">
       <span class="stage">{{ stage_name.get(r['stage'], r['stage']) }}</span>
       <span class="status {{ 'status--ok' if r['status'] == 'ok' else 'status--err' }}">{{ '成功' if r['status'] == 'ok' else '失败' }}</span>
-      <time datetime="{{ r['finished_at'] }}">{{ (r['finished_at'] or '')[:16]|replace('T', ' ') }}</time>
+      <time datetime="{{ r['finished_at'] }}">{{ r['finished_at']|local_time }}</time>
       <span class="kvs">
         {# 值可能是整段查询列表,截到 60 字,完整内容放 title #}
         {% for k, v in (r['stats']|fromjsonobj).items() %}{% set vs = v|string %}<span{% if vs|length > 65 %} title="{{ vs }}"{% endif %}>{{ k }} <b>{{ vs|truncate(60, true, '…') }}</b></span>{% endfor %}

@@ -1,18 +1,19 @@
 # LitRadar 运行配置示例
-# 复制为 config.yaml 后按本机环境调整；密钥填写在 .env 中。
+# 可选的部署参考，普通用户在网页保存后自动创建 config.yaml。
+# 密钥通过网页接入；兼容配置旁的 .env，不写入此文件。
 # 使用说明：README.md；部署说明：docs/deployment.md。
 
 # 应用与路径。相对路径基于项目根目录解析。
 app:
-  # 与 Uvicorn 的 --host 保持一致；本字段本身不会改变服务器监听地址。
-  # 局域网访问建议使用 HTTPS 反向代理，并设置接口口令。
+  # litradar serve 默认采用此值，显式 --host/--port 优先。
+  # 直接运行 Uvicorn 时由其参数决定；局域网使用 HTTPS 代理与访问密码。
   host: "127.0.0.1"
   port: 8090
   db_path: "./data/litradar.db"
   timezone: "Asia/Shanghai"
-  # 接口口令的环境变量名。非回环地址且未设口令时，网页拒绝手动运行流水线。
+  # 接口口令的凭据名称。非回环地址既无口令也无访问密码时，网页拒绝手动运行。
   token_env: "LITRADAR_TOKEN"
-  # 管理员密码哈希的环境变量名，由 litradar admin-password 设置。
+  # 密码哈希的凭据名称，由首次设置网页或 litradar admin-password 设置。
   admin_password_env: "LITRADAR_ADMIN_PASSWORD_HASH"
   # 研究方向、检索式及订阅组配置文件。
   interests: "./interests.yaml"
@@ -21,24 +22,37 @@ app:
   # 建议不小于 sources.s2_search_lookback_days，避免新采集条目落在排序范围外。
   pipeline_window_days: 200
 
-# 网页手动运行的密码与频率检查。CLI 和定时任务的记录计入检查，
-# 但它们自身不受 Web 入口的限制拦截，因此这不是全系统的费用硬上限。
+# 网页手动运行的密码检查；频率检查统一用于网页、CLI 和应用调度。
+# 这是运行次数限制，不是货币预算；测试连接和预览不计入流水线次数。
 # 多组分别计数；邮件与元数据补全的全局记录计入每个组。
 admin:
-  # 需要额外验证管理员密码、检查频率的网页阶段。未设置密码时跳过密码检查。
+  # 登录会话可授权；仅使用接口口令时需额外验证密码。
   guarded_stages: [rank, summarize, all]
   # 同一阶段的最小运行间隔，单位为秒；0 表示关闭此项检查。
   cooldown_seconds: 60
   # 同一阶段的每日运行次数上限；0 表示关闭此项检查。
   daily_limit: 3
 
+# 每日计划由网页修改。部署代理先停用旧定时任务，再运行
+# litradar schedule-handoff --external-timers-stopped 记录接管，不能只改 enabled。
+schedule:
+  enabled: false
+  time: "07:00"
+  groups: []  # 留空表示所有启用的方向
+  owner: external
+  handoff_confirmed: false
+
 # LLM 精排与摘要。各组的 llm_rank 只控制精排，摘要使用全局开关。
 llm:
-  provider: deepseek
+  # 兼容 OpenAI Chat Completions；默认提供 DeepSeek 预设，也可在网页填写其他服务。
+  provider: openai-compatible
   base_url: "https://api.deepseek.com"
   # 调用的模型名称，费用及可用性以服务提供方为准。
   model: "deepseek-chat"
-  api_key_env: "DEEPSEEK_API_KEY"
+  api_key_env: "DEEPSEEK_API_KEY"  # 保留旧变量名；自定义服务同样使用此凭据槽位。
+  json_mode: auto  # auto / json_object / prompt
+  token_limit_parameter: auto  # auto / max_tokens / max_completion_tokens
+  # null 表示不发送 temperature，使用模型默认值。
   temperature: 0.2
   # 每批参与 LLM 精排的条目数。
   rerank_batch_size: 20
@@ -62,7 +76,7 @@ mail:
   imap_port: 993
   # IMAP 账号，通常为接收订阅邮件的邮箱地址。
   imap_user: ""
-  # 密码或授权码的环境变量名，实际值填写在 .env。
+  # 密码或授权码的凭据名称，实际值通过网页接入，也兼容 .env。
   imap_password_env: "IMAP_PASSWORD"
   imap_folder: "INBOX"
   imap_search: 'FROM "newsletter.x-mol.com"'
@@ -93,6 +107,8 @@ sources:
   s2_search_year: ""
   # 获取结果后还会按具体日期做本地过滤。
   s2_search_lookback_days: 180
+  s2_search_max_pages: 1
+  s2_venues: []  # 指定期刊条件所用的限定列表，留空不限定
 
   # 追踪引用 seed_dois 中种子文献的论文，需要 S2_API_KEY。
   snowball_enabled: true
@@ -123,7 +139,7 @@ ranking:
   # 当前粗排实现使用 BM25。
   coarse_method: "bm25"
 
-# 可选期刊等级展示，密钥填写在 .env 的 EASYSCHOLAR_SECRET_KEY。
+# 可选期刊等级展示，密钥通过网页 easyScholar 卡片接入。
 # 查询按归一化刊名缓存；明确无结果也缓存，接口错误保留重试机会。
 journal_rank:
   enabled: true

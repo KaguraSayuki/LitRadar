@@ -1,0 +1,39 @@
+// Exercise the actual shipped submit handler, including a form named-property collision.
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+(async () => {
+  let submit;
+  const requests = [];
+  const form = {
+    dataset: {}, action: {name:'action', value:'copy'},
+    getAttribute: key => key === 'action' ? '/settings/group-action?slug=default' : null,
+    addEventListener: (type, handler) => {if(type === 'submit') submit = handler;},
+  };
+  const context = {
+    URL,
+    FormData: class extends Map {constructor(){super([['version','v1']]);}},
+    document: {getElementById: () => null, querySelector: () => null,
+      querySelectorAll: selector => selector === '[data-settings-form]' ? [form] : [],
+      addEventListener() {}},
+    location: {href:'http://test/settings/groups',assign: url => {context.destination=url;}},
+    confirm: () => true, alert: value => {throw Error(value);},
+    fetch: async (url, options) => {
+      requests.push({url,body:Object.fromEntries(options.body),headers:options.headers});
+      return {status:200,redirected:true,url:'http://test/settings/groups?saved=1'};
+    },
+  };
+  context.window = {litradarAuth: {fetch: (...args) => context.fetch(...args)}};
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../../litradar/web/static/settings.js'),'utf8'),context);
+  await submit({preventDefault(){},submitter:{name:'action',value:'copy',dataset:{}}});
+  const result = {requests,destination:context.destination,busy:form.dataset.busy || ''};
+  form.id = 'model-settings';
+  context.location.href = 'http://test/settings/services?saved=1';
+  context.location.reload = () => {result.modelReloaded = true;};
+  context.fetch = async () => ({status:200,redirected:true,url:context.location.href});
+  await submit({preventDefault(){},submitter:{dataset:{}}});
+  if (!result.modelReloaded || context.location.hash !== '#model-connection') {
+    throw Error('Saving again must reload the model form and its revision');
+  }
+  process.stdout.write(JSON.stringify(result));
+})().catch(error => {console.error(error);process.exitCode=1;});

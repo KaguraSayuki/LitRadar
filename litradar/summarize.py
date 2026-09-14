@@ -6,9 +6,9 @@ import json
 import re
 import sqlite3
 
-from . import db
+from . import db, progress
 from .config import Config
-from .llm import DeepSeek, LLMError
+from .llm import LLMClient, LLMError, validate_items, validate_text
 from .rank import Profile, load_enabled_groups, load_groups, load_interests
 
 SUMMARY_SYSTEM = "你是严谨的化学文献助手,只输出 JSON,绝不编造数据。"
@@ -84,13 +84,14 @@ RELEVANCE_PROMPT = """判断这篇化学文献对用户的研究方向有什么�
 
 
 def summarize_relevance(rows: list[sqlite3.Row], prof: Profile,
-                        llm: DeepSeek) -> dict[int, str]:
+                        llm: LLMClient) -> dict[int, str]:
     """只补"对研究的用处"这一行。返回 {item_id: relevance}。
 
     整条摘要的中性部分已经算过了,换组重算整套会白花 LLM 的钱。
     """
     out: dict[int, str] = {}
-    for row in rows:
+    for index, row in enumerate(rows):
+        progress.report(f'{prof.name} · 生成方向说明', index, len(rows))
         prompt = RELEVANCE_PROMPT.format(
             title=row["title"],
             abstract=(row["abstract"] or "")[:2000] or "(无摘要,只有标题)",
@@ -98,12 +99,14 @@ def summarize_relevance(rows: list[sqlite3.Row], prof: Profile,
         )
         try:
             data = llm.json(RELEVANCE_SYSTEM, prompt, max_tokens=300)
+            text = validate_text(data, ("relevance",))["relevance"]
         except LLMError as e:
             if len(rows) == 1:
                 raise
             print(f"  [warn] relevance 失败 #{row['id']}: {e}")
             continue
-        text = str(data.get("relevance") or "").strip()
+        finally:
+            progress.report(f'{prof.name} · 方向说明，已处理 {index + 1} 篇', index + 1, len(rows))
         if text:
             out[int(row["id"])] = text
     return out
@@ -156,7 +159,7 @@ def _join_authors(row: sqlite3.Row, n: int = 6) -> str:
         return row["authors"] or ""
 
 
-def summarize_one(row: sqlite3.Row, prof: Profile, llm: DeepSeek) -> dict:
+def summarize_one(row: sqlite3.Row, prof: Profile, llm: LLMClient) -> dict:
     abstract = row["abstract"] or ""
     prompt = SUMMARY_PROMPT.format(
         title=row["title"], journal=row["journal"] or "未知",
@@ -166,7 +169,8 @@ def summarize_one(row: sqlite3.Row, prof: Profile, llm: DeepSeek) -> dict:
     )
     data = llm.json(SUMMARY_SYSTEM, prompt, max_tokens=1400)
 
-    out: dict = {"title_zh": (str(data.get("title_zh") or "").strip() or None)}
+    data = validate_text(data, ("title_zh", "one_liner"), _FIELDS[1:])
+    out: dict = {"title_zh": data["title_zh"]}
     for k in _FIELDS:
         out[k] = (str(data.get(k) or "摘要未提及")).strip()
 
@@ -180,7 +184,7 @@ def summarize_one(row: sqlite3.Row, prof: Profile, llm: DeepSeek) -> dict:
     return out
 
 
-def summarize_brief(rows: list[sqlite3.Row], llm: DeepSeek) -> dict[int, dict]:
+def summarize_brief(rows: list[sqlite3.Row], llm: LLMClient) -> dict[int, dict]:
     """批量:每条产出中文标题 + 一句话结论。"""
     blocks = []
     for i, r in enumerate(rows, 1):
@@ -188,24 +192,18 @@ def summarize_brief(rows: list[sqlite3.Row], llm: DeepSeek) -> dict[int, dict]:
     try:
         data = llm.json(BRIEF_SYSTEM, BRIEF_PROMPT.format(items="\n\n".join(blocks)),
                         max_tokens=2500)
+        entries = validate_items(data.get("items") or data.get("summaries"), len(rows))
+        out = {int(rows[entry["id"] - 1]["id"]):
+               validate_text(entry, ("title_zh", "one_liner")) for entry in entries}
     except LLMError as e:
         print(f"  [warn] 批量摘要失败: {e}")
         return {}
 
-    out: dict[int, dict] = {}
-    entries = data.get("items") or data.get("summaries") or []
-    for entry in entries:
-        idx = int(entry.get("id", 0)) - 1
-        if 0 <= idx < len(rows):
-            out[int(rows[idx]["id"])] = {
-                "title_zh": (str(entry.get("title_zh") or "").strip() or None),
-                "one_liner": (str(entry.get("one_liner") or "").strip() or None),
-            }
     return out
 
 
 def _summarize_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
-                     group_id: int, llm: DeepSeek, *, limit: int, days: int,
+                     group_id: int, llm: LLMClient, *, limit: int, days: int,
                      verbose: bool, force: bool) -> dict:
     """**一个组**的摘要。
 
@@ -269,7 +267,8 @@ def _summarize_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
                 head_ids.add(int(r["id"]))
         rest = [r for r in rows if int(r["id"]) not in head_ids]
 
-        for r in heads:
+        for index, r in enumerate(heads):
+            progress.report(f'{prof.name} · 生成深度摘要', index, len(heads))
             if verbose:
                 print(f"  [{prof.name}] 深度摘要 #{r['id']}: {r['title'][:48]}…")
             try:
@@ -289,13 +288,18 @@ def _summarize_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
             except LLMError as e:
                 print(f"  [warn] 摘要失败: {e}")
                 stat["skipped"] += 1
+                stat["deep_failed"] = stat.get("deep_failed", 0) + 1
+            finally:
+                progress.report(f'{prof.name} · 深度摘要，已处理 {index + 1} 篇', index + 1, len(heads))
 
         bs = 10
         for s in range(0, len(rest), bs):
             chunk = rest[s:s + bs]
+            progress.report(f'{prof.name} · 生成简要摘要，第 {s // bs + 1} 批', s, len(rest))
             if verbose:
                 print(f"  [{prof.name}] 批量摘要 {s + 1}-{s + len(chunk)} / {len(rest)}…")
             brief = summarize_brief(chunk, llm)
+            progress.report(f'{prof.name} · 简要摘要，已处理 {s + len(chunk)} 篇', s + len(chunk), len(rest))
             if not brief:
                 stat["brief_failed"] += len(chunk)
                 continue
@@ -317,7 +321,7 @@ def _summarize_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
 
 
 def _complete_group_relevance(conn: sqlite3.Connection, cfg: Config, prof: Profile,
-                              group_id: int, llm: DeepSeek, stat: dict, *,
+                              group_id: int, llm: LLMClient, stat: dict, *,
                               limit: int, days: int, verbose: bool, force: bool) -> None:
     """所有组的中性摘要落库后,只补/强制更新本组的方向性说明。"""
     stale = _SUMMARY_STALE
@@ -360,7 +364,8 @@ def _complete_group_relevance(conn: sqlite3.Connection, cfg: Config, prof: Profi
 
 
 def run(cfg: Config, *, limit: int = 200, days: int = 30, verbose: bool = True,
-        force: bool = False, group: Profile | None = None) -> dict:
+        force: bool = False, group: Profile | None = None,
+        selected_groups: list[Profile] | None = None) -> dict:
     """按订阅组生成中文摘要。``group`` 指定时只跑那一个组。
 
     摘要里只有 **relevance**(对研究的用处)与方向有关,其余字段通用,所以中性
@@ -369,8 +374,9 @@ def run(cfg: Config, *, limit: int = 200, days: int = 30, verbose: bool = True,
 
     **一个组失败不影响其它组**:某个方向画像写坏了,不该让别的方向没摘要。
     """
-    groups = [group] if group is not None else load_enabled_groups(cfg)
-    llm = DeepSeek(cfg.llm)
+    groups = (selected_groups if selected_groups is not None else
+              [group] if group is not None else load_enabled_groups(cfg))
+    llm = LLMClient(cfg.llm)
     if not llm.available:
         return {"skipped": "未配置 API key 或 LLM 已禁用"}
 

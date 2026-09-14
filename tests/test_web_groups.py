@@ -433,7 +433,7 @@ def test_新配置组同步前页面为空且读请求不建组(both_client, pat
 
 
 @pytest.mark.parametrize("stage", ["search", "rank", "summarize", "all"])
-def test_真实前端脚本的反馈撤销及流水线重试都沿用页面组(both_client, monkeypatch, stage):
+def test_真实前端脚本的反馈撤销及后台流水线都沿用页面组(both_client, monkeypatch, stage):
     node = shutil.which("node")
     if not node:
         pytest.skip("前端执行回归需要 Node.js 18+;其余 Web 测试不依赖 Node")
@@ -449,19 +449,14 @@ def test_真实前端脚本的反馈撤销及流水线重试都沿用页面组(b
         text=True, capture_output=True, check=True,
     )
     requests = json.loads(result.stdout)
-    assert len(requests) == 4  # ignore, undo, 第一次 run, 密码重试
+    assert len(requests) == 3  # ignore, undo, one background run
     calls, limits = [], []
     cfg.admin.guarded_stages = (stage,)
-
-    def password(request, cfg):
-        if not request.headers.get("X-Admin-Password"):
-            raise webapp.HTTPException(401, "password", headers={"X-Admin-Password-Required": "1"})
 
     def run(*a, **kw):
         calls.append(kw["group"].slug)
         return {"errors": 0}
 
-    monkeypatch.setattr(webapp, "require_admin_password", password)
     monkeypatch.setattr(webapp, "require_stage_limits", lambda cfg, stage, slug: limits.append(slug))
     monkeypatch.setattr(webapp.pipeline, "ingest_keyword_search", run)
     monkeypatch.setattr(webapp.rank, "run", run)
@@ -470,13 +465,16 @@ def test_真实前端脚本的反馈撤销及流水线重试都沿用页面组(b
     for n, req in enumerate(requests):
         assert parse_qs(urlsplit(req["url"]).query)["g"] == ["org"]
         response = c.post(req["url"], data=req["data"], headers=req["headers"])
-        assert response.status_code == (401 if n == 2 else 200)
+        assert response.status_code == (202 if n == 2 else 200)
         if n < 2:
             conn = db.Database(cfg.db_file).connect()
             states = dict(conn.execute("SELECT group_id, ignored FROM group_state"))
             conn.close()
             assert states.get(ids["org"]) == 1 - n
             assert states.get(ids["mat"], 0) == 0
+    from litradar.lock import single_instance
+    with single_instance(cfg.db_file.parent / 'litradar.lock', blocking=True):
+        pass
     assert calls == limits == ["org"]
     assert c.cookies.get(webapp.GROUP_COOKIE) == "mat"  # 写请求不切换默认视图
 
@@ -501,11 +499,14 @@ def test_当前组说明缺失时页面和查询都不回退到其他方向(both
 
 @pytest.mark.parametrize("slug", ["材料", "mat&chem", "mat+chem", "mat%26chem",
                                   "mat/chem?#", 'mat "chem"'])
-def test_合法特殊slug在保存切换Cookie导航和反馈中保持身份(both_client, slug):
+def test_合法特殊slug在保存切换Cookie导航和反馈中保持身份(both_client, slug, monkeypatch):
     c, cfg, iid, ids = both_client
+    monkeypatch.setenv('LITRADAR_TOKEN','legacy-test-token')
+    c.headers['X-Token']='legacy-test-token'
     cfg.interests_data["groups"].append({"slug": slug, "name": "特殊方向"})
     raw = yaml.safe_dump(cfg.interests_data, allow_unicode=True)
-    saved = c.post("/interests", data={"raw": raw}, follow_redirects=False)
+    from litradar.settings import SettingsStore
+    saved = c.post("/interests", data={"raw": raw,'version':SettingsStore(cfg).version()}, follow_redirects=False)
     assert saved.status_code == 303
     cfg.interests_data = yaml.safe_load(cfg.interests_file.read_text(encoding="utf-8"))
     conn = db.Database(cfg.db_file).connect()
@@ -549,8 +550,10 @@ def test_未知Unicode组和损坏Cookie安全回退到实际组(both_client):
 @pytest.mark.parametrize("slug,needle", [("bad\nslug", "控制字符"),
                                         ("材" * 86, "256"),
                                         ("\ud800", "Unicode")])
-def test_无效slug在编辑页报错而不覆盖已有配置(both_client, slug, needle):
+def test_无效slug在编辑页报错而不覆盖已有配置(both_client, slug, needle, monkeypatch):
     c, cfg, iid, ids = both_client
+    monkeypatch.setenv('LITRADAR_TOKEN','legacy-test-token')
+    c.headers['X-Token']='legacy-test-token'
     before = yaml.safe_dump(cfg.interests_data)
     cfg.interests_file.write_text(before, encoding="utf-8")
     raw = yaml.safe_dump({"groups": [{"slug": slug, "name": "Bad group"}]})
@@ -562,9 +565,9 @@ def test_无效slug在编辑页报错而不覆盖已有配置(both_client, slug,
 
 @pytest.mark.parametrize("path", ["/", "/week", "/search?q=Both", "/item/1"])
 @pytest.mark.parametrize("mode,notice,label", [
-    ("group_disabled", "本组已关闭 DeepSeek 精排", "关键词分"),
-    ("disabled", "已关闭 DeepSeek", "关键词分"),
-    ("no_key", "还没配 DeepSeek API Key", "关键词分"),
+    ("group_disabled", "本组已关闭 AI 精排", "关键词分"),
+    ("disabled", "已关闭 AI", "关键词分"),
+    ("no_key", "尚未设置模型 API 密钥", "关键词分"),
     ("failed", "", "关键词分"),
     ("scored", "", "相关度"),
     ("unscored", "", "未评分"),
@@ -594,4 +597,4 @@ def test_评分界面区分主动关闭真实失败和成功(both_client, monkey
     if notice:
         assert notice in page.text
     if mode != "no_key":
-        assert "还没配 DeepSeek API Key" not in page.text
+        assert "尚未设置模型 API 密钥" not in page.text

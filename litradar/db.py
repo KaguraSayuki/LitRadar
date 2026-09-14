@@ -44,6 +44,18 @@ def _clean_url(url: Any) -> str | None:
     return None
 
 
+_SCHEDULER_TABLES = (
+    """CREATE TABLE IF NOT EXISTS scheduled_run (
+        slot TEXT PRIMARY KEY, scheduled_at TEXT NOT NULL,
+        started_at TEXT NOT NULL, finished_at TEXT,
+        status TEXT NOT NULL, message TEXT NOT NULL DEFAULT ''
+    );""",
+    """CREATE TABLE IF NOT EXISTS scheduler_worker (
+        id INTEGER PRIMARY KEY CHECK(id=1), heartbeat TEXT NOT NULL,
+        message TEXT NOT NULL DEFAULT ''
+    );""",
+)
+
 SCHEMA = """
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -252,7 +264,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS item_fts USING fts5(
     title, abstract, journal, authors,
     content='item', content_rowid='id', tokenize='unicode61'
 );
-"""
+""" + "\n".join(_SCHEDULER_TABLES)
 
 FTS_TRIGGERS = """
 CREATE TRIGGER IF NOT EXISTS item_ai AFTER INSERT ON item BEGIN
@@ -811,11 +823,17 @@ def _migrate_v7(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE summary SET relevance=NULL WHERE relevance IS NOT NULL")
 
 
+def _migrate_v8(conn: sqlite3.Connection) -> None:
+    """Persist daily scheduler claims and worker health without touching papers."""
+    for statement in _SCHEDULER_TABLES:
+        conn.execute(statement)
+
+
 # 迁移步骤按版本排列:下标 + 1 = 跑完这步之后的 user_version。
 # 加新迁移就在末尾追加一个函数,**同时把 SCHEMA 改成最新结构** ——
 # 新库只建 SCHEMA、不走这里。
 _MIGRATIONS = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5,
-               _migrate_v6, _migrate_v7]
+               _migrate_v6, _migrate_v7, _migrate_v8]
 SCHEMA_VERSION = len(_MIGRATIONS)
 
 # 只能在迁移之后建的索引(见 Database.init 的注释)。

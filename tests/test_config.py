@@ -87,15 +87,15 @@ def test_every_secret_property_has_the_same_semantics(monkeypatch):
 
 def test_whitespace_only_llm_key_counts_as_unavailable(monkeypatch):
     """只有空格时不该让 DeepSeek 认为自己可用,否则会拿坏密钥去请求。"""
-    from litradar.llm import DeepSeek
+    from litradar.llm import LLMClient
 
     cfg = Config()
     monkeypatch.setenv(cfg.llm.api_key_env, "   ")
-    assert DeepSeek(cfg.llm).available is False
+    assert LLMClient(cfg.llm).available is False
 
     monkeypatch.setenv(cfg.llm.api_key_env, " sk-test \n")
     assert cfg.llm.api_key == "sk-test"
-    assert DeepSeek(cfg.llm).available is True
+    assert LLMClient(cfg.llm).available is True
 
 
 def test_semanticscholar_uses_the_same_key_semantics(monkeypatch):

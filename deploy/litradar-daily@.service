@@ -9,7 +9,8 @@ Wants=network-online.target
 Type=oneshot
 User=%i
 WorkingDirectory=/srv/Work/LitRadar
-EnvironmentFile=/srv/Work/LitRadar/.env
+# 应用自行读取 .env 与私有凭据；此兼容任务只用于仍由外部调度的实例。
+# 使用网页自动更新时须停用对应 timer，不要让两套调度先后执行。
 ExecStart=/srv/Work/LitRadar/.venv/bin/python -m litradar.cli run
 
 # 时间窗不写在这里,统一取 config.yaml 的 app.pipeline_window_days ——

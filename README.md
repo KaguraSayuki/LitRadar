@@ -10,11 +10,15 @@ personalized ranking, and structured Chinese summaries.
 
 | 文档 | 内容 |
 |---|---|
+| [网页设置指南](docs/web-settings.md) | 首次设置、服务接入、研究方向、预览、阅读偏好与自动更新 |
 | [订阅组配置](docs/subscription-groups.md) | 添加研究方向、转换旧配置、分组操作与摘要复用 |
 | [部署与维护](docs/deployment.md) | Linux、macOS、Windows 部署，以及访问保护和版本更新 |
+| [更新记录](CHANGELOG.md) | 版本变化、兼容范围与升级注意事项 |
 | [实现架构](docs/architecture.md) | 模块职责、数据流、表结构与开发约定 |
 | [设计记录](docs/litradar-design.md) | 主要技术选择、方案调整与尚未实现的功能 |
 | [Semantic Scholar API Key 申请参考](docs/s2-api-key-application.md) | 与当前实现相符的英文申请草稿及用量估算方法 |
+| [贡献约定](CONTRIBUTING.md) | 提交说明、验证范围与用户体验原则 |
+| [网页设置方案与验收](docs/web-settings-plan.md) | 改造目标、已实现范围与部署边界 |
 
 ## 主要功能
 
@@ -24,6 +28,8 @@ personalized ranking, and structured Chinese summaries.
 - **个性化排序**：依次进行规则过滤、BM25 粗排和 LLM 精排，并展示推荐理由。LLM 精排可按组关闭。
 - **中文摘要**：提供简要摘要与包含问题、方法、关键结果、局限的深度摘要，另按组生成“对研究的用处”。
 - **阅读反馈**：支持收藏、已读、不感兴趣与撤销操作，后续精排可参考收藏和忽略记录。
+- **网页设置**：通过表单管理研究方向、密钥、邮箱、查询条件和阅读偏好，支持连接测试、预览与配置恢复。
+- **每日自动更新**：在网页选择时间、时区与方向；独立调度进程持久记录当天任务，避免重启后重复执行。
 - **轻量部署**：采用 FastAPI、SQLite 和服务端模板，无需前端构建；支持命令行及定时运行。
 
 ## 工作流程与数据源
@@ -47,7 +53,7 @@ personalized ranking, and structured Chinese summaries.
 | Crossref | 补全期刊、ISSN、作者等元数据，也可进行关键词检索 | 元数据补全默认开启，关键词检索默认关闭 |
 | easyScholar | 期刊等级、影响因子等展示信息 | 需要 `EASYSCHOLAR_SECRET_KEY`，结果按刊名缓存 |
 | OpenAlex | 可选关键词检索 | 默认关闭，启用时需配置 `OPENALEX_API_KEY` |
-| DeepSeek | 精排、中文摘要与方向性说明 | 需要 `DEEPSEEK_API_KEY`，调用费用取决于模型和用量 |
+| 自定义模型服务 | 精排、中文摘要与方向性说明 | 兼容 OpenAI Chat Completions 的文本 API；在网页填写地址、模型名和密钥，保留 DeepSeek 预设 |
 
 本项目只解析 X-MOL 订阅邮件，不抓取其网站。各 API 的访问条件、额度与收费以服务提供方为准。
 
@@ -63,19 +69,9 @@ cd LitRadar
 python3 -m venv .venv
 .venv/bin/python -m pip install -e .
 
-cp config.example.yaml config.yaml
-cp interests.example.yaml interests.yaml
-cp .env.example .env
-chmod 600 .env
-```
-
-按下方“配置说明”填写密钥、检索式和研究偏好，然后运行：
-
-```bash
 .venv/bin/litradar init-db
-.venv/bin/litradar check
-.venv/bin/litradar run
-.venv/bin/python -m uvicorn litradar.web.app:app --host 127.0.0.1 --port 8090
+.venv/bin/litradar setup-link --url http://127.0.0.1:8090
+.venv/bin/litradar serve
 ```
 
 ### Windows（PowerShell）
@@ -86,64 +82,73 @@ cd LitRadar
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install -e .
 
-Copy-Item config.example.yaml config.yaml
-Copy-Item interests.example.yaml interests.yaml
-Copy-Item .env.example .env
-```
-
-完成配置后运行：
-
-```powershell
 .venv\Scripts\litradar.exe init-db
-.venv\Scripts\litradar.exe check
-.venv\Scripts\litradar.exe run
-.venv\Scripts\python.exe -m uvicorn litradar.web.app:app --host 127.0.0.1 --port 8090
+.venv\Scripts\litradar.exe setup-link --url http://127.0.0.1:8090
+.venv\Scripts\litradar.exe serve
 ```
 
-以上命令直接调用虚拟环境中的程序，无需先激活环境。Windows 上可通过文件属性中的
-“安全”页限制 `.env` 的访问权限。
+安装和启动可以交给代理完成。以上命令直接调用虚拟环境中的程序，无需先激活环境。
+无需复制示例研究方向或编辑配置文件；首次保存会创建实际设置。
 
-启动后访问 [本机 Web 界面](http://127.0.0.1:8090)。下文使用简写 `litradar`；
+打开终端给出的一次性设置链接（30 分钟有效），设置访问密码后，依次在网页连接服务、
+创建研究方向、预览检索结果并保存。没有模型密钥也能填写研究方向和筛选条件。
+后续使用 [本机 Web 界面](http://127.0.0.1:8090) 登录。
+
+自动更新需要部署代理先确认此实例没有其他系统定时任务，再执行
+`litradar schedule-handoff --external-timers-stopped`。该命令只记录接管确认，之后由用户
+在网页开启计划；已有实例的迁移步骤见 [部署与维护](docs/deployment.md)。
+
+下文使用简写 `litradar`；
 若未激活虚拟环境，请替换为 `.venv/bin/litradar` 或 `.venv\Scripts\litradar.exe`。
 
-## 配置说明
+## 网页设置
+
+导航中的“设置”包含研究方向、数据与邮箱、AI 与阅读、自动更新、访问与维护五页。
+每页保存独立生效，不启动流水线；需要立即处理文献时，在研究方向卡片点击“更新这个方向”。
+已有任务继续使用开始时的配置和凭据，新任务读取最新版本。
+
+在“数据与邮箱 → 默认模型连接”填写 API 地址和模型名称，保存连接设置及密钥后，
+点击“测试兼容性”验证评分和摘要的小样例。高级选项支持 JSON 输出方式、输出长度
+参数及模型默认随机程度；旧 DeepSeek 配置和凭据仍可使用。
+填写地址并保存密钥后，也可点击“获取模型”，从服务返回的列表中选择模型；不提供
+列表接口的服务仍可手动填写。
+
+密钥留空表示保持原值，清除使用独立按钮。网页不回传原始密钥；由部署环境传入的凭据
+显示为部署管理，需维护代理调整。应用管理的密钥可以直接在网页更换，无需重启。
+
+完整操作说明见 [网页设置指南](docs/web-settings.md)。下列文件保留作存储与兼容用途：
 
 | 文件 | 用途 | 示例 |
 |---|---|---|
-| `.env` | API 密钥、IMAP 授权码、接口口令与管理员密码哈希 | [.env.example](.env.example) |
+| `.litradar-secrets.json` | 网页管理的凭据、密码哈希和首次设置状态，不包含在普通设置导出中 | 应用自动创建 |
+| `.env` | 兼容旧部署的凭据来源，可不创建 | [.env.example](.env.example) |
 | `config.yaml` | 数据源开关、运行窗口、排序参数与期刊等级展示 | [config.example.yaml](config.example.yaml) |
 | `interests.yaml` | 研究方向、检索式、关键词、期刊、作者与种子文献 | [interests.example.yaml](interests.example.yaml) |
 
-首次使用时，将示例中的占位内容替换为自己的研究方向，并检查示例期刊、排除词和种子
-文献是否适用。使用默认的 Semantic Scholar 检索需要填写 `S2_API_KEY`；使用 LLM
-精排与摘要需要填写 `DEEPSEEK_API_KEY`。IMAP 和期刊等级密钥仅在使用对应功能时填写。
-
-配置时需要注意以下几点：
+设置时需要注意以下几点：
 
 - **运行窗口**：`app.pipeline_window_days` 默认 200 天，CLI、定时任务和网页按钮共用。
   建议不小于检索回溯窗口 `sources.s2_search_lookback_days`（默认 180 天），以便新采集
   的文献进入排序与摘要范围；临时运行可用 `--days` 覆盖。
-- **检索式**：`search_queries` 用于 Crossref 和 OpenAlex；`s2_queries` 用于 Semantic
-  Scholar，使用 `+`、`|`、双引号和 `-` 表达与、或、短语及排除条件。两类检索式分别配置，
-  同一来源的多条查询取并集。
+- **检索条件**：填写全部包含、任意包含和排除的术语，程序生成相应查询。同一来源的
+  多条查询取并集。旧复杂条件会保留，不能转换的部分可逐条重建并预览。
 - **排序权重**：使用 `ranking.weights.llm/coarse/rule`。权重必须是非负有限数值，且
   总和大于零；兼容早期的 `w_llm/w_coarse/w_rule`，两种写法冲突时会报错。
-- **在线编辑**：网页“检索词与偏好”（`/interests`）可编辑整份 `interests.yaml`。
-  保存时校验格式并备份原文件，保留最近 5 份备份。
+- **备份与冲突**：普通设置保存前备份，分别保留最近 5 份；过期表单不能覆盖另一页面
+  或本机程序的修改。维护页可以查看恢复范围和恢复备份。
 
 ### 多订阅组
 
-添加分组的入口也是“检索词与偏好”：将配置改为 `groups:` 列表，为每个方向填写一组
-设置。当前界面通过 YAML 编辑分组，没有单独的“新增分组”按钮；配置多个可用组后，
-页面顶部会显示切换器。
+在“设置 → 研究方向”点击“新增研究方向”，填写名称、关键词、期刊和检索条件。
+空库或只有一个方向时也有新增入口；卡片支持复制、停用、恢复和调整顺序。
 
-旧的单方向配置可以继续使用，对应的固定标识是 `default`。从旧配置转换时，保留原组
-的 `slug: default`，即可继续访问原有成员、分数与反馈。完整示例及操作步骤见
+旧的单方向配置可以继续使用，网页保存时自动保留其 `default` 身份与历史记录。
+改名不会改变方向标识，停用不会删除数据。完整说明与兼容配置示例见
 [订阅组配置](docs/subscription-groups.md)。
 
 ## 邮件接入
 
-在 X-MOL 网站开通订阅后，可通过 `mail.mode` 选择接入方式：
+在 X-MOL 网站开通订阅后，在“数据与邮箱”选择接入方式：
 
 | 模式 | 行为 |
 |---|---|
@@ -152,7 +157,8 @@ Copy-Item .env.example .env
 | `imap` | 连接邮箱，按 `imap_search` 筛选邮件；默认只采集未读邮件，并在处理成功后标为已读 |
 
 IMAP 客户端使用用户名和密码或授权码登录，当前未实现 OAuth2。若邮箱仅支持 OAuth2，
-可将订阅邮件转发到支持 IMAP 授权码登录的邮箱。配置后运行 `litradar mail-test`，
+可将订阅邮件转发到支持 IMAP 授权码登录的邮箱。网页“测试已保存的连接”只检查登录、
+文件夹和匹配数量，不修改邮箱；也可由维护代理运行 `litradar mail-test`，
 查看匹配数量和最近最多 5 封邮件的解析结果；该命令不标记已读、不移动邮件、不写入数据库。
 
 IMAP 连接会验证服务器证书和主机名，退出时不会清除已标记删除的邮件。
@@ -170,6 +176,10 @@ IMAP 连接会验证服务器证书和主机名，退出时不会清除已标记
 | 命令 | 用途 |
 |---|---|
 | `litradar init-db` | 初始化数据库 |
+| `litradar setup-link --url <实例地址>` | 本机签发一次性设置链接，30 分钟有效 |
+| `litradar serve` | 启动网页及独立调度进程；支持 `--host`、`--port` |
+| `litradar scheduler` | 只启动独立调度进程，供分开部署使用 |
+| `litradar schedule-handoff --external-timers-stopped` | 停用外部定时入口后，记录应用接管确认；不会立即开启计划 |
 | `litradar ingest all` | 采集邮件、检索文献并追踪被引记录；可用 `mail` 或 `search` 选择采集类型 |
 | `litradar enrich` | 补全文献元数据与期刊等级 |
 | `litradar rank` | 运行规则、BM25 与可选的 LLM 排序 |
@@ -182,7 +192,9 @@ IMAP 连接会验证服务器证书和主机名，退出时不会清除已标记
 | `litradar parse` | 解析邮件并输出结果，不入库 |
 
 `ingest`、`rank`、`summarize`、`run` 支持 `--group <slug>`。该选项限定检索、排序与
-摘要使用的组；邮件采集和元数据补全仍是全局阶段。网页“统计”页也可手动运行这些阶段。
+摘要使用的组；邮件采集和元数据补全仍是全局阶段。网页“统计”页也可手动运行这些阶段，
+显示阶段、处理数量和耗时；任务在后台执行，刷新或离开页面后仍可回来查看进度。
+设置与受保护的运行操作共用一次 5 分钟的网页内密码验证，到期保留未保存的表单输入。
 
 检索、排序或摘要中的某个组出现异常时，其余组仍可继续。上述命令在阶段汇总的
 `errors` 非零时返回退出码 1；正常完成及配置性跳过返回 0。部分接口或 LLM 批次失败
@@ -211,9 +223,9 @@ LLM 未启用或未配置密钥时使用关键词和规则分，界面会说明�
 
 长期运行可使用 [部署与维护](docs/deployment.md) 中的 systemd、launchd 或任务计划
 程序方案。Web 服务默认监听 `127.0.0.1:8090`；局域网访问可通过反向代理提供 HTTPS，
-并设置接口口令与管理员密码。
+并设置访问密码。接口口令可供已有自动化脚本使用。
 
-`.env`、`config.yaml`、`interests.yaml` 和 `data/` 均已排除在版本控制之外。
+`.env`、`.litradar-secrets.json`、`config.yaml`、`interests.yaml` 和 `data/` 均已排除在版本控制之外。
 它们包含本机配置或个人数据，需要单独备份。项目面向个人使用，没有多用户账号与权限体系。
 
 ## 限制与验证

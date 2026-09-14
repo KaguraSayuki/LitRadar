@@ -1,7 +1,7 @@
 """排序:三阶段漏斗。
 
     Stage 1  规则过滤      命中 negative 直接丢;命中关键词/期刊/CAS → 加分
-    Stage 2  BM25 粗排     把候选裁到 top-K(DeepSeek 无 embedding API,故不用向量)
+    Stage 2  BM25 粗排     本地关键词评分,可选截取 top-K
     Stage 3  LLM 精排      分批 listwise 打分 + 给理由
 
 最终分 = w_llm*llm + w_coarse*coarse + w_rule*rule
@@ -16,9 +16,9 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import db
+from . import db, progress
 from .config import Config
-from .llm import DeepSeek, LLMError
+from .llm import LLMClient, LLMError, validate_scores
 
 # ------------------------------------------------------------ 期刊名缩写匹配
 # 首字母匹配用的停用词。
@@ -645,7 +645,7 @@ def feedback_examples(conn: sqlite3.Connection, limit: int = 6, *,
 
 
 def llm_rerank(rows: list[tuple[sqlite3.Row, float, dict]], prof: Profile,
-               cfg: Config, llm: DeepSeek,
+               cfg: Config, llm: LLMClient,
                liked: list[str] | None = None,
                disliked: list[str] | None = None) -> dict[int, tuple[float, str]]:
     """返回 {item_id: (llm_score, reason)}。失败时返回空 dict,由调用方降级。"""
@@ -656,6 +656,7 @@ def llm_rerank(rows: list[tuple[sqlite3.Row, float, dict]], prof: Profile,
 
     for start in range(0, len(rows), bs):
         batch = rows[start:start + bs]
+        progress.report(f'{prof.name} · AI 评分，第 {start // bs + 1} 批', start, len(rows))
         listing = "\n".join(_format_item(i + 1, r) for i, (r, _, _) in enumerate(batch))
         prompt = RERANK_PROMPT.format(
             direction=prof.direction[:400],
@@ -671,15 +672,14 @@ def llm_rerank(rows: list[tuple[sqlite3.Row, float, dict]], prof: Profile,
         )
         try:
             data = llm.json(RERANK_SYSTEM, prompt, max_tokens=2048)
-            for entry in data.get("scores", []):
-                idx = int(entry.get("id", 0)) - 1
-                if 0 <= idx < len(batch):
-                    iid = int(batch[idx][0]["id"])
-                    out[iid] = (float(entry.get("score", 0)),
-                                str(entry.get("reason", ""))[:80])
+            for entry in validate_scores(data, len(batch)):
+                iid = int(batch[entry["id"] - 1][0]["id"])
+                out[iid] = (float(entry["score"]), entry["reason"].strip()[:80])
         except (LLMError, ValueError, KeyError, TypeError) as e:
             print(f"  [warn] 精排批次 {start//bs+1} 失败: {e}")
             continue
+        finally:
+            progress.report(f'{prof.name} · AI 评分，已处理 {start + len(batch)} 篇', start + len(batch), len(rows))
     return out
 
 
@@ -704,6 +704,7 @@ def _rank_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
             (group_id, f"-{days} days", f"-{days} days"),
         ).fetchall())
         stat["candidates"] = len(rows)
+        progress.report(f'{prof.name} · 正在筛选 {len(rows)} 篇文献')
 
         kept, dropped = rule_filter(rows, prof)
         stat["after_rule"] = len(kept)
@@ -752,7 +753,7 @@ def _rank_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
                          [group_id, f"-{days} days", f"-{days} days"])
         conn.commit()
 
-        llm = DeepSeek(cfg.llm)
+        llm = LLMClient(cfg.llm)
         llm_scores: dict[int, tuple[float, str]] = {}
         if not prof.llm_rank:
             stat["llm_skipped"] = "本组已关闭 LLM 精排(interests.yaml 的 llm_rank)"
@@ -769,6 +770,7 @@ def _rank_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
             llm_scores = llm_rerank(kept, prof, cfg, llm,
                                     liked=liked, disliked=disliked)
             stat["llm_scored"] = len(llm_scores)
+            stat["llm_failed"] = len(kept) - len(llm_scores)
         else:
             stat["llm_skipped"] = "未配置 API key 或已禁用"
 

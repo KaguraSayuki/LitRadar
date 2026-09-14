@@ -1,0 +1,52 @@
+{% extends "settings/layout.html" %}
+{% from 'settings/_macros.html' import section_head %}
+{% block heading %}访问与维护{% endblock %}
+{% block settings_body %}
+<section class="settings-panel">
+  {{ section_head('访问密码', '更换后，其他已登录的设备需要重新验证。', 'lock') }}
+  {% if password_managed %}
+  <form method="post" action="/settings/password" class="settings-form maintenance-password" data-settings-form>
+    <input type="hidden" name="credential_version" value="{{ credential_version }}">
+    <div class="settings-field"><label for="current-password">当前密码</label><input id="current-password" type="password" name="current" required autocomplete="current-password"></div>
+    <div class="settings-field"><label for="new-password">新密码（至少 8 位）</label><input id="new-password" type="password" name="password" minlength="8" maxlength="512" required autocomplete="new-password"></div>
+    <div class="settings-field"><label for="confirm-password">再次输入新密码</label><input id="confirm-password" type="password" name="confirm" required autocomplete="new-password"></div>
+    <div class="settings-actions maintenance-password__actions"><button class="btn btn--soft" type="submit">更换密码</button></div>
+  </form>
+  {% else %}<p class="hint">{{ password_source }}</p>{% endif %}
+  <hr class="settings-divider">
+  <div class="settings-actions"><span class="hint logout-hint">结束此设备的登录会话</span><form method="post" action="/logout"><button class="btn btn--quiet">退出登录</button></form></div>
+</section>
+<section class="settings-panel">
+  <header class="settings-panel__head"><div><h2>配置备份</h2><p>保留最近五份设置和研究方向备份，恢复前可先预览。</p></div><a class="btn" href="/settings/export">导出设置</a></header>
+  {% for kind,label in [('config','运行与阅读设置'),('interests','研究方向')] %}
+  <div class="backup-group"><h3>{{ label }}</h3>
+    {% for backup in backups[kind] %}
+    <form method="post" action="/settings/restore" data-settings-form class="backup-row">
+      <input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="kind" value="{{ kind }}"><input type="hidden" name="backup" value="{{ backup }}">
+      <span class="backup-row__name">{{ backup }}</span>
+      <div class="settings-actions"><button class="btn btn--quiet" name="action" value="preview">查看范围</button><button class="btn" name="action" value="restore" data-confirm="恢复这份备份？当前内容会先备份。运行设置恢复后自动更新会暂停，需要另行开启。">恢复</button></div>
+    </form>
+    {% else %}<div class="backup-empty">尚无备份，修改并保存设置后会自动生成。</div>{% endfor %}
+  </div>
+  {% endfor %}
+  <p class="hint">恢复前会备份当前内容。凭据与部署位置保持不变，自动更新将暂停。</p>
+</section>
+<section class="settings-panel settings-panel--disclosure">
+  <details class="settings-disclosure">
+    <summary>自动化接口口令<span class="settings-badge {{ 'settings-badge--active' if token_state.configured }}" aria-label="{{ '接口口令已设置' if token_state.configured else '接口口令未设置' }}">{{ '已设置' if token_state.configured else '未设置' }}</span></summary>
+    <p class="hint">供已有脚本使用，网页使用访问密码登录即可。{{ token_state.source }}</p>
+    {% if token_state.managed %}
+    <form method="post" action="/settings/credentials/access" class="settings-form" data-settings-form>
+      <input type="hidden" name="credential_version" value="{{ credential_version }}">
+      <div class="settings-field"><label for="access-token">新的接口口令</label><input id="access-token" name="secret" type="password" autocomplete="new-password" placeholder="留空保持原值"><p class="hint">使用足够长的随机口令，更换后请同步更新已有脚本。</p></div>
+      <div class="settings-actions maintenance-password__actions"><button class="btn btn--soft" name="action" value="save">保存接口口令</button><button class="btn btn--quiet" name="action" value="clear" data-confirm="清除接口口令？已有脚本需要改为其他授权方式，网页访问密码仍然有效。">清除</button></div>
+    </form>
+    {% endif %}
+  </details>
+</section>
+<section class="settings-panel">
+  {{ section_head('实例信息', '供安装、升级和排查问题时参考。') }}
+  <dl class="kv"><dt>版本</dt><dd>{{ version_name }}</dd><dt>网页访问地址</dt><dd>{{ access_url }}</dd><dt>数据库</dt><dd>{{ db_path }}</dd><dt>研究方向文件</dt><dd>{{ interests_path }}</dd></dl>
+  <details class="settings-disclosure"><summary>部署维护说明</summary><p class="hint">监听地址和端口由启动程序决定，访问地址可能经过反向代理。变更监听、证书或数据库位置时，请让维护代理停止相关进程、备份数据、调整启动配置并重新验证。</p><p class="hint">升级时保留数据库、邮件、普通设置和私有凭据。凭据应单独备份并限制访问权限。普通设置保存不会更改部署参数。</p></details>
+</section>
+{% endblock %}

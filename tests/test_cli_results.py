@@ -27,7 +27,7 @@ def stages(tmp_path, monkeypatch):
     monkeypatch.setattr(rank, "_rank_group", runner("rank"))
     monkeypatch.setattr(summarize, "_summarize_group", runner("summarize"))
     monkeypatch.setattr(pipeline, "_ingest_group", runner("search"))
-    monkeypatch.setattr(summarize, "DeepSeek", lambda *_: SimpleNamespace(available=True))
+    monkeypatch.setattr(summarize, "LLMClient", lambda *_: SimpleNamespace(available=True))
     monkeypatch.setattr(pipeline.enrich, "run", lambda *a, **kw: {"enriched": 0})
     return calls, failures
 
@@ -58,7 +58,7 @@ def test_run嵌套阶段错误影响退出码且不阻止其余阶段(stages, fa
 
 
 def test_未配置可选来源或LLM的跳过仍算成功(stages, monkeypatch):
-    monkeypatch.setattr(summarize, "DeepSeek", lambda *_: SimpleNamespace(available=False))
+    monkeypatch.setattr(summarize, "LLMClient", lambda *_: SimpleNamespace(available=False))
     assert cli.main(["summarize"]) == 0
     assert cli.main(["ingest", "mail"]) == 0
 

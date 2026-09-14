@@ -1,4 +1,4 @@
-"""配置加载。所有密钥只从环境变量 / .env 读,不写进 config.yaml。"""
+"""配置加载。密钥来自部署环境、私有凭据文件或兼容的 .env。"""
 from __future__ import annotations
 
 import math
@@ -12,31 +12,21 @@ import yaml
 from .journal_rank import DEFAULT_FIELDS, DEFAULT_MAP
 
 ROOT = Path(__file__).resolve().parent.parent
+_file_values: dict[str, str] = {}
 
 # 显式加载项目根目录的 .env —— 不要依赖当前工作目录,
 # 否则 systemd 启动或其他目录下调用时会读不到密钥。
 def load_env_file(path: Path | None = None) -> None:
-    """把 .env 里【有值且当前环境没有】的变量补进 os.environ。
-
-    为什么不用 load_dotenv():
-      * ``override=True`` 会让 .env 覆盖真实环境变量 —— 实测踩过:
-        命令行/systemd 传入的 LITRADAR_TOKEN 被 .env 里的空占位符清掉,
-        导致鉴权静默失效(所有请求都放行)。
-      * ``override=False`` 又让"改了 .env 不重启"失效,因为首次导入时
-        已经把空字符串写进了 os.environ。
-
-    所以显式实现:**真实环境优先,空值不回填,只补缺失的**。
-    """
+    """Refresh file values without mixing them into the deployment environment."""
     try:
         from dotenv import dotenv_values
     except ImportError:  # pragma: no cover
         return
     env_path = path or (ROOT / ".env")
-    if not env_path.exists():
-        return
-    for key, value in (dotenv_values(env_path) or {}).items():
-        if value and not os.environ.get(key):
-            os.environ[key] = value
+    global _file_values
+    _file_values = {key: value for key, value in
+                    (dotenv_values(env_path, interpolate=False) if env_path.exists() else {}).items()
+                    if value}
 
 
 load_env_file()
@@ -68,8 +58,17 @@ def read_secret(env_name: str | None) -> str | None:
 
     ``env_name`` 可以来自配置(如 ``llm.api_key_env``);为空即视为未设置。
     """
-    raw = os.environ.get(env_name) if env_name else None
+    from .credentials import current_values
+
+    raw = current_values().get(env_name) if env_name else None
     return (raw or "").strip() or None
+
+
+def _config_secret(section, env_name: str | None) -> str | None:
+    values = getattr(section, "_secret_values", None)
+    if values is None:
+        return read_secret(env_name)
+    return (values.get(env_name) or "").strip() or None
 
 
 @dataclass
@@ -91,7 +90,7 @@ class MailConfig:
 
     @property
     def imap_password(self) -> str | None:
-        return read_secret(self.imap_password_env)
+        return _config_secret(self, self.imap_password_env)
 
 
 @dataclass
@@ -153,11 +152,13 @@ class SourceConfig:
 
 @dataclass
 class LLMConfig:
-    provider: str = "deepseek"
+    provider: str = "openai-compatible"  # Legacy provider names remain readable.
     base_url: str = "https://api.deepseek.com"
     model: str = "deepseek-chat"
     api_key_env: str = "DEEPSEEK_API_KEY"
-    temperature: float = 0.2
+    temperature: float | None = 0.2
+    json_mode: str = "auto"              # auto | json_object | prompt
+    token_limit_parameter: str = "auto"  # auto | max_tokens | max_completion_tokens
     rerank_batch_size: int = 20
     # 进 LLM 精排的条数上限。**0 = 不截断**(默认)。
     # 候选池只有 ~200 条,省这点调用微不足道;而硬截断会让 BM25 有"一票否决权",
@@ -169,7 +170,7 @@ class LLMConfig:
 
     @property
     def api_key(self) -> str | None:
-        return read_secret(self.api_key_env)
+        return _config_secret(self, self.api_key_env)
 
 
 @dataclass
@@ -192,12 +193,11 @@ class AppConfig:
     port: int = 8090
     db_path: str = "./data/litradar.db"
     timezone: str = "Asia/Shanghai"
-    # 没有账号体系。设了 token 就校验,没设就不校验(默认只绑 127.0.0.1)。
+    # 可选脚本接口口令；普通网页用户可用访问密码会话。
     token_env: str = "LITRADAR_TOKEN"
-    # 花钱阶段(rank / summarize / all)额外要一次密码。存 PBKDF2 哈希而非明文,
-    # 用 `litradar admin-password` 生成并写进 .env。
+    # 访问密码只存 PBKDF2 哈希，由首次设置或本机命令写入私有凭据文件。
     admin_password_env: str = "LITRADAR_ADMIN_PASSWORD_HASH"
-    interests: str = "./interests.yaml"   # 我的检索词与偏好(不是"账号")
+    interests: str = "./interests.yaml"   # 研究方向与检索偏好
 
     # 流水线时间窗(天)。**必须 ≥ 抓取窗口** —— 否则抓回来的文献进了库,
     # 却因为落在排序窗口之外而永远拿不到分数,在收件箱里长成一片"未评分"。
@@ -207,11 +207,11 @@ class AppConfig:
 
     @property
     def token(self) -> str | None:
-        return read_secret(self.token_env)
+        return _config_secret(self, self.token_env)
 
     @property
     def admin_password_hash(self) -> str | None:
-        return read_secret(self.admin_password_env)
+        return _config_secret(self, self.admin_password_env)
 
     @property
     def is_loopback(self) -> bool:
@@ -262,6 +262,15 @@ class JournalRankConfig:
 
 
 @dataclass
+class ScheduleConfig:
+    enabled: bool = False
+    time: str = "07:00"
+    groups: list[str] = field(default_factory=list)  # empty = all enabled directions
+    owner: str = "external"
+    handoff_confirmed: bool = False
+
+
+@dataclass
 class Config:
     app: AppConfig = field(default_factory=AppConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
@@ -270,7 +279,9 @@ class Config:
     sources: SourceConfig = field(default_factory=SourceConfig)
     ranking: RankingConfig = field(default_factory=RankingConfig)
     journal_rank: JournalRankConfig = field(default_factory=JournalRankConfig)
+    schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     interests_data: dict[str, Any] = field(default_factory=dict)
+    config_file: Path | None = field(default=None, repr=False, compare=False)
 
     # 解析后的绝对路径
     @property
@@ -367,12 +378,29 @@ def _admin_config(data: dict | None) -> AdminConfig:
 
 def load_config(path: str | Path | None = None) -> Config:
     """从 config.yaml 加载;文件不存在时全部走默认值。"""
+    from .lock import single_instance
     cfg_path = _expand(path or os.environ.get("LITRADAR_CONFIG", "config.yaml"))
-    raw: dict[str, Any] = {}
-    if cfg_path.exists():
-        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    # Share the short-lived writer lock so a job cannot combine files from
+    # different settings saves. Credentials are a separate atomic snapshot.
+    with single_instance(cfg_path.with_name(cfg_path.name + '.settings.lock'), blocking=True):
+        raw: dict[str, Any] = {}
+        if cfg_path.exists():
+            raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+        cfg = config_from_dict(raw)
+        cfg.config_file = cfg_path
+        pf = cfg.interests_file
+        if pf.exists():
+            cfg.interests_data = yaml.safe_load(pf.read_text(encoding="utf-8")) or {}
+    from .credentials import attach_snapshot
+    attach_snapshot(cfg)
+    return cfg
 
-    cfg = Config(
+
+def config_from_dict(raw: dict[str, Any]) -> Config:
+    """Build a configuration without reading or writing a user's files."""
+    if not isinstance(raw, dict):
+        raise ValueError("配置必须是映射")
+    return Config(
         app=_build(AppConfig, raw.get("app")),
         llm=_build(LLMConfig, raw.get("llm")),
         mail=_build(MailConfig, raw.get("mail")),
@@ -380,9 +408,5 @@ def load_config(path: str | Path | None = None) -> Config:
         sources=_build(SourceConfig, raw.get("sources")),
         ranking=_ranking_config(raw.get("ranking")),
         journal_rank=_build(JournalRankConfig, raw.get("journal_rank")),
+        schedule=_build(ScheduleConfig, raw.get("schedule")),
     )
-
-    pf = cfg.interests_file
-    if pf.exists():
-        cfg.interests_data = yaml.safe_load(pf.read_text(encoding="utf-8")) or {}
-    return cfg

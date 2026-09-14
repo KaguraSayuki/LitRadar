@@ -1,0 +1,55 @@
+{% extends "settings/layout.html" %}
+{% block heading %}研究方向{% endblock %}
+{% block heading_action %}<a class="btn btn--primary" href="/settings/groups/new">{{ icon('plus') }}新增研究方向</a>{% endblock %}
+{% block settings_body %}
+{% if entries %}
+<div class="directions-summary"><strong>{{ entries|length }} 个研究方向</strong><span>按下方顺序显示在文献列表中</span></div>
+{% endif %}
+<div class="settings-cards">
+{% for entry in entries %}
+<article class="direction-card {{ 'direction-card--paused' if not entry.get('enabled',true) }}">
+  <div class="direction-card__top">
+    <span class="direction-mark" aria-hidden="true">{{ '%02d'|format(loop.index) }}</span>
+    <div class="direction-card__title">
+      <h2><a href="/settings/group?{{ {'slug':entry.slug}|urlencode }}">{{ entry.name }}</a></h2>
+      <span class="settings-badge {{ 'settings-badge--active' if entry.get('enabled',true) }}">{{ '已启用' if entry.get('enabled',true) else '已停用' }}</span>
+      <span class="settings-badge">{{ 'AI 精排' if entry.get('llm_rank',true) else '关键词排序' }}</span>
+    </div>
+    <details class="direction-menu">
+      <summary aria-label="更多操作：{{ entry.name }}">{{ icon('more') }}</summary>
+      <form class="direction-menu__items" method="post" action="/settings/group-action?{{ {'slug':entry.slug}|urlencode }}" data-settings-form>
+        <input type="hidden" name="version" value="{{ version }}">
+        <button name="action" value="copy">复制方向</button>
+        {% if not loop.first %}<button name="action" value="up" aria-label="上移 {{ entry.name }}">上移</button>{% endif %}
+        {% if not loop.last %}<button name="action" value="down" aria-label="下移 {{ entry.name }}">下移</button>{% endif %}
+        <button class="{{ 'is-destructive' if entry.get('enabled',true) }}" name="action" value="{{ 'disable' if entry.get('enabled',true) else 'enable' }}">{{ '停用方向' if entry.get('enabled',true) else '恢复方向' }}</button>
+      </form>
+    </details>
+  </div>
+  <p class="direction-card__description">{{ entry.direction or '添加一段方向说明，让检索更贴近你的课题。' }}</p>
+  <div class="direction-card__tags">
+    {% set keywords = (entry.get('keywords') or {}).get('core',[]) or [] %}
+    {% for word in keywords[:4] %}<span>{{ word }}</span>{% endfor %}
+    {% if keywords|length > 4 %}<span>+{{ keywords|length - 4 }}</span>{% endif %}
+    {% if not keywords %}<span>尚未设置核心关键词</span>{% endif %}
+    {% if not entry.get('enabled',true) %}<span>历史文献已保留</span>{% endif %}
+  </div>
+  <div class="direction-card__footer">
+    <a class="btn btn--soft" href="/settings/group?{{ {'slug':entry.slug}|urlencode }}">编辑方向</a>
+    <a class="btn btn--quiet" href="/?g={{ entry.slug|urlencode }}">查看文献</a>
+    {% if entry.get('enabled',true) %}<button class="btn btn--quiet" type="button" data-run-group="{{ entry.slug }}">{{ icon('play') }}更新这个方向</button>{% endif %}
+  </div>
+</article>
+{% else %}
+<section class="settings-panel settings-empty">
+  {{ icon('target') }}<h2>从第一个研究方向开始</h2>
+  <p>为你的课题整理关键词、期刊和作者。没有 AI 密钥，也可以配置和筛选文献。</p>
+  <a class="btn btn--primary" href="/settings/groups/new">{{ icon('plus') }}创建研究方向</a>
+</section>
+{% endfor %}
+</div>
+{% if entries %}<p class="settings-footnote">{{ icon('clock') }}<span>更新会执行检索、邮件采集、补全、排序和摘要；AI 调用可能产生费用。邮件与补全为全局阶段。</span></p>{% endif %}
+
+{% endblock %}
+
+{% block settings_progress %}{% include 'partials/pipeline.html' %}{% endblock %}

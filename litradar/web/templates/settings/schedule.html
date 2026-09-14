@@ -1,0 +1,51 @@
+{% extends "settings/layout.html" %}
+{% from 'settings/_macros.html' import section_head, toggle, savebar %}
+{% block heading %}自动更新{% endblock %}
+{% block settings_body %}
+<section class="settings-panel">
+  {{ section_head('更新概况', '', 'clock') }}
+  <dl class="schedule-overview">
+    <div><dt>每日计划</dt><dd>{{ '已开启' if values.enabled else '已暂停' }}</dd></div>
+    <div><dt>{{ '等待补跑' if schedule_status.overdue else '下次计划' }}</dt><dd>{{ schedule_status.next|local_time if schedule_status.next else '尚未安排' }}</dd></div>
+  </dl>
+  <div class="schedule-health">{{ icon('check-circle' if schedule_status.worker_alive else 'alert') }}<span>{{ '自动更新服务运行正常' if schedule_status.worker_alive else '自动更新服务未连接，请联系维护代理启动' }}</span></div>
+  {% if schedule_status.worker_message %}<p class="hint">{{ schedule_status.worker_message }}</p>{% endif %}
+  {% if schedule_status.last %}<p class="schedule-history">上次更新 {{ schedule_status.last.started_at|local_time }}<br>{{ {'ok':'已完成','error':'未完成','running':'正在执行','interrupted':'进程中断'}.get(schedule_status.last.status,'未知') }}{% if schedule_status.last.message %}：{{ schedule_status.last.message }}{% endif %}</p>{% endif %}
+  {% if schedule_status.overdue %}<p class="hint">已到计划时间。服务可用且当前任务结束后，会补跑今天的更新。</p>{% endif %}
+</section>
+{% if not handoff_confirmed %}
+<aside class="handoff-note">
+  {{ icon('alert') }}<div><strong>首次使用，需要衔接原有定时任务</strong><p>请让维护代理停用旧的系统定时任务并启用应用调度。完成后，就可以在此调整更新时间。</p>
+  <details class="settings-disclosure"><summary>给维护代理的操作说明</summary><p>确认停用此实例的 systemd、launchd 或 Windows 定时入口，再执行 <code>litradar schedule-handoff --external-timers-stopped</code>。使用 <code>litradar serve</code> 启动网页与自动更新服务，独立部署也可运行 <code>litradar scheduler</code>。</p></details></div>
+</aside>
+{% endif %}
+<form method="post" class="settings-form" data-settings-form>
+  <input type="hidden" name="version" value="{{ version }}">
+  <section class="settings-panel">
+    {{ section_head('更新时间', '按所选时区，每天自动运行一次。') }}
+    {{ toggle('enabled','启用每日自动更新',values.enabled) }}
+    <hr class="settings-divider">
+    <div class="form-grid schedule-time-fields">
+      <div class="settings-field"><label for="update-time">每天更新时间</label><input type="time" id="update-time" name="time" value="{{ values.time }}" required></div>
+      <div class="settings-field"><label for="update-zone">时区</label><select id="update-zone" name="timezone" required>
+        {% set common_zones = {'Asia/Shanghai':'中国标准时间 · 上海','Asia/Hong_Kong':'中国香港时间','Asia/Taipei':'中国台北时间','Asia/Tokyo':'日本标准时间 · 东京','Asia/Singapore':'新加坡时间','America/New_York':'美国东部时间 · 纽约','America/Los_Angeles':'美国太平洋时间 · 洛杉矶','Europe/London':'英国时间 · 伦敦','Europe/Paris':'欧洲中部时间 · 巴黎','Australia/Sydney':'澳大利亚时间 · 悉尼','UTC':'协调世界时 · UTC'} %}
+        <optgroup label="常用时区">{% for zone,label in common_zones.items() %}<option value="{{ zone }}" {% if values.timezone == zone %}selected{% endif %}>{{ label }}</option>{% endfor %}</optgroup>
+        <optgroup label="其他时区">{% for zone in timezones if zone not in common_zones %}<option value="{{ zone }}" {% if values.timezone == zone %}selected{% endif %}>{{ zone|replace('_',' ') }}</option>{% endfor %}</optgroup>
+        {% if values.timezone not in timezones %}<option value="{{ values.timezone }}" selected>{{ values.timezone }}</option>{% endif %}
+      </select></div>
+    </div>
+    <p class="hint">运行次数按所选时区的自然日计算。</p>
+  </section>
+  <section class="settings-panel">
+    {{ section_head('更新范围', '一次更新包含邮件、检索、补全、排序和摘要。') }}
+    {{ toggle('all_groups','所有启用的研究方向',not values.groups,'以后新增的方向也会自动加入。') }}
+    <div class="schedule-group-picker">
+      <p class="settings-section-label">或选择指定方向</p>
+      <div class="choice-grid">{% for entry in entries %}<label class="check"><input type="checkbox" name="groups" value="{{ entry.slug }}" {% if entry.slug in values.groups %}checked{% endif %}>{{ entry.name }}{{ '（已停用）' if not entry.get('enabled',true) }}</label>{% endfor %}</div>
+      <p class="hint">只更新勾选的方向，已停用的方向会跳过。</p>
+    </div>
+    <details class="settings-disclosure"><summary>费用与错过更新时的处理</summary><p class="hint">AI 调用按量计费，并遵守每日次数限制。重启后补跑当天错过的更新，不补跑更早日期。夏令时跳过的时间顺延，重复的时间取第一次；进程中断的更新当天不自动重试。</p></details>
+  </section>
+  {{ savebar('保存自动更新设置', '保存计划后，按新时间执行。') }}
+</form>
+{% endblock %}

@@ -83,4 +83,5 @@ to my account. Initial backfills or manual reruns may temporarily increase daily
 留出余量；请求间隔配置不等同于每日配额。
 
 若表单询问机构、商业用途或数据使用范围，请按自己的真实情况填写。申请通过后，将
-密钥写入 `.env` 的 `S2_API_KEY`，不要提交到版本库。
+密钥填写在网页“设置 → 数据与邮箱”的 Semantic Scholar 卡片中；旧部署仍兼容
+`.env` 的 `S2_API_KEY`。不要提交实际密钥到版本库。

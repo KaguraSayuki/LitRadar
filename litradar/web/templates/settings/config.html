@@ -1,0 +1,106 @@
+{% extends "settings/layout.html" %}
+{% from 'settings/_macros.html' import field, section_head, savebar %}
+{% block heading %}{{ '数据与邮箱' if section == 'services' else 'AI 与阅读' }}{% endblock %}
+{% macro selected_fields(keys) %}{% for f in fields if f.key in keys %}{{ field(f,values,errors) }}{% endfor %}{% endmacro %}
+{% block settings_body %}
+{% if section == 'services' %}
+{% include 'settings/model.html' %}
+<section class="settings-panel">
+  {{ section_head('文献与邮件服务', '按需连接即可。凭据分别保存，页面不会显示已保存的密钥。', 'plug') }}
+  {% set service_info = {'s2':('S2','文献检索与摘要补全'),'openalex':('OA','开放学术文献检索'),'journal':('ES','期刊等级与影响因子'),'mail':('@','订阅邮件的只读连接检查')} %}
+  <div class="services-list">
+  {% for service,info in service_states.items() if service != 'llm' %}
+    <details class="service-row">
+      <summary><span class="service-mark" aria-hidden="true">{{ service_info[service][0] }}</span><span class="service-row__title"><strong>{{ info.label }}</strong><small>{{ service_info[service][1] }}</small></span><span class="settings-badge {{ 'settings-badge--active' if info.configured }}">{{ '已设置' if info.configured else '未设置' }}</span>{{ icon('chevron-right') }}</summary>
+      <div class="service-row__body">
+        <form method="post" action="/settings/credentials/{{ service }}" class="settings-form" data-settings-form>
+          <input type="hidden" name="credential_version" value="{{ credential_version }}">
+          {% if info.managed %}
+          <div class="settings-field"><label for="credential-{{ service }}">{{ '新的邮箱授权码' if service == 'mail' else '新的 API 密钥' }}</label><input type="password" id="credential-{{ service }}" name="secret" autocomplete="new-password" placeholder="留空保持原值"></div>
+          {% else %}<p class="hint">{{ info.source }}</p>{% endif %}
+          <div class="settings-actions">
+            {% if info.managed %}<button class="btn btn--soft" name="action" value="save">保存凭据</button>{% endif %}
+            <button class="btn" type="button" data-check-service="{{ service }}">测试连接</button>
+            {% if info.managed %}<button class="btn btn--quiet" name="action" value="clear" data-confirm="清除这个服务的凭据？下次调用将无法使用此服务。">清除</button>{% endif %}
+          </div>
+        </form>
+        <p class="hint">测试使用已保存的凭据。{{ '只读检查，不标记已读、不移动或删除邮件。' if service == 'mail' else '只测试连接，不采集文献。' }}</p>
+        <p id="check-{{ service }}" class="settings-result" role="status"></p>
+      </div>
+    </details>
+  {% endfor %}
+  </div>
+</section>
+{% endif %}
+<form method="post" class="settings-form" data-settings-form>
+  <input type="hidden" name="version" value="{{ version }}">
+  {% if section == 'services' %}
+  <section class="settings-panel">
+    {{ section_head('文献来源', '选择更新时使用的来源。需要密钥的服务请先在上方接入。') }}
+    <div class="source-options">{% for f in fields if f.kind == 'bool' and f.key.startswith('sources.') %}{{ field(f,values,errors) }}{% endfor %}</div>
+    <details class="settings-disclosure" {% if errors %}open{% endif %}>
+      <summary>采集范围与请求限制</summary>
+      <div class="form-grid">{% for f in fields if f.advanced or f.key == 'sources.mailto' %}{{ field(f,values,errors) }}{% endfor %}</div>
+    </details>
+  </section>
+  <section class="settings-panel">
+    {{ section_head('订阅邮箱', '从本地邮件文件导入，或连接一个已有的订阅邮箱。', 'inbox') }}
+    {{ selected_fields(['mail.mode']) }}
+    <details class="settings-disclosure" id="mail-connection" {% if values.get('mail.mode') == 'imap' or errors %}open{% endif %}>
+      <summary>邮箱连接参数</summary>
+      <div class="form-grid">
+        {{ selected_fields(['mail.imap_host','mail.imap_port','mail.imap_user','mail.imap_folder']) }}
+        <div class="settings-field form-grid__wide"><label for="mail-sender">只收取此发件人的邮件</label><input id="mail-sender" name="mail_sender" value="{{ mail_sender }}" placeholder="newsletter.x-mol.com"><p class="hint">填写发件邮箱或域名，留空则不按发件人筛选。</p></div>
+      </div>
+      <hr class="settings-divider">
+      {{ selected_fields(['mail.imap_mark_seen']) }}
+      {% if legacy_mail %}<label class="check legacy-filter"><input type="checkbox" name="replace_mail_filter" {% if replace_mail_filter %}checked{% endif %}>用上面的发件人条件替换旧邮件条件</label><p class="hint">旧条件默认保留，更改账号和服务器不受影响。</p>{% else %}<input type="hidden" name="replace_mail_filter" value="on">{% endif %}
+    </details>
+  </section>
+  {% else %}
+  <section class="settings-panel">
+    {{ section_head('排序与摘要', '让推荐范围和阅读深度适合你的日常节奏。', 'sparkles') }}
+    {{ selected_fields(['llm.enabled']) }}
+    <hr class="settings-divider">
+    <div class="form-grid">{{ selected_fields(['llm.deep_summary_top_n','llm.rerank_top_k','app.pipeline_window_days']) }}</div>
+  </section>
+  <section class="settings-panel">
+    {{ section_head('期刊信息', '选择阅读列表中显示的标签，按需调整短名称。') }}
+    {{ selected_fields(['journal_rank.enabled']) }}
+    <hr class="settings-divider">
+    {% include 'settings/journals.html' %}
+    <details class="settings-disclosure" {% if errors.get('journal_rank.max_lookups') %}open{% endif %}><summary>期刊查询上限</summary>{{ selected_fields(['journal_rank.max_lookups']) }}</details>
+  </section>
+  <section class="settings-panel">
+    {{ section_head('运行频率', '统一约束网页、命令行和自动更新。限制运行次数，不是货币预算。', 'clock') }}
+    <input type="hidden" name="guarded_present" value="1">
+    <p class="settings-section-label">需要授权和次数限制的阶段</p>
+    <div class="choice-grid">{% for key,label in stage_labels.items() %}<label class="check"><input type="checkbox" name="guarded_stage" value="{{ key }}" {% if key in guarded %}checked{% endif %}>{{ label }}</label>{% endfor %}</div>
+    <p class="hint">完整更新包含受限阶段时，也会应用对应限制。</p>
+    <hr class="settings-divider">
+    <div class="form-grid">{{ selected_fields(['admin.cooldown_seconds','admin.daily_limit']) }}</div>
+  </section>
+  <section class="settings-panel settings-panel--disclosure">
+    <details class="settings-disclosure" {% if errors %}open{% endif %}>
+      <summary>精排批次与排序权重</summary>
+      <p class="hint">模型地址、密钥与兼容选项在<a href="/settings/services#model-connection">默认模型连接</a>中设置。</p>
+      <div class="form-grid">{% for f in fields if f.advanced and f.key.startswith('llm.') %}{{ field(f,values,errors) }}{% endfor %}</div>
+      <hr class="settings-divider"><p class="settings-section-label">三类排序信号的权重</p>
+      <div class="form-grid form-grid--three">{% for f in fields if f.key.startswith('ranking.weights.') %}{{ field(f,values,errors) }}{% endfor %}</div>
+    </details>
+  </section>
+  {% endif %}
+  {{ savebar('保存来源设置' if section == 'services' else '保存阅读设置') }}
+</form>
+{% if section == 'services' %}
+<section class="settings-panel">
+  {{ section_head('导入订阅邮件', '文件先进入收件目录，下次更新时解析。', 'upload') }}
+  <form method="post" action="/settings/mail/import" enctype="multipart/form-data" data-settings-form>
+    <label class="upload-area" for="mail-files">{{ icon('upload') }}<span><strong>选择 .eml 邮件文件</strong><span class="hint">每封最多 5 MB，每次最多 20 封</span></span></label>
+    <input class="mail-file-input" id="mail-files" type="file" name="files" accept=".eml,message/rfc822" multiple required>
+    <button class="btn" type="submit">上传邮件</button>
+  </form>
+  <p class="hint">请先选择“上传邮件文件”模式，并启用邮件采集。</p>
+</section>
+{% endif %}
+{% endblock %}
