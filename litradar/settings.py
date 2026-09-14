@@ -224,7 +224,46 @@ class SettingsStore:
             atomic_write(self.interests_path, dump(root))
             return entry["slug"]
 
+    def backups(self, kind: str) -> list[Path]:
+        target = self.path if kind == 'config' else self.interests_path
+        return list(reversed(sorted(target.parent.glob(target.name + '.*.bak'))))[:BACKUPS]
 
+    def restore(self, kind: str, name: str, expected: str, *, preview=False) -> dict:
+        if kind not in ('config', 'interests'):
+            raise SettingsError("请选择配置备份或研究方向备份。")
+        with self.locked():
+            self.check(expected)
+            path = next((p for p in self.backups(kind) if p.name == name), None)
+            if path is None:
+                raise SettingsError("备份已变化，请重新打开维护页面。", status=409)
+            data = read_mapping(path)
+            if kind == 'interests':
+                if validate_interests(data):
+                    raise SettingsError("这份备份的研究方向格式不完整，请选择另一份备份。")
+                detail = {'directions': [g.get('name',g['slug']) for g in self.group_entries(data)]}
+                target = self.interests_path
+            else:
+                # A preference restore must not change deployment, authentication,
+                # database paths, or silently reactivate automatic execution.
+                current = config_from_dict(read_mapping(self.path))
+                for field in ('host','port','db_path','interests','token_env','admin_password_env'):
+                    put_value(data, 'app.' + field, getattr(current.app,field))
+                for section in ('llm','mail','sources','journal_rank'):
+                    for key,value in vars(getattr(current,section)).items():
+                        if key.endswith('_env'):
+                            put_value(data, section + '.' + key, value)
+                put_value(data, 'schedule.enabled', False)
+                put_value(data, 'schedule.owner', current.schedule.owner)
+                put_value(data, 'schedule.handoff_confirmed', current.schedule.handoff_confirmed)
+                from .settings_fields import validate_restored_config
+                restored = config_from_dict(data)
+                restored.interests_data = read_mapping(self.interests_path)
+                validate_restored_config(restored)
+                detail = {'sections': [k for k in ('sources','mail','llm','ranking','journal_rank','admin','schedule') if k in data]}
+                target = self.path
+            if not preview:
+                atomic_write(target, dump(data))
+            return detail
 
 
 def group_patch(form) -> dict:

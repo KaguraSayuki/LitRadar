@@ -507,6 +507,11 @@ def cmd_check(cfg, args):
 DAYS_HELP = "时间窗(天)。不传则取 config 的 app.pipeline_window_days"
 
 
+def cmd_setup_link(cfg, args):
+    from .web.access import issue_setup_link
+    print("一次性设置链接（30 分钟有效，请仅交给实例所有者）：")
+    print(issue_setup_link(cfg, args.url))
+    return 0
 
 
 def cmd_scheduler(cfg, args):
@@ -554,6 +559,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("init-db", help="初始化数据库").set_defaults(func=cmd_init_db)
+    sp = sub.add_parser("setup-link", help="生成 30 分钟有效的一次性网页设置链接")
+    sp.add_argument("--url", default="http://127.0.0.1:8090", help="实例的实际访问地址")
+    sp.set_defaults(func=cmd_setup_link)
     sub.add_parser('scheduler', help='运行独立的自动更新进程').set_defaults(func=cmd_scheduler)
     sp = sub.add_parser('schedule-handoff', help='确认已停用外部定时任务，由应用接管调度')
     sp.add_argument('--external-timers-stopped', action='store_true')

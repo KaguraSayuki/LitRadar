@@ -122,17 +122,15 @@ def get_cfg() -> Config:
 
 
 def require_token(request: Request) -> None:
-    """极简口令校验 —— 没有账号、没有会话、没有登录页。
-
-    - 未设 LITRADAR_TOKEN:不校验(默认只绑 127.0.0.1,本就访问不到)
-    - 设了   :所有请求需带 ?k=<token> 或 X-Token 头
-
-    为什么还要留这个:``/admin/run/*`` 会真的消耗你的 DeepSeek 额度。
-    如果绑 0.0.0.0 又完全不设防,同网段任何人都能把钱烧掉。
-    """
+    """Accept an owner session or the legacy API token; health remains public."""
     cfg = get_cfg()
+    from .access import logged_in
+    if logged_in(request, cfg):
+        return
     expected = cfg.app.token
     if not expected:
+        if cfg.app.admin_password_hash:
+            raise HTTPException(401, "请先登录 LitRadar。")
         return
     got = (request.query_params.get("k")
            or request.headers.get("X-Token", "")
@@ -205,7 +203,7 @@ def require_exposure_safe(cfg: Config) -> None:
     同网段任何人都能点着按钮烧额度。既然"对外必须带口令"是本项目写明的约定,
     就让它 fail closed。
     """
-    if cfg.app.token or cfg.app.is_loopback:
+    if cfg.app.token or cfg.app.admin_password_hash or cfg.app.is_loopback:
         return
     raise HTTPException(
         403,
@@ -221,6 +219,9 @@ def require_admin_password(request: Request, cfg: Config) -> None:
     与 require_token 同样是"设了就校验":没配密码就不拦 —— 但那种状态下
     ``litradar check`` 会明确告诉你花钱接口没有这道闸。
     """
+    from .access import logged_in
+    if logged_in(request, cfg):
+        return
     stored = cfg.app.admin_password_hash
     if not stored:
         return
@@ -240,7 +241,6 @@ def require_stage_limits(cfg: Config, stage: str,
     except execution.ExecutionLimit as error:
         headers = {"Retry-After": str(error.retry)} if error.retry else None
         raise HTTPException(429, str(error), headers=headers) from None
-
 
 
 # 记住口令用的 cookie 名。这不是"登录会话",只是省得每次点链接都重带 ?k=。
@@ -302,12 +302,30 @@ async def remember_token(request: Request, call_next):
     否则页面内的链接(``/item/5``)不带 token,一点就 401 —— 那样这个口令
     根本没法用。cookie 里存的就是 token 本身,服务端不保存任何会话状态。
     """
+    from .access import logged_in, protect_access_log
+    protect_access_log()
+    cfg = get_cfg()
+    public = request.url.path in ("/healthz", "/setup", "/login") or request.url.path.startswith("/static/")
+    if not public and request.method == "GET":
+        if cfg.app.admin_password_hash and not cfg.app.token and not logged_in(request, cfg):
+            return RedirectResponse("/login", status_code=303)
+        if (cfg.config_file and not cfg.interests_file.exists()
+                and not cfg.app.admin_password_hash and not cfg.app.token):
+            return RedirectResponse("/setup", status_code=303)
     resp = await call_next(request)
+    resp.headers.setdefault('Referrer-Policy', 'same-origin')
+    if request.url.path.startswith(("/settings", "/setup", "/login")):
+        resp.headers["Cache-Control"] = "no-store"
+        # no-referrer makes native navigation POSTs send Origin: null, which
+        # the CSRF guard correctly rejects. Only the one-time code redirect
+        # needs to suppress even same-origin referrers.
+        resp.headers["Referrer-Policy"] = ("no-referrer" if request.url.path == '/setup'
+            and request.query_params.get('code') else "same-origin")
     k = request.query_params.get("k")
     expected = get_cfg().app.token
     if k and expected and hmac.compare_digest(k, expected):
         resp.set_cookie(COOKIE_NAME, k, httponly=True, samesite="lax",
-                        max_age=60 * 60 * 24 * 180)
+                        secure=request.url.scheme == "https", max_age=60 * 60 * 24 * 180)
     # Cookie 只记住默认视图;已有页面的导航和写请求各自携带渲染时的组。
     g = request.query_params.get("g")
     if g and request.method == "GET" and resp.status_code < 400:
@@ -604,6 +622,8 @@ def _editor_profile(cfg: Config):
 def interests_page(request: Request, saved: int = 0):
     require_token(request)
     cfg = get_cfg()
+    from ..settings import SettingsStore
+    version = SettingsStore(cfg).version()
     raw = cfg.interests_file.read_text(encoding="utf-8") if cfg.interests_file.exists() else ""
     prof, existing_errors = _editor_profile(cfg)
     # Keep a syntactically valid but historically malformed file editable; the
@@ -613,7 +633,7 @@ def interests_page(request: Request, saved: int = 0):
                + "；".join(existing_errors)) if existing_errors else None
     return templates.TemplateResponse(request, "interests.html", ctx(
         request, raw=raw, prof=prof, saved=bool(saved), error=warning,
-        page="interests"))
+        page="settings", version=version))
 
 
 # interests.yaml 的大小上限。正常配置约 12KB,512KB 已经宽出几十倍 ——
@@ -626,7 +646,7 @@ INTERESTS_BACKUPS = 5
 def _backup_stamp() -> str:
     from datetime import datetime
 
-    return datetime.now().strftime("%Y%m%d-%H%M%S")
+    return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
 
 
 def _backup_interests(target: Path) -> None:
@@ -634,27 +654,35 @@ def _backup_interests(target: Path) -> None:
 
     以前只有一层 ``.bak``:连续两次坏保存,第二次会把好配置的备份也盖掉。
     """
-    import shutil
+    from ..settings import atomic_write
 
-    shutil.copy2(target, target.with_name(f"{target.name}.{_backup_stamp()}.bak"))
+    atomic_write(target.with_name(f"{target.name}.{_backup_stamp()}.bak"),
+                 target.read_bytes(), backup=False)
     # 文件名里的时间戳按字典序就是时间序,排完序删最早的
     for old in sorted(target.parent.glob(f"{target.name}.*.bak"))[:-INTERESTS_BACKUPS]:
         old.unlink(missing_ok=True)
 
 
 @app.post("/interests")
-def interests_save(request: Request, raw: str = Form(...)):
+def interests_save(request: Request, raw: str = Form(...), version: str = Form("")):
     require_token(request)
     require_same_origin(request)
     import yaml
 
     cfg = get_cfg()
+    from ..settings import SettingsStore, atomic_write
+    from .access import logged_in
+    if not cfg.app.admin_password_hash and not cfg.app.token:
+        raise HTTPException(403, "请先通过一次性设置链接设置访问密码。")
+    if not logged_in(request, cfg):
+        require_admin_password(request, cfg)
+    require_exposure_safe(cfg)
 
-    def fail(msg: str):
+    def fail(msg: str, status: int = 400):
         prof, _ = _editor_profile(cfg)
         return templates.TemplateResponse(request, "interests.html", ctx(
             request, raw=raw, prof=prof, saved=False,
-            error=msg, page="interests"), status_code=400)
+            error=msg, page="settings", version=version), status_code=status)
 
     # 0) 大小上限,先于一切解析
     if len(raw.encode("utf-8")) > MAX_INTERESTS_BYTES:
@@ -675,17 +703,15 @@ def interests_save(request: Request, raw: str = Form(...)):
     group = active_group(request, cfg)
     # 3) 写前备份 —— 覆盖配置不可逆,必须留后路
     target = cfg.interests_file
-    if target.exists():
-        _backup_interests(target)
-
-    # 4) 原子写入:先写同目录的临时文件,再 rename 换掉正式文件。
-    #    直接 write_text 写到一半崩溃会留下半个文件 —— 整份配置就没了。
-    tmp = target.with_name(target.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(raw)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, target)
+    store = SettingsStore(cfg)
+    try:
+        with store.locked():
+            store.check(version)
+            if target.exists():
+                _backup_interests(target)
+            atomic_write(target, raw.encode('utf-8'), backup=False)
+    except SettingsError as error:
+        return fail(str(error), status=error.status)
     _cfg_cache.clear()               # 让下次请求重新加载
     return RedirectResponse(_group_url("/interests?saved=1", group.slug if group else None),
                             status_code=303)
@@ -711,7 +737,8 @@ async def profile_redirect_post(request: Request):
     body = (await request.body()).decode("utf-8", "replace")
     raw = (parse_qs(body).get("raw") or [""])[0]
     if raw:
-        return interests_save(request, raw=raw)
+        version = (parse_qs(body).get("version") or [""])[0]
+        return interests_save(request, raw=raw, version=version)
     group = active_group(request, get_cfg())
     return RedirectResponse(_group_url("/interests", group.slug if group else None),
                             status_code=303)
@@ -800,6 +827,19 @@ def admin_run(request: Request, stage: str, days: int = 0):
         # CLI 那边跳过就完了;网页上必须把"没跑"说清楚,否则用户会一直点
         raise HTTPException(409, "另一个任务正在运行,请稍后再试")
     return JSONResponse(out)
+
+
+from .settings import router as settings_router
+from .access import router as access_router
+from ..settings import SettingsError
+
+
+@app.exception_handler(SettingsError)
+async def settings_error(request: Request, error: SettingsError):
+    return JSONResponse({"detail": str(error), "field": error.field}, status_code=error.status)
+
+app.include_router(settings_router)
+app.include_router(access_router)
 
 
 def _local_time(raw):

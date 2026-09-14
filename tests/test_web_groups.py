@@ -501,11 +501,14 @@ def test_当前组说明缺失时页面和查询都不回退到其他方向(both
 
 @pytest.mark.parametrize("slug", ["材料", "mat&chem", "mat+chem", "mat%26chem",
                                   "mat/chem?#", 'mat "chem"'])
-def test_合法特殊slug在保存切换Cookie导航和反馈中保持身份(both_client, slug):
+def test_合法特殊slug在保存切换Cookie导航和反馈中保持身份(both_client, slug, monkeypatch):
     c, cfg, iid, ids = both_client
+    monkeypatch.setenv('LITRADAR_TOKEN','legacy-test-token')
+    c.headers['X-Token']='legacy-test-token'
     cfg.interests_data["groups"].append({"slug": slug, "name": "特殊方向"})
     raw = yaml.safe_dump(cfg.interests_data, allow_unicode=True)
-    saved = c.post("/interests", data={"raw": raw}, follow_redirects=False)
+    from litradar.settings import SettingsStore
+    saved = c.post("/interests", data={"raw": raw,'version':SettingsStore(cfg).version()}, follow_redirects=False)
     assert saved.status_code == 303
     cfg.interests_data = yaml.safe_load(cfg.interests_file.read_text(encoding="utf-8"))
     conn = db.Database(cfg.db_file).connect()
@@ -549,8 +552,10 @@ def test_未知Unicode组和损坏Cookie安全回退到实际组(both_client):
 @pytest.mark.parametrize("slug,needle", [("bad\nslug", "控制字符"),
                                         ("材" * 86, "256"),
                                         ("\ud800", "Unicode")])
-def test_无效slug在编辑页报错而不覆盖已有配置(both_client, slug, needle):
+def test_无效slug在编辑页报错而不覆盖已有配置(both_client, slug, needle, monkeypatch):
     c, cfg, iid, ids = both_client
+    monkeypatch.setenv('LITRADAR_TOKEN','legacy-test-token')
+    c.headers['X-Token']='legacy-test-token'
     before = yaml.safe_dump(cfg.interests_data)
     cfg.interests_file.write_text(before, encoding="utf-8")
     raw = yaml.safe_dump({"groups": [{"slug": slug, "name": "Bad group"}]})

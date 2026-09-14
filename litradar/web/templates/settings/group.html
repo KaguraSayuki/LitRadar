@@ -1,0 +1,47 @@
+{% extends "settings/layout.html" %}
+{% block heading %}{{ '编辑研究方向' if slug else '新增研究方向' }}{% endblock %}
+{% block settings_body %}
+<form method="post" class="settings-form" data-settings-form>
+<input type="hidden" name="version" value="{{ version }}">
+<section class="panel">
+  <label for="name">方向名称 <span class="hint">必填，例如“材料化学”</span></label>
+  <input id="name" name="name" value="{{ values.name }}" maxlength="100" required {% if errors.get('name') %}aria-invalid="true"{% endif %}>
+  <label for="direction">研究方向说明</label>
+  <textarea id="direction" name="direction" rows="3" placeholder="可以用中文描述研究问题和希望关注的进展">{{ values.direction }}</textarea>
+  <p><button class="btn" type="button" id="suggest-terms">建议英文关键词</button></p><p class="hint">可选：将这段方向说明发送给已接入的模型，可能产生少量费用。建议先供您检查，不会自动保存或启动更新。</p><div id="term-suggestions" role="status"></div>
+  <label class="check"><input type="checkbox" name="enabled" {{ 'checked' if values.enabled }}>参与更新</label>
+  <label class="check"><input type="checkbox" name="llm_rank" {{ 'checked' if values.llm_rank }}>使用 AI 精排（需要接入模型服务，按量计费）</label>
+</section>
+<section class="panel"><h2>文献筛选与关注对象</h2><p class="hint">每行填写一项，不需要额外标点。关键词可用英文术语；方向说明可以用中文。</p>
+{% macro preference(key, info) %}<div class="settings-field">
+<label for="{{ key }}">{{ info[0] }}</label><p class="hint" id="{{ key }}-help">{{ info[1] }}</p>
+<textarea id="{{ key }}" name="{{ key }}" rows="3" aria-describedby="{{ key }}-help" {% if errors.get(key) %}aria-invalid="true"{% endif %}>{{ values.get(key,'') }}</textarea>
+{% if errors.get(key) %}<p class="field-error">{{ errors[key] }}</p>{% endif %}
+</div>{% endmacro %}
+{% for key in ['keywords.core','negative','journals.core','seed_dois'] %}{{ preference(key,fields[key]) }}{% endfor %}
+<details><summary>更多偏好：加分词、研究难点、作者与标题筛选</summary>
+{% for key,info in fields.items() if key not in ['keywords.core','negative','journals.core','seed_dois'] %}{{ preference(key,info) }}{% endfor %}
+</details>
+<details><summary>期刊 ISSN（可选辅助信息）</summary><input type="hidden" name="issns_present" value="1"><p class="hint">用于匹配期刊；同一本期刊的多个编号用逗号分隔。</p><div id="issn-rows">{% for name,codes in entry.get('journals',{}).get('issn',{}).items() %}<div class="pair-row"><input name="issn_journal" aria-label="ISSN 对应期刊" value="{{ name }}"><input name="issn_values" aria-label="ISSN 编号" value="{{ codes|join(', ') }}"></div>{% endfor %}<div class="pair-row"><input name="issn_journal" aria-label="ISSN 对应期刊" placeholder="期刊名称"><input name="issn_values" aria-label="ISSN 编号" placeholder="1234-567X"></div></div><button class="btn" type="button" data-add-pair="issn-rows">增加期刊编号</button></details>
+</section>
+<section class="panel"><h2>检索条件</h2><p>每条条件分别检索，结果合并。每个输入框每行一个术语或短语，不需要填写运算符。</p>
+<p class="hint">Crossref 和 OpenAlex 按各自搜索规则匹配，可能返回只包含部分术语的文献；这两个来源的严格排除请使用上方“排除内容”。</p>
+<input type="hidden" name="queries_present" value="1">
+{% if opaque %}<div class="notice"><p>以下旧条件完整保留。可以继续修改其他设置；需要重建时，先添加新条件并预览，再勾选替换对应的旧条件。</p>
+{% for old in opaque %}<label class="check"><input type="checkbox" name="remove_query" value="{{ old.id }}" {{ 'checked' if old.id in removed_queries }}>移除 {{ old.label }} 的旧条件 {{ old.number }}（由下方新条件替换）</label>{% endfor %}</div>{% endif %}
+{% macro query_row(q={}) %}<fieldset class="query-row"><legend>一条检索条件</legend>
+<input type="hidden" name="query_original" value="{{ q.get('original','') }}">
+<label>检索来源<select name="query_source">{% for source,label in query_sources.items() %}<option value="{{ source }}" {{ 'selected' if q.get('source') == source }}>{{ label }}</option>{% endfor %}</select></label>
+{% for key,label in [('all','必须全部包含'),('any','其中任意一个即可'),('exclude','排除这些内容（Semantic Scholar）')] %}
+<label>{{ label }}<textarea name="query_{{ key }}" rows="2">{{ q.get(key,[])|join('\n') }}</textarea></label>{% endfor %}
+<button class="btn" type="button" data-remove-query>移除此条件</button></fieldset>{% endmacro %}
+<div id="query-rows">{% for q in queries %}{{ query_row(q) }}{% else %}{{ query_row() }}{% endfor %}</div>
+<template id="query-template">{{ query_row() }}</template>
+<p><button class="btn" type="button" id="add-query">添加另一条检索条件</button>
+<button class="btn" type="button" data-preview="{{ slug or '' }}">预览检索结果</button></p>
+<p class="hint">预览最多显示每条条件的少量论文，会请求所选数据服务；不会入库或调用 AI。保存和开始更新是独立操作。</p>
+<div id="query-preview" role="status" aria-live="polite"></div>
+</section>
+<div class="formbar"><button class="btn btn--primary">保存研究方向</button><a class="btn" href="/settings/groups">返回方向列表</a></div>
+</form>
+{% endblock %}

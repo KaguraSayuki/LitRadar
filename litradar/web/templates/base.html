@@ -5,7 +5,7 @@
   ('week',      '/week',      '本期精选', 'sparkles'),
   ('search',    '/search',    '检索',     'search'),
   ('stats',     '/stats',     '统计',     'chart'),
-  ('interests', '/interests', '检索词',   'sliders'),
+  ('settings',  '/settings',  '设置',     'sliders'),
 ] -%}
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -34,7 +34,7 @@
   {# 订阅组切换。只有一个组时不显示 —— 绝大多数人是单方向,不必给一个没有
      选择的选择器。链接整段替换查询串:换组就是换一套视图,带着旧筛选条件
      反而让人以为筛选还在生效。 #}
-  {% if groups and groups|length > 1 %}
+  {% if page != 'settings' and groups and groups|length > 1 %}
   <nav class="groupbar" aria-label="订阅组">
     {% for gr in groups %}
       <a href="?{{ {'g': gr.slug}|urlencode }}"

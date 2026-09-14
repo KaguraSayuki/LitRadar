@@ -1,0 +1,30 @@
+{% extends "settings/layout.html" %}
+{% block heading %}访问与维护{% endblock %}
+{% block settings_body %}
+<section class="panel"><h2>访问密码</h2><p>{{ password_source }}</p>
+{% if password_managed %}<form method="post" action="/settings/password" class="settings-form" data-settings-form>
+<input type="hidden" name="credential_version" value="{{ credential_version }}">
+<label for="current-password">当前密码</label><input id="current-password" type="password" name="current" required autocomplete="current-password">
+<label for="new-password">新密码（至少 8 位）</label><input id="new-password" type="password" name="password" minlength="8" maxlength="512" required autocomplete="new-password">
+<label for="confirm-password">再次输入新密码</label><input id="confirm-password" type="password" name="confirm" required autocomplete="new-password">
+<p><button class="btn">更换密码</button></p></form>{% endif %}
+<form method="post" action="/logout"><button class="btn">退出登录</button></form></section>
+<section class="panel"><details><summary>自动化接口口令（可选）</summary>
+<p>供已有脚本访问接口。网页使用访问密码登录即可。{{ '接口口令已设置' if token_state.configured else '接口口令未设置' }} · {{ token_state.source }}</p>
+{% if token_state.managed %}<form method="post" action="/settings/credentials/access" class="settings-form" data-settings-form>
+<input type="hidden" name="credential_version" value="{{ credential_version }}">
+<label for="access-token">新的接口口令</label><input id="access-token" name="secret" type="password" autocomplete="new-password" placeholder="留空保持原值">
+<p class="hint">请使用随机、足够长的口令，更换后需要同步更新已有脚本。</p>
+<p><button class="btn" name="action" value="save">保存接口口令</button> <button class="btn" name="action" value="clear" data-confirm="清除接口口令？已有脚本需要改为其他授权方式，网页访问密码仍然有效。">清除接口口令</button></p>
+</form>{% endif %}</details></section>
+<section class="panel"><h2>配置备份</h2><p>保留最近五份设置和研究方向备份。恢复前可以查看将恢复的范围；当前内容也会先备份。凭据不包含在这些备份中。</p>
+<p><a class="btn" href="/settings/export">导出普通设置</a></p>
+{% for kind,label in [('config','运行与阅读设置'),('interests','研究方向')] %}<h3>{{ label }}</h3>
+{% for backup in backups[kind] %}<form method="post" action="/settings/restore" data-settings-form>
+<input type="hidden" name="version" value="{{ version }}"><input type="hidden" name="kind" value="{{ kind }}"><input type="hidden" name="backup" value="{{ backup }}">
+<p>{{ backup }} <button class="btn" name="action" value="preview">查看恢复范围</button> <button class="btn" name="action" value="restore" data-confirm="恢复这份备份？当前内容会先备份。运行设置恢复后自动更新会暂停，需要另行开启。">恢复此备份</button></p>
+</form>{% else %}<p class="hint">尚无备份。</p>{% endfor %}{% endfor %}
+<p class="hint">恢复运行设置会保留当前访问凭据、监听参数和数据库位置，并暂停自动更新；保存后可检查设置再重新启用。</p></section>
+<section class="panel"><h2>实例信息</h2><dl class="kv"><dt>版本</dt><dd>{{ version_name }}</dd><dt>网页访问地址</dt><dd>{{ access_url }}</dd><dt>数据库</dt><dd>{{ db_path }}</dd><dt>研究方向文件</dt><dd>{{ interests_path }}</dd></dl>
+<details><summary>部署维护说明（交给代理）</summary><p>监听地址和端口由实际启动程序决定，访问地址可能经过反向代理。变更监听、证书或数据库位置时，需停止相关进程、备份数据、调整启动配置并重新启动验证。普通设置保存不会更改这些部署参数。</p><p>实例升级使用仓库中的部署与维护文档。保留数据库、邮件、普通设置和私有凭据文件；私有凭据应单独备份，限制访问权限。</p></details></section>
+{% endblock %}

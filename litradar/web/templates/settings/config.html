@@ -1,0 +1,41 @@
+{% extends "settings/layout.html" %}
+{% block heading %}{{ '数据与邮箱' if section == 'services' else 'AI 与阅读' }}{% endblock %}
+{% macro input_field(f) %}<div class="settings-field">
+{% if f.kind == 'bool' %}<label class="check"><input type="checkbox" name="{{ f.key }}" {{ 'checked' if values.get(f.key) }}>{{ f.label }}</label>
+{% else %}<label for="{{ f.key }}">{{ f.label }}</label>
+{% if f.kind == 'select' %}<select id="{{ f.key }}" name="{{ f.key }}">{% for value,label in f.choices %}<option value="{{ value }}" {{ 'selected' if values.get(f.key) == value }}>{{ label }}</option>{% endfor %}</select>
+{% elif f.kind == 'lines' %}<textarea id="{{ f.key }}" name="{{ f.key }}" rows="3">{{ values.get(f.key,'') }}</textarea>
+{% else %}<input id="{{ f.key }}" name="{{ f.key }}" value="{{ values.get(f.key,'') }}" type="{{ 'number' if f.kind in ('int','float') else (f.kind if f.kind in ('email','url','time') else 'text') }}" {% if f.kind in ('int','float') %}min="{{ f.low }}" max="{{ f.high }}" step="{{ 'any' if f.kind == 'float' else '1' }}" required{% endif %} {% if errors.get(f.key) %}aria-invalid="true"{% endif %}>
+{% endif %}{% endif %}
+{% if f.hint %}<p class="hint">{{ f.hint }}</p>{% endif %}
+{% if errors.get(f.key) %}<p class="field-error">{{ errors[f.key] }}</p>{% endif %}
+</div>{% endmacro %}
+{% block settings_body %}
+{% if section == 'services' %}
+<div class="panel"><h2>接入服务</h2><p>API 密钥和邮箱授权码分别保存。空白表示保持原值；清除使用独立按钮。页面不会显示已保存的密钥。</p>
+{% for service,info in service_states.items() %}<article class="credential-card"><h3>{{ info.label }} <small>{{ '已设置' if info.configured else '未设置' }}</small></h3>
+<p class="hint">{{ info.source }}</p>
+<form method="post" action="/settings/credentials/{{ service }}" class="settings-form" data-settings-form>
+<input type="hidden" name="credential_version" value="{{ credential_version }}">
+{% if info.managed %}<label for="credential-{{ service }}">{{ '新的授权码' if service == 'mail' else '新的 API 密钥' }}</label><input type="password" id="credential-{{ service }}" name="secret" autocomplete="new-password" placeholder="留空保持原值">
+<p><button class="btn" name="action" value="save">保存凭据</button> <button class="btn" name="action" value="clear" data-confirm="清除这个服务的凭据？下次调用将无法使用此服务。">清除凭据</button></p>{% endif %}
+</form>
+<button class="btn" type="button" data-check-service="{{ service }}">测试已保存的连接</button><p class="hint">{{ '会发送一条简短模型消息，可能产生少量费用。' if service == 'llm' else ('只读检查，不标记已读、不移动或删除邮件。' if service == 'mail' else '使用一次数据服务请求，不采集文献。') }}</p><p id="check-{{ service }}" role="status"></p>
+</article>{% endfor %}
+</div>
+{% endif %}
+<form method="post" class="settings-form" data-settings-form>
+<input type="hidden" name="version" value="{{ version }}">
+<section class="panel"><h2>{{ '来源与邮箱' if section == 'services' else '排序与阅读' }}</h2>
+{% for f in fields if not f.advanced %}{{ input_field(f) }}{% endfor %}
+{% if section == 'services' %}
+<label for="mail-sender">只收取此发件人的邮件</label><input id="mail-sender" name="mail_sender" value="{{ mail_sender }}" placeholder="newsletter.x-mol.com">
+<p class="hint">填写发件邮箱或域名，留空则不按发件人筛选。</p>
+{% if legacy_mail %}<label class="check"><input type="checkbox" name="replace_mail_filter" {{ 'checked' if replace_mail_filter }}>用上面的发件人条件替换旧邮件条件</label><p class="hint">旧条件无法完整转换，默认继续保留；更改账号和服务器不受影响。</p>{% else %}<input type="hidden" name="replace_mail_filter" value="on">{% endif %}
+{% endif %}
+{% if section == 'reading' %}{% include 'settings/journals.html' %}{% endif %}
+<details {% if errors %}open{% endif %}><summary>高级设置</summary>{% for f in fields if f.advanced %}{{ input_field(f) }}{% endfor %}</details>
+</section><div class="formbar"><button class="btn btn--primary">保存设置</button><a class="btn" href="/settings/groups/new">继续：添加研究方向</a></div>
+</form>
+{% if section == 'services' %}<section class="panel"><h2>导入订阅邮件</h2><form method="post" action="/settings/mail/import" enctype="multipart/form-data" data-settings-form><label for="mail-files">选择邮件文件（.eml，每封最多 5 MB，每次最多 20 封）</label><input id="mail-files" type="file" name="files" accept=".eml,message/rfc822" multiple required><p><button class="btn">上传邮件</button></p></form><p class="hint">文件进入应用收件目录；下次更新才会解析。请选择上方“上传邮件文件”模式，并启用邮件采集。</p></section>{% endif %}
+{% endblock %}
