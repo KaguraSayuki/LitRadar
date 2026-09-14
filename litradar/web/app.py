@@ -6,6 +6,7 @@ import hmac
 import os
 import re
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote
@@ -17,7 +18,7 @@ from fastapi.templating import Jinja2Templates
 from markupsafe import Markup
 from starlette.datastructures import QueryParams, URL
 
-from .. import credentials, db, journal_rank, pipeline, rank, summarize
+from .. import credentials, db, execution, journal_rank, pipeline, rank, summarize
 from ..config import Config, load_config
 from ..lock import AlreadyRunning, single_instance
 from ..normalize import days_ago
@@ -192,17 +193,6 @@ def require_same_origin(request: Request) -> None:
         raise HTTPException(403, "跨源请求被拒绝")
 
 
-# 阶段名 → run_log 里记的名字。"all" 展开成它实际会跑的每个阶段,这样
-# "先点 rank 再点 all" 也会被冷却拦住(它确实会再跑一次 rank 花钱)。
-_STAGE_LOG_NAMES: dict[str, tuple[str, ...]] = {
-    "mail": ("ingest_mail",),
-    "search": ("ingest_search",),
-    "enrich": ("enrich",),
-    "rank": ("rank",),
-    "summarize": ("summarize",),
-    "all": ("ingest_mail", "ingest_search", "enrich", "rank", "summarize"),
-}
-
 # 前端靠它区分"该弹密码框"与"口令(URL token)不对" —— 两者都是 401。
 ADMIN_PASSWORD_HEADER = "X-Admin-Password"
 ADMIN_PASSWORD_REQUIRED_HEADER = "X-Admin-Password-Required"
@@ -244,59 +234,12 @@ def require_admin_password(request: Request, cfg: Config) -> None:
 
 def require_stage_limits(cfg: Config, stage: str,
                          group_slug: str | None = None) -> None:
-    """冷却 + 每日上限。账本用 run_log,所以 CLI 与定时任务跑的也计入。
-
-    口令解决不了"点多少次":误点、写错的循环脚本、泄露的凭据都能反复花钱。
-    这里把单日损失封顶。
-    """
-    limits = cfg.admin
-    if not limits.cooldown_seconds and not limits.daily_limit:
-        return
-    names = _STAGE_LOG_NAMES.get(stage, (stage,))
-    conn = db.Database(cfg.db_file).connect()
+    """Translate the shared execution policy into an HTTP response."""
     try:
-        rows = db.recent_stage_runs(conn, names, group_slug=group_slug)
-    finally:
-        conn.close()
-
-    now = datetime.now(timezone.utc).astimezone()
-    today = now.date()
-    times = []
-    per_stage: dict[str, int] = {}
-    for name, raw in rows:
-        try:
-            when = datetime.fromisoformat(raw)
-        except (TypeError, ValueError):
-            continue          # 历史脏数据不该让闸门失效或 500
-        times.append(when)
-        if when.astimezone().date() == today:
-            per_stage[name] = per_stage.get(name, 0) + 1
-    if not times:
-        return
-
-    if limits.cooldown_seconds:
-        last = max(times)
-        waited = (now - last).total_seconds()
-        if waited < limits.cooldown_seconds:
-            retry = int(limits.cooldown_seconds - waited) + 1
-            raise HTTPException(
-                429,
-                f"「{stage}」刚跑过,还要等 {retry} 秒(admin.cooldown_seconds="
-                f"{limits.cooldown_seconds})",
-                headers={"Retry-After": str(retry)},
-            )
-
-    if limits.daily_limit and per_stage:
-        # ``all`` 会记下 5 个子阶段各一行,所以这里取**单个子阶段的最大次数**,
-        # 不能求和 —— 求和的话跑一次 all 就变成 5 次,第二次就被自己拦下了。
-        busiest, count = max(per_stage.items(), key=lambda kv: kv[1])
-        if count >= limits.daily_limit:
-            raise HTTPException(
-                429,
-                f"「{stage}」今天已经跑了 {count} 次(阶段 {busiest}),达到上限 "
-                f"admin.daily_limit={limits.daily_limit};"
-                " 要再跑请调大该值,或等明天",
-            )
+        execution.check_limits(cfg, stage, group_slug)
+    except execution.ExecutionLimit as error:
+        headers = {"Retry-After": str(error.retry)} if error.retry else None
+        raise HTTPException(429, str(error), headers=headers) from None
 
 
 
@@ -389,7 +332,7 @@ def ctx(request: Request, **kw) -> dict:
     ranking = _ranking_status(cfg, group)
     base = {
         "request": request,
-        "today": date.today().isoformat(),
+        "today": datetime.now(ZoneInfo(cfg.app.timezone)).date().isoformat(),
         "groups": ui_groups(cfg),
         "group": group,
         "group_slug": group.slug if group else None,
@@ -824,9 +767,8 @@ def admin_run(request: Request, stage: str, days: int = 0):
     # 点了一下"会算到所有组头上,上限自然就不准了。
     prof = active_group(request, cfg, require_known=True)
     gslug = prof.slug if prof else None
-    if stage in cfg.admin.guarded_stages:
+    if execution.guarded(cfg, stage):
         require_admin_password(request, cfg)
-        require_stage_limits(cfg, stage, gslug)
     # days=0 表示"用配置里的统一窗口"。之前这里默认 30,而抓取窗口是 180+,
     # 导致网页点"排序"只覆盖最近一个月,更早的条目永远是"未评分"。
     if days <= 0:
@@ -836,6 +778,8 @@ def admin_run(request: Request, stage: str, days: int = 0):
     # "批量全部返回空"。双击按钮同理,会并发跑两份。
     try:
         with single_instance(cfg.db_file.parent / "litradar.lock"), credentials.snapshot(cfg):
+            if execution.guarded(cfg, stage):
+                require_stage_limits(cfg, stage, gslug)
             # mail 与 enrich 是全局的(不按方向跑),不受当前组影响
             if stage == "mail":
                 out = pipeline.ingest_mail(cfg)
@@ -856,3 +800,16 @@ def admin_run(request: Request, stage: str, days: int = 0):
         # CLI 那边跳过就完了;网页上必须把"没跑"说清楚,否则用户会一直点
         raise HTTPException(409, "另一个任务正在运行,请稍后再试")
     return JSONResponse(out)
+
+
+def _local_time(raw):
+    try:
+        value = datetime.fromisoformat(raw)
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(ZoneInfo(get_cfg().app.timezone)).strftime('%Y-%m-%d %H:%M')
+    except (ValueError,TypeError):
+        return raw or '—'
+
+
+templates.env.filters['local_time'] = _local_time

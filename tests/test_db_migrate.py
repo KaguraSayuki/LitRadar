@@ -435,3 +435,23 @@ def test_v6已知方向升级后仍能检测方向变化(tmp_path):
     db.sync_groups(conn, load_groups(cfg))
     assert db.get_items(conn, group_slug="default")[0]["relevance"] is None
     conn.close()
+
+
+def test_v7_adds_scheduler_tables_without_changing_papers(tmp_path):
+    path = tmp_path / 'scheduler-migration.db'
+    conn = db.Database(path).connect()
+    db.upsert_item(conn, {'kind': 'paper', 'source': 'manual',
+                         'dedup_key': 'doi:10.1/keep', 'doi': '10.1/keep',
+                         'title': 'Keep this paper', 'title_norm': 'keep this paper'})
+    conn.execute('DROP TABLE scheduled_run')
+    conn.execute('DROP TABLE scheduler_worker')
+    conn.execute('PRAGMA user_version=7')
+    conn.commit()
+    db.Database._migrate(conn)
+    assert conn.execute('PRAGMA user_version').fetchone()[0] == db.SCHEMA_VERSION
+    assert conn.execute('SELECT title FROM item').fetchone()[0] == 'Keep this paper'
+    conn.execute("INSERT INTO scheduled_run(slot,scheduled_at,started_at,status) VALUES('2026-09-14','time','time','ok')")
+    db.Database._migrate(conn)
+    assert conn.execute('SELECT COUNT(*) FROM scheduled_run').fetchone()[0] == 1
+    assert conn.execute('SELECT COUNT(*) FROM scheduler_worker').fetchone()[0] == 0
+    conn.close()

@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import credentials, db, enrich, pipeline, rank, summarize
+from . import credentials, db, enrich, execution, pipeline, rank, summarize
 from .config import load_config, read_secret
 from .lock import AlreadyRunning, single_instance
 from .sources import easyscholar, mail, xmol_email
@@ -218,8 +218,6 @@ def _journal_rank_line(cfg) -> tuple[str, str, str]:
         return OK, f"{env_name} 已设置", "查询结果会缓存进 journal_rank 表"
     return (WARN, f"{env_name} 未设置",
             "影响因子/中科院分区不会显示;不配也能正常跑,只是缺这些标签")
-
-
 
 
 def cmd_admin_password(cfg, args):
@@ -509,12 +507,61 @@ def cmd_check(cfg, args):
 DAYS_HELP = "时间窗(天)。不传则取 config 的 app.pipeline_window_days"
 
 
+
+
+def cmd_scheduler(cfg, args):
+    from .scheduler import serve
+    serve(cfg.config_file)
+    return 0
+
+
+def cmd_schedule_handoff(cfg, args):
+    from .settings import SettingsStore
+    if not args.external_timers_stopped:
+        raise ValueError("请先停用此实例的 systemd、launchd 或 Windows 定时任务，确认后使用 --external-timers-stopped。")
+    store = SettingsStore(cfg)
+    store.update_config({'schedule.owner': 'application', 'schedule.handoff_confirmed': True,
+                         'schedule.enabled': False}, store.version())
+    print("已确认由应用管理调度。请在网页选择时间并开启自动更新。")
+    return 0
+
+
+def cmd_serve(cfg, args):
+    import multiprocessing
+    import uvicorn
+    from .scheduler import serve
+    context = multiprocessing.get_context('spawn')
+    stop = context.Event()
+    worker = context.Process(target=serve, args=(str(cfg.config_file), stop), daemon=True)
+    if cfg.config_file:
+        os.environ['LITRADAR_CONFIG'] = str(cfg.config_file)
+    worker.start()
+    try:
+        uvicorn.run('litradar.web.app:app', host=args.host or cfg.app.host,
+                    port=args.port or cfg.app.port)
+    finally:
+        stop.set()
+        worker.join(timeout=10)
+        if worker.is_alive():
+            worker.terminate()
+            worker.join(timeout=5)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="litradar", description="个人化学文献雷达")
     p.add_argument("-c", "--config", default=None, help="config.yaml 路径")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("init-db", help="初始化数据库").set_defaults(func=cmd_init_db)
+    sub.add_parser('scheduler', help='运行独立的自动更新进程').set_defaults(func=cmd_scheduler)
+    sp = sub.add_parser('schedule-handoff', help='确认已停用外部定时任务，由应用接管调度')
+    sp.add_argument('--external-timers-stopped', action='store_true')
+    sp.set_defaults(func=cmd_schedule_handoff)
+    sp = sub.add_parser('serve', help='启动网页和独立的自动更新进程')
+    sp.add_argument('--host', default=None)
+    sp.add_argument('--port', type=int, default=None)
+    sp.set_defaults(func=cmd_serve)
 
     sp = sub.add_parser("parse", help="只解析邮件(校准解析器用)")
     sp.set_defaults(func=cmd_parse)
@@ -588,6 +635,16 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if guarded:
             with single_instance(_lock_path(cfg)), credentials.snapshot(cfg):
+                stage = {"run": "all", "ingest": "search"}.get(args.cmd, args.cmd)
+                groups = ([_pick_group(cfg, args.group)] if getattr(args, 'group', None)
+                          else [g for g in rank.load_groups(cfg) if g.enabled])
+                if args.cmd == "ingest":
+                    if args.what in ("mail", "all"):
+                        execution.check_limits(cfg, "mail")
+                    if args.what in ("search", "all"):
+                        execution.check_groups(cfg, "search", groups)
+                else:
+                    execution.check_groups(cfg, stage, groups)
                 return args.func(cfg, args)
         with credentials.snapshot(cfg):
             return args.func(cfg, args)
