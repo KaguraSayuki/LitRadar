@@ -1,64 +1,86 @@
-# Semantic Scholar API Key 申请表 —— 草稿
+# Semantic Scholar API Key 申请参考
 
-> 三个必填项的英文草稿。数字按当前实际实现估算,如果你觉得偏差大可以自行调整。
-> 项目地址/仓库可填你的本地路径或写 "personal, not published"。
+以下英文草稿按 LitRadar 当前代码的用途整理，适用于个人、自托管的文献追踪场景。
+提交前请核对实际用途，并替换方括号中的用量占位符。本文不代表已提交的申请，也不
+预设账号获批后的额度。
 
----
+项目地址可填写 [LitRadar 仓库](https://github.com/KaguraSayuki/LitRadar)。下文的端点和
+请求行为对应 [Semantic Scholar 客户端](../litradar/sources/semanticscholar.py)、
+[采集流程](../litradar/pipeline.py) 和 [元数据补全流程](../litradar/enrich.py)。
 
-## 1. How do you plan to use Semantic Scholar API in your project? (50 words or more)
+## 1. How do you plan to use Semantic Scholar API in your project?
 
-I am building a personal, single-user literature-alerting tool for my own chemistry
-research (an organic synthetic-methodology topic; the specific field is not relevant
-to this request, only that it relies on journal metadata rather than full text). The pipeline collects new papers from Crossref keyword queries and
-my own X-MOL subscription e-mails, de-duplicates them by DOI, then uses Semantic
-Scholar to fill in the **abstract** and citation count. This matters because Crossref
-frequently omits abstracts for ACS journals (JACS, Org. Lett., J. Org. Chem.), so
-Semantic Scholar is the primary source for that field. Records are then ranked and
-summarised locally.
+I use LitRadar, a self-hosted, single-user literature monitoring tool, to support my
+chemistry research. The application combines my X-MOL subscription emails with
+academic metadata APIs and deduplicates papers by DOI in a local SQLite database.
 
-I use `POST /graph/v1/paper/batch` as the primary endpoint, passing DOIs in chunks of
-100, with `GET /graph/v1/paper/DOI:{doi}` only as a single-record fallback. Requested
-fields: `title, abstract, tldr, citationCount, venue, year, publicationDate,
-externalIds, openAccessPdf`.
+Semantic Scholar serves three purposes: discovering papers through Boolean queries,
+following papers that cite selected seed publications, and enriching records with
+abstracts, citation counts, and open-access links. I can configure several research
+directions, each with its own queries and seed papers, while sharing the underlying
+paper records.
 
-There is exactly one user — me. Volume is small: roughly 50–150 new papers per day, so
-**1–2 batch requests per day in steady state**. To stay efficient I batch aggressively,
-cache every result locally in SQLite so a DOI is never requested twice, issue requests
-strictly sequentially with **no concurrency**, and back off on HTTP 429. I never fetch
-paper text or PDFs, only metadata and abstracts.
+The application requests bibliographic metadata and abstracts. It does not download
+PDFs or full-text articles. Results are stored in my self-hosted database and viewed
+through a personal web interface. When I enable the LLM features, selected titles,
+abstracts, and research preferences are sent to a configured external model API for
+relevance ranking and Chinese summaries; this is inference, not model training.
 
----
+To limit requests, the application batches DOI enrichment in groups of 100, reuses
+stored metadata, limits search pages, and refreshes a bounded number of seed papers
+per run. Requests within a pipeline run are sequential, with configurable spacing
+and backoff for rate-limited responses. Records with missing abstracts may be retried,
+so caching reduces repeated requests but does not eliminate them entirely.
 
 ## 2. Which endpoints do you plan to use?
 
-```
-POST /graph/v1/paper/batch          (primary — up to 100 DOIs per request)
-GET  /graph/v1/paper/DOI:{doi}      (single-record fallback only)
-```
+| Endpoint | Use in LitRadar |
+|---|---|
+| `GET /graph/v1/paper/search/bulk` | Boolean queries for each research direction, with year filters and bounded pagination |
+| `GET /graph/v1/paper/{paper_id}/citations` | Forward citation discovery from seed papers; the client can supply a DOI reference |
+| `POST /graph/v1/paper/batch` | Shared DOI enrichment, using batches of 100 records |
+| `GET /graph/v1/paper/DOI:{doi}` | Diagnostic single-paper requests; a single-paper client helper is also available |
 
-I do **not** plan to use `/paper/search` or any bulk-dump endpoint — discovery is
-handled by Crossref, and Semantic Scholar is used purely for per-DOI enrichment.
-
----
+Requested fields depend on the endpoint and include titles, abstracts, citation
+counts, venues, publication dates, external identifiers, and open-access links.
+Supported requests also include authors and TLDR metadata. The bulk search client
+uses a separate field list and does not request TLDR. LitRadar does not use the
+dataset download endpoints.
 
 ## 3. How many requests per day do you anticipate using?
 
+```text
+Expected daily usage: [replace with your estimate] requests per day
+Initial backfill:    [replace with your estimate] requests in total
+Scheduled runs:      [replace with your planned frequency]
 ```
-Steady state : 1–2 requests/day   (one batch of 100 DOIs covers a whole day's intake)
-Typical busy : 3–5 requests/day   (re-enriching records that arrived without abstracts)
-Peak         : ~30–50 requests    (one-off initial backfill of an existing library)
+
+The estimate includes discovery queries, citation pages, DOI enrichment, diagnostics,
+and retries. The current default pipeline interval is five seconds between Semantic
+Scholar requests. I will adjust the configuration and workload to the limits granted
+to my account. Initial backfills or manual reruns may temporarily increase daily use.
+
+## 用量估算方法
+
+不要直接沿用早期“每日 1–2 次请求”的估算：那只覆盖少量 DOI 补全，没有计入目前的
+检索、被引追踪、多组运行和重试。
+
+可按每轮运行估算，再乘以每日运行次数：
+
+```text
+每轮请求数 ≈ 各组检索所需页数之和
+           + 各组本轮种子被引记录所需页数之和
+           + 向上取整（全局待补全 DOI 数 / 100）
+           + 诊断与重试请求
 ```
 
-Requests are issued **sequentially with a delay between them**, so the sustained rate
-stays below **1 request/second** and usually far below it. Because results are cached
-locally and only uncached DOIs are ever requested, the request count scales with *new*
-literature, not with total library size.
+例如，假设启用 2 个组，每组执行 4 条检索式、每条 1 页，刷新 5 个种子、每个 1 页，
+另有 150 个待补全 DOI，则每轮约为 `2 × 4 + 2 × 5 + 2 = 20` 次请求，尚未计入
+诊断与重试。这只是演示计算方法，不是实际使用记录。
 
----
+估算时核对 `s2_queries`、`s2_venue_queries`、`s2_search_max_pages`、
+`snowball_seeds_per_run`、`snowball_per_seed` 和定时频率。初次补全与手动重跑应单独
+留出余量；请求间隔配置不等同于每日配额。
 
-## 备注
-
-- 如果你的实际用量预计更大(比如打算导入上千篇历史文献),把 Peak 那行改成
-  `~100–200 requests (one-off backfill)`,并说明是一次性的。
-- 表单里若问 "institutional or personal",选 **personal / academic research**。
-- 如果问是否商用:否,纯个人科研自用,不对外提供服务、不二次分发数据。
+若表单询问机构、商业用途或数据使用范围，请按自己的真实情况填写。申请通过后，将
+密钥写入 `.env` 的 `S2_API_KEY`，不要提交到版本库。

@@ -1,154 +1,146 @@
-# ============================================================================
-# LitRadar 配置示例 —— 复制成 config.yaml 后按需修改
-# 密钥一律不写在这里,只放环境变量名,真实值写进 .env
-# ============================================================================
+# LitRadar 运行配置示例
+# 复制为 config.yaml 后按本机环境调整；密钥填写在 .env 中。
+# 使用说明：README.md；部署说明：docs/deployment.md。
 
+# 应用与路径。相对路径基于项目根目录解析。
 app:
-  host: "127.0.0.1"               # 由 nginx 前置反代;见 deploy/litradar-nginx.conf
+  # 与 Uvicorn 的 --host 保持一致；本字段本身不会改变服务器监听地址。
+  # 局域网访问建议使用 HTTPS 反向代理，并设置接口口令。
+  host: "127.0.0.1"
   port: 8090
   db_path: "./data/litradar.db"
   timezone: "Asia/Shanghai"
-  # 没有账号体系。绑非回环地址时**必须**设 LITRADAR_TOKEN,否则 /admin/run/*
-  # 会直接拒绝手动触发(fail closed),避免同网段任何人烧掉你的 DeepSeek 额度。
+  # 接口口令的环境变量名。非回环地址且未设口令时，网页拒绝手动运行流水线。
   token_env: "LITRADAR_TOKEN"
-  # 花钱阶段的额外密码哈希(PBKDF2)。用 `litradar admin-password` 生成写入 .env。
+  # 管理员密码哈希的环境变量名，由 litradar admin-password 设置。
   admin_password_env: "LITRADAR_ADMIN_PASSWORD_HASH"
-  interests: "./interests.yaml"   # 你的检索词与偏好
+  # 研究方向、检索式及订阅组配置文件。
+  interests: "./interests.yaml"
 
-  # 流水线时间窗(天)。**必须 ≥ 抓取窗口**(sources.s2_search_lookback_days),
-  # 否则抓回来的文献进了库却落在排序窗口之外,永远拿不到分数。
-  # 定时任务、命令行 --days、网页上的"排序/摘要"按钮都默认用它。
+  # 排序与摘要默认处理的时间窗，CLI、定时任务和网页按钮共用。
+  # 建议不小于 sources.s2_search_lookback_days，避免新采集条目落在排序范围外。
   pipeline_window_days: 200
 
-# ── 花钱阶段的护栏 ──────────────────────────────────────────────────────────
-# 口令只解决"谁能点",解决不了"点多少次":误点、写错循环的脚本、泄露的凭据
-# 都能反复花钱。这里再加冷却与每日上限,把单日损失封顶。
-# 账本用 run_log,所以命令行与定时任务跑的**同样计入** —— 上限约束的是
-# "这一天这个阶段一共跑了几次",而不是"网页上点了几次"。
+# 网页手动运行的密码与频率检查。CLI 和定时任务的记录计入检查，
+# 但它们自身不受 Web 入口的限制拦截，因此这不是全系统的费用硬上限。
+# 多组分别计数；邮件与元数据补全的全局记录计入每个组。
 admin:
-  guarded_stages: [rank, summarize, all]   # 要密码、并受下面两项约束的阶段
-  cooldown_seconds: 60                     # 同一阶段两次运行的最小间隔;0 = 不限制
-  daily_limit: 3                           # 同一阶段每天最多跑几次;0 = 不限制
+  # 需要额外验证管理员密码、检查频率的网页阶段。未设置密码时跳过密码检查。
+  guarded_stages: [rank, summarize, all]
+  # 同一阶段的最小运行间隔，单位为秒；0 表示关闭此项检查。
+  cooldown_seconds: 60
+  # 同一阶段的每日运行次数上限；0 表示关闭此项检查。
+  daily_limit: 3
 
+# LLM 精排与摘要。各组的 llm_rank 只控制精排，摘要使用全局开关。
 llm:
   provider: deepseek
   base_url: "https://api.deepseek.com"
-  model: "deepseek-chat"          # 精排与摘要都用 V3,性价比最高
+  # 调用的模型名称，费用及可用性以服务提供方为准。
+  model: "deepseek-chat"
   api_key_env: "DEEPSEEK_API_KEY"
-  temperature: 0.2                # 打分要稳定,低温
-  rerank_batch_size: 20           # listwise 每批条数
-  rerank_top_k: 0                 # 0 = 窗口内每条都过 LLM(推荐);>0 才截断
-  deep_summary_top_n: 8           # 前 N 名做深度摘要,其余一句话
+  temperature: 0.2
+  # 每批参与 LLM 精排的条目数。
+  rerank_batch_size: 20
+  # 0 表示不在 BM25 后截断候选；大于 0 时按粗排限制候选范围。
+  rerank_top_k: 0
+  # 每组排名前 N 的候选生成深度摘要；其余生成简要摘要。
+  deep_summary_top_n: 8
   timeout: 120
   enabled: true
 
-# ── 邮件接入 ────────────────────────────────────────────────────────────────
-# 注意:Outlook 个人账号已禁用密码登录(IMAP 返回 LOGINDISABLED),
-#       所以走「Outlook 转发到 Gmail/QQ + 应用专用密码」这条路。
+# 邮件接入。当前 IMAP 支持密码或授权码登录，未实现 OAuth2。
+# 请使用邮箱服务商提供的服务器地址和凭据；连接会校验证书与主机名。
 mail:
-  mode: "folder"                  # folder | maildir | imap
-  folder: "./data/inbox"          # folder/maildir 模式读取目录
+  # folder：本地 .eml；maildir：标准 Maildir；imap：远程邮箱。
+  mode: "folder"
+  folder: "./data/inbox"
+  # folder 模式处理成功后的归档目录。
   move_processed_to: "./data/inbox/processed"
 
-  # mode=imap 时使用(Gmail / QQ / 163)
-  # ⚠️ 这台机器上 imap.gmail.com 不通(DNS 被透明代理拦到 198.18.x.x,
-  #    SSL 握手 EOF)。实测可用:imap.qq.com / imap.163.com / imap.126.com /
-  #    imap.feishu.cn / imap.exmail.qq.com。
-  imap_host: "imap.qq.com"     # Gmail: imap.gmail.com ; QQ: imap.qq.com
+  imap_host: "imap.qq.com"
   imap_port: 993
-  imap_user: ""                   # 你的转发目标邮箱
-  imap_password_env: "IMAP_PASSWORD"   # 应用专用密码,写进 .env
+  # IMAP 账号，通常为接收订阅邮件的邮箱地址。
+  imap_user: ""
+  # 密码或授权码的环境变量名，实际值填写在 .env。
+  imap_password_env: "IMAP_PASSWORD"
   imap_folder: "INBOX"
   imap_search: 'FROM "newsletter.x-mol.com"'
-  # true:每封处理成功的邮件会被标成已读,之后每轮只拉 UNSEEN 的
-  #       —— 流量不再随邮箱里积攒的历史邮件增长(推荐)。
-  # false:不动已读标记,于是每轮都得按 imap_search 全量拉一遍正文,
-  #        再靠 message_id 去重丢掉 —— 邮箱越大越慢。
+  # true：只采集未读邮件，成功入库后标为已读。
+  # false：只读访问，每轮读取匹配邮件后按 Message-ID 去重。
   imap_mark_seen: true
 
-# ── 数据源 ──────────────────────────────────────────────────────────────────
-# 分工是实测得出的:Crossref 负责检索,Semantic Scholar 负责补摘要,
-# OpenAlex 因 2026 年改为额度制而降级为可选。
+# 数据源开关及请求范围。元数据补全与检索分别配置。
 sources:
-  xmol_enabled: true              # X-MOL 订阅邮件:高精度精选(通常每次 2 条)
+  # 关闭后跳过邮件采集和历史原文重放；不影响显式诊断命令。
+  xmol_enabled: true
 
-  crossref_enabled: true          # 富化用:元数据最权威(期刊全称/ISSN/作者)
-  # 检索发现:实测收藏率 0%(41 条打分里 0 条被收藏),默认关闭。
-  # 想开回来设 true —— 召回高但噪声大,靠 LLM 精排兜底。
+  # Crossref 元数据补全，用于期刊、ISSN、作者等信息。
+  crossref_enabled: true
+  # 可选关键词检索，使用 interests.yaml 的 search_queries。
   crossref_search_enabled: false
   crossref_lookback_days: 14
   crossref_rows: 100
 
-  s2_enabled: true                # Semantic Scholar:摘要主力,实测 ACS 论文 4/4 都有
-  # ⚠️ 官方限流是 1 请求/秒(跨所有端点),且**有 Key 也只是独立配额,
-  #    不是更高速率**。这里默认 5s/请求更稳;batch 端点一次吃 100 个 DOI,
-  #    169 篇文献总共只需 2 次请求,放慢几乎不增加耗时。
+  # Semantic Scholar 按 DOI 补全摘要等信息，可尝试匿名请求。
+  s2_enabled: true
+  # 流水线中 Semantic Scholar 请求的最小间隔，单位为秒。
+  # 各端点共享调用间隔；请求仍可能触发限流，请按获批额度调整。
   s2_min_interval: 5.0
-  # S2 bulk 检索:精确 AND 查询,与 Crossref 模糊匹配互补
+  # 布尔检索使用 s2_queries；本项目要求配置 S2_API_KEY。
   s2_search_enabled: true
-  s2_search_year: ""              # 显式指定则优先于 lookback,如 "2024-2026"
-  # bulk 端点只有 year 粒度,没有日期。留空则按下面这个 lookback 自动推算年份区间。
-  # ⚠️ 不设的话会拉回 1981 年至今的全部文献 —— 实测 121 篇里只有 1 篇在 60 天
-  #    窗口内,其余永远不参与排序,纯属死重量。
+  # 可显式指定年份范围，如 2024-2026；为空时由回溯天数推算。
+  s2_search_year: ""
+  # 获取结果后还会按具体日期做本地过滤。
   s2_search_lookback_days: 180
 
-  # ── 引用滚雪球(前向:顺着 seed_dois 往下滚) ──────────────────────────
-  # 种子写在 interests.yaml 的 seed_dois 里。做法见 pipeline._ingest_snowball。
+  # 追踪引用 seed_dois 中种子文献的论文，需要 S2_API_KEY。
   snowball_enabled: true
-  snowball_max_seeds: 25          # 总共用多少个种子
-  snowball_seeds_per_run: 5       # 每轮刷新几个(轮着来,躲 S2 突发限流)
-  snowball_min_cocitations: 1     # ≥N 个种子共同引用才收;1 = 全收
-  snowball_per_seed: 100          # 单个种子最多取多少条引用方
+  # 每组最多使用的种子数。
+  snowball_max_seeds: 25
+  # 每轮每组刷新的种子数，优先选择较久未查询的种子。
+  snowball_seeds_per_run: 5
+  # 候选论文至少引用的不同种子数；1 表示命中任一种子即可。
+  snowball_min_cocitations: 1
+  # 每个种子最多获取的被引记录数。
+  snowball_per_seed: 100
 
-  openalex_enabled: false         # ⚠️ 2026 年起 API Key + 额度制,未配 key 会
-                                  #    返回 "Insufficient budget"。配上再开。
+  # 可选 OpenAlex 检索；启用时需配置下面指定的环境变量。
+  openalex_enabled: false
   openalex_api_key_env: "OPENALEX_API_KEY"
   openalex_per_query: 60
   openalex_lookback_days: 14
 
-  mailto: ""                      # 填你的邮箱,进入 Crossref polite pool(建议填)
+  # 请求中提供的联系邮箱，可供 Crossref 等服务识别调用方。
+  mailto: ""
 
+# 默认侧重 LLM 的相关性判断；关键词与规则提供辅助分数。
 ranking:
-  # LLM 必须占主导:BM25 与规则只负责"召回",判断交给 LLM。
-  # 原 0.6/0.25/0.15 时,一篇 LLM 只给 35 分(理由写明"与研究方向不同")的论文
-  # 靠 BM25/规则的高分冲到了第 1 名 —— 聪明的信号被笨的信号淹没了。
   weights:
     llm: 0.85
     coarse: 0.10
     rule: 0.05
-  coarse_method: "bm25"           # DeepSeek 无 embedding API,故用 BM25
+  # 当前粗排实现使用 BM25。
+  coarse_method: "bm25"
 
-# ============================================================================
-# 期刊等级(影响因子 / 中科院分区 / 北核 …) —— easyScholar 开放接口
-# ----------------------------------------------------------------------------
-# 影响因子和分区是付费专有数据(Clarivate JCR / 中科院文献情报中心),
-# Crossref 和 Semantic Scholar 都不提供。密钥申请:https://www.easyscholar.cc
-# 拿到后写进 .env:  EASYSCHOLAR_SECRET_KEY=xxxx
-#
-# 接口按【刊名】查询且按次计额,所以结果会缓存进 journal_rank 表 ——
-# 全库几十本刊查一遍就够,之后不再消耗额度。
-# ============================================================================
+# 可选期刊等级展示，密钥填写在 .env 的 EASYSCHOLAR_SECRET_KEY。
+# 查询按归一化刊名缓存；明确无结果也缓存，接口错误保留重试机会。
 journal_rank:
   enabled: true
   api_key_env: "EASYSCHOLAR_SECRET_KEY"
-  max_lookups: 40                 # 单次富化最多查几本新刊
+  # 单次元数据补全最多查询的新刊数。
+  max_lookups: 40
 
-  # 只展示这些字段。接口一口气返回十几个体系(含各高校自己的分级),
-  # 全铺在卡片上会把真正重要的信息淹掉。
+  # 卡片展示的字段。删除字段可隐藏该项。
   fields: [sciwarn, sci, sciUp, sciif, pku, cssci]
 
-  # 刊名别名:来源给的短名/罗马字名 → easyScholar 认的全名。
-  # "Youji huaxue" 是 S2 对《有机化学》的罗马字写法;
-  # "Angewandte Chemie" 在 S2 里通常指国际版(有 ISSN 时会先走 ISSN 兜底)。
+  # 来源刊名到查询刊名的别名，用于查询和缓存复用。
   aliases:
     "Youji huaxue": "Chinese Journal of Organic Chemistry"
     "Angewandte Chemie": "Angewandte Chemie International Edition"
 
-
-  # 压缩显示。两类规则各管各的:
-  #   · 普通键 —— 匹配【字段名】,决定标签叫什么(空字符串 = 不显示标签名,只显示值)
-  #   · /正则/  —— 匹配【值】,$1 是捕获组(化学1区 → 化1)
-  # 空标签 ≠ 隐藏字段:把某个字段整个去掉,请从上面的 fields 里删。
+  # 普通键重命名字段标签；/正则/ 键转换值，$1 引用捕获组。
+  # 空标签仍显示值；如需隐藏整项，请从 fields 删除。
   map:
     北大中文核心: 北核
     SCI: ""

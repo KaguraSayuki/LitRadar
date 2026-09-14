@@ -1,291 +1,207 @@
 # LitRadar 实现架构
 
-> 本文描述**当前代码**的组织方式、数据流与不变量,面向要读或改这份代码的人。
->
-> - 安装、配置、部署:见 [README](../README.md)
-> - 设计推演过程(与实现有出入,刻意保留原貌):见 [litradar-design.md](litradar-design.md)
->
-> 文中所有模块名、表名、路由、命令都以当前代码为准;不确定的地方请直接读代码,
-> 本文不复制字段默认值以免又一次漂移。
+本文面向阅读和修改代码的开发者，描述当前模块职责、数据流与关键约束。
+安装和日常操作见 [README](../README.md)，配置与使用多个研究方向见
+[订阅组配置](subscription-groups.md)，技术选择的背景见 [设计记录](litradar-design.md)。
 
----
+## 模块与入口
 
-## 1. 总览
+`pipeline.run_all()` 编排完整流水线，依次运行邮件采集、按组检索、全局元数据补全、
+按组排序和摘要。CLI 与 Web 也可单独调用各阶段。
 
-一条单向流水线,全部状态落在一张 SQLite 库里:
-
-```
-邮件 / 检索 API ──→ ingest ──→ enrich ──→ rank ──→ summarize ──→ Web
-                      │          │          │           │
-                    item 表    item_      score 表   summary 表
-                   (去重)   enrichment
-```
-
-`pipeline.run_all()` 是唯一的编排入口,顺序固定:
-
-| 顺序 | 阶段 | 入口 | 说明 |
-|---|---|---|---|
-| 1 | 采集 | `pipeline.ingest_mail` / `ingest_keyword_search` | 邮件与检索两条腿 |
-| 2 | 富化 | `enrich.run` | 补摘要、引用数、期刊等级 |
-| 3 | 排序 | `rank.run` | 三阶段漏斗,写 `score` |
-| 4 | 摘要 | `summarize.run` | 中文结构化摘要,写 `summary` |
-
-CLI 的 `litradar run` 就是跑这四步;每步也能单独跑(`ingest` / `enrich` / `rank` /
-`summarize`),用于调试或补跑。
-
-## 2. 目录与模块
-
-```
-litradar/
-├── config.py        配置加载。数据类分层 + 密钥统一走环境变量
-├── db.py            SQLite 数据层:建表、迁移、常用读写。单用户,无 ORM
-├── lock.py          单实例锁(防止定时任务与网页按钮互抢 API 限流)
-├── http.py          统一 UA / 重试 / 退避
-├── normalize.py     DOI、标题、作者、日期归一化 —— 去重的地基
-├── pipeline.py      流水线编排 + 入库唯一入口 `_store`
-├── enrich.py        富化编排
-├── rank.py          三阶段排序
-├── summarize.py     中文摘要 + 数字核验
-├── llm.py           DeepSeek 客户端(OpenAI 兼容)
-├── journal_rank.py  期刊等级标签的渲染规则(纯函数,无 IO)
-├── web/app.py       FastAPI 应用(无前端构建,模板 + 原生 fetch)
-└── sources/         数据源,每个模块自己负责协议细节
-    ├── mail.py            邮件接入:folder / maildir / imap
-    ├── xmol_email.py      X-MOL 订阅邮件解析
-    ├── semanticscholar.py S2:摘要主力、检索、引用滚雪球
-    ├── crossref_search.py Crossref:权威元数据 + 关键词检索
-    ├── openalex_search.py OpenAlex 检索(可选)
-    └── easyscholar.py     期刊等级 / 影响因子 / 分区
-```
-
-分层原则:**`sources/` 只讲协议,不碰数据库**;所有入库都经过
-`pipeline._store` → `db.upsert_item`。这样去重、洗字段、写 `item_state` 只有一份实现。
-
-## 3. 数据流
-
-### 3.1 采集
-
-**邮件这条腿**(`pipeline.ingest_mail`):
-
-1. `mail.iter_messages` 按 `mail.mode` 从 folder / maildir / IMAP 取信;
-2. `xmol_email.parse_bytes` 解析题录;不是 X-MOL 模板的邮件**留档但不入库**;
-3. 每封邮件在一个 savepoint 内写 `raw_email` + 该邮件全部 `item`,**全部成功后**
-   才 `commit`,再 `acknowledge` 邮件(标已读 / 移入 processed)。
-
-顺序很关键:确认收信必须发生在提交之后。若先 ack 再写库,进程在中间死掉这封
-邮件就永远不会再被读到。反过来,失败时回滚本封的写入、不 ack,下一轮重放。
-
-`raw_email` 让这件事可恢复:历史上"原文已提交、条目只落了一半"的邮件,会在下一轮
-从库里重放补全 —— 即使它已经被归档或标为已读。
-
-**检索这条腿**(`pipeline.ingest_keyword_search`):按 `interests.yaml` 里的画像查询
-并行打 Crossref / Semantic Scholar / OpenAlex,结果同样过 `_store`。
-
-**滚雪球**(`pipeline._ingest_snowball`)与上面不同:它不直接入库,而是先把
-"谁引用了种子"累积进 `seed_cite`,再在**全部种子、全部历史轮次**上统计共被引。
-这样单次 API 失败不会把共被引计数打散。`snowball_min_cocitations` 默认 1
-(即全收),共被引数只作为质量标签展示,不作准入门槛。
-
-### 3.2 去重
-
-只有一个键:`item.dedup_key`,**UNIQUE 约束**。生成规则在 `pipeline._prepare`:
-
-- 有 DOI → `doi:<归一化后的 DOI>`;
-- 否则 → `title:<归一化标题的前 120 字符>`。
-
-DOI 归一化后再生成键,而不是只修 `item.doi` —— 不同来源对大小写的处理不一致,
-若按原始写法建键,`10.1234/ABC` 与 `10.1234/abc` 会变成两条。
-
-`db.upsert_item` 命中已有键时**只补空字段,不覆盖已有内容**,避免低质量来源盖掉
-高质量来源。入库时统一洗刊名(HTML 实体、换行)、拒绝非 http(s) 链接。
-
-### 3.3 富化
-
-`enrich.run` 只处理"缺摘要或未富化过"的条目,顺序是:
-
-1. **Semantic Scholar 批量补摘要 / 引用数 / OA**(摘要主力,实测覆盖最好);
-2. **Crossref 补权威元数据**(期刊全称、ISSN、作者),可覆盖过时字段;
-3. **easyScholar 补期刊等级**,结果按刊名缓存进 `journal_rank` 表。
-
-第 3 步是按次计额的接口,所以有两道保护:缓存表让同一本刊只查一次;单轮
-`max_lookups` 上限防止异常数据打爆额度。接口明确说"查不到"才缓存 `hit=0`,
-网络 / 认证 / 协议错误不写缓存,留待下次重试。
-
-`item_enrichment.abstract_attempts` 记录"富化过但仍没摘要"的次数,攒够上限就不再
-进重试队列 —— 来源里真没有摘要的条目否则会每轮陪跑 S2 + Crossref,永远烧请求。
-
-### 3.4 排序
-
-`rank.run` 是漏斗,三阶段各自写自己的分数,**最终分**是加权和:
-
-```
-final = w_llm * llm + w_coarse * coarse + w_rule * rule
-```
-
-| 阶段 | 函数 | 做什么 |
-|---|---|---|
-| 1 | `rule_filter` | 按画像的期刊白名单、关键词、类型做硬过滤;被否的标记 `excluded=1` |
-| 2 | `coarse_rank` | BM25 粗排(`rank-bm25`),**只给顺序,不做硬截断** |
-| 3 | `llm_rerank` | DeepSeek listwise 精排,产出分数 + 中文理由 |
-
-LLM 失败时的降级行为值得注意:没拿到 LLM 分的条目,`final` 由粗排 + 规则分归一到
-满量程,并**封顶在 `w_coarse + w_rule`**。早期版本除以 `w_coarse+w_rule` 补回满量程,
-结果"精排失败"的条目反而拿到和真高分一样的分 —— 界面上无法区分。现在这个缺陷
-由前端用红色警示标签显式标出。
-
-精排 prompt 会带少量**收藏 / 忽略的标题**做少样本校准(`feedback_examples`),
-让排序跟着用户的反馈走。
-
-### 3.5 摘要
-
-`summarize.run` 分两档:窗口内排名靠前的条目做**深度摘要**(问题 / 方法 / 关键结果 /
-局限 / 对研究的用处),其余做**简要摘要**(中文标题 + 一句话结论)。
-
-防幻觉有两道:
-
-- `verify_numbers`:摘要 `key_results` 里出现、但英文原文中找不到的数字,标为待核对;
-- `summary.abstract_hash`:原文摘要的指纹。原文补齐或改变后摘要会重做,而单纯更新
-  引用数不会触发重做。
-
-### 3.6 订阅组
-
-一个库可以同时跟几个方向。`interests.yaml` 写 `groups:` 时为多组,**不写就是单组**
-(整份文件即一组,slug 固定为 `default` —— 与升级前的历史数据一致)。
-
-三处按组,各管一件事:
-
-| 阶段 | 按组的东西 | 为什么 |
-|---|---|---|
-| 采集 | 检索词、期刊白名单、滚雪球种子 | 各方向捞各方向的 |
-| 排序 | 规则、BM25、LLM 精排(可用 `llm_rank` 关掉)、候选窗口 | 候选只取**本组成员**,否则花钱的精排会随组数翻倍 |
-| 摘要 | 只有 relevance 那一行 | 问题/方法/结果/局限与方向无关,一份共享即省下整条摘要的钱 |
-
-几条不能破的约定:
-
-- **入库必须同时记成员关系**。`upsert_item` 不管这件事(见它的 docstring),
-  采集路径统一走 `pipeline._store(group_id=...)`;只入库不记成员的条目在读取侧
-  等于不存在 —— 收件箱、检索、排序都查不到它
-- **读路径一定要带组条件**。`score` / `group_state` / `summary_group` 的主键都含
-  `group_id`:漏掉组条件的 join 不会报错,而是让同一条 item 关联出多行,
-  `fetchone()` 取到哪一组全凭运气(详情页踩过一次)
-- **X-MOL 是全局来源**:推什么由 X-MOL 网站上的订阅决定,驱动不了它,所以它的条目
-  进所有**启用的**组,再由各组规则判断相关性
-- **花费护栏按组计数**:邮件与富化的记录不带组,它们计入每个组
-
-## 4. 数据模型
-
-| 表 | 职责 | 关键约束 |
-|---|---|---|
-| `item` | 题录主表 | `dedup_key` UNIQUE;`kind` 区分 paper / patent |
-| `item_state` | 每条目的展示与反馈状态 | `state`(new/read/archived)、`starred`、`ignored`、`excluded` |
-| `feedback` | 用户动作的**事件流** | 追加写;状态由事件推导,便于合并重复条目时回溯 |
-| `item_enrichment` | 富化结果 | 1:1 于 item;`abstract_attempts` 控制重试 |
-| `interest_group` | 订阅组本身 | `slug` 是稳定标识;`enabled` / `llm_rank` 是每组的开关 |
-| `item_group` | 条目属于哪些组 | 由采集命中决定,**收件箱与排序都只认它** |
-| `score` | 三阶段分数与理由 | **(group_id, item_id)** —— 同一篇在两个组里可以分不同 |
-| `group_state` | 被规则排除 / 用户忽略 | **按组**:对 A 无关的可能是 B 的核心 |
-| `summary_group` | 摘要里「对研究的用处」那一行 | **按组**;其余摘要字段一份共享 |
-| `summary` | 中文摘要 | 1:1 于 item;`abstract_hash` 指纹 |
-| `journal_rank` | 期刊等级缓存 | 主键是归一化刊名;`hit=0` 表示接口明确无结果 |
-| `raw_email` | 邮件原文 + 处理标记 | `processed_at` 是"这封处理完了"的唯一依据 |
-| `seed_cite` / `seed_query` | 滚雪球累积的引用关系与刷新时间 | 关系跨轮次累积 |
-| `run_log` | 每阶段运行记录 | CLI 与网页都写 |
-| `item_fts` | FTS5 全文检索 | `content='item'`,由三个触发器同步 |
-
-迁移用 `PRAGMA user_version` 记进度,只补跑缺的步骤(`db._migrations`)。新库直接按
-最新 `SCHEMA` 建表并盖章,不走历史迁移。**加字段时两处都要改**:`SCHEMA` 与一个新的
-迁移函数。
-
-## 5. 关键不变量
-
-1. **入库只有一个入口** —— `pipeline._store` → `db.upsert_item`。任何新来源都必须
-   走这里,才能共享去重与洗字段逻辑。
-2. **`dedup_key` 决定幂等** —— 同一条文献无论从几个来源、被采集几次,都收敛到一行。
-3. **收信确认在事务提交之后** —— 见 3.1;崩溃只会导致重复处理,不会丢数据。
-4. **单实例锁** —— `lock.py` 保证定时任务与网页按钮不会同时跑同一阶段。两个 enrich
-   并发会互抢 Semantic Scholar 的限流,表现为"批量全空、补不到摘要",且极难排查。
-   CLI 与 Web 共用同一个 `data/litradar.lock`。
-5. **条目属于哪个组由入库时决定** —— 采集命中的组记进 `item_group`,收件箱与排序
-   都以它为准;入库不记成员关系的条目不会出现在任何组里。
-6. **密钥只走环境变量** —— 统一经 `config.read_secret()` 读取(去首尾空白、空值视为
-   未配置),绝不写进 `config.yaml`,也不进日志。
-6. **只绑回环地址** —— 对外由反向代理负责 TLS 与访问控制;绑 `0.0.0.0` 会绕过它们。
-
-## 6. Web 层
-
-`litradar/web/app.py` 是单文件 FastAPI 应用,模板 + 原生 `fetch`,无前端构建步骤。
-
-| 方法与路径 | 用途 |
+| 模块 | 职责 |
 |---|---|
-| `GET /` | 雷达页(收件箱),按最终分排序 |
-| `GET /week` | 本期精选 |
-| `GET /search` | 全库全文检索(FTS5) |
-| `GET /item/{item_id}` | 详情页 |
-| `POST /item/{item_id}/action` | 收藏 / 已读 / 忽略等反馈 |
-| `GET/POST /interests` | 在线编辑画像(保存为原子替换 + 轮转备份) |
-| `GET /stats` | 来源 / 期刊命中率、反馈统计、运行记录 |
-| `POST /admin/run/{stage}` | 手动触发单阶段 |
+| `cli.py` | 参数解析、阶段调用、诊断命令与退出码 |
+| `config.py` | 运行配置、路径解析与环境变量读取 |
+| `pipeline.py` | 采集编排、题录预处理与分组入库 |
+| `db.py` | SQLite schema、迁移、读写及分组状态 |
+| `normalize.py` | DOI、标题、日期、作者与链接归一化 |
+| `sources/` | 邮件解析、各数据源的请求协议与结果转换 |
+| `enrich.py` | 批量补全文献元数据、管理期刊等级缓存 |
+| `rank.py` | 画像校验、订阅组加载、规则过滤、BM25 和 LLM 精排 |
+| `summarize.py` | 共享摘要、方向性说明、原文指纹与数字核验 |
+| `llm.py` | OpenAI 兼容的 DeepSeek 客户端 |
+| `http.py` | 通用 HTTP 请求、重试与退避支持；部分数据源另有专用请求逻辑 |
+| `journal_rank.py` | 期刊等级标签的字段选择与文本转换 |
+| `lock.py` | CLI 与 Web 共用的流水线互斥锁 |
+| `passwords.py` | 管理员密码的 PBKDF2 哈希与验证 |
+| `web/` | FastAPI 路由、Jinja2 模板及原生 JavaScript |
+
+`sources/` 负责协议和记录转换，不直接写入数据库。新增题录通过
+`pipeline._store()` → `db.upsert_item()` 入库，复用去重和字段清洗；元数据补全与
+各类状态更新使用 `db.py` 的相应接口。
+
+## 数据流
+
+```text
+邮件 / 学术 API
+       ↓
+item + item_group        共享题录及按组成员关系
+       ↓
+item_enrichment          摘要、引用数等元数据
+       ↓
+score + group_state      按组评分、规则排除
+       ↓
+summary + summary_group  共享中性摘要、按组方向性说明
+       ↓
+Web 阅读与反馈           全局阅读状态及按组忽略状态
+```
+
+### 邮件采集
+
+`pipeline.ingest_mail()` 首先检查 `sources.xmol_enabled`。关闭时跳过所有邮件接入
+和历史原文重放。开启后同步配置中的组，提交组信息，再进行邮件网络读取。
+
+`mail.iter_messages()` 从 folder、Maildir 或 IMAP 获取邮件，
+`xmol_email.parse_bytes()` 解析题录。无法识别为 X-MOL 条目的邮件可留存原文，
+但不会生成文献条目。
+
+每封邮件在一个 savepoint 中保存原文、全部条目、组成员关系和 `processed_at`。
+事务提交成功后才调用 `acknowledge()`，执行归档或标记已读。写入失败时回滚本封并
+保留重试条件。IMAP 网络等待不应持有未提交的数据库写事务。
+
+`raw_email.processed_at` 是处理完成的依据。历史上已保存原文但尚未标记完成的邮件，
+会从数据库重放，即使外部邮件已归档或标为已读。
+
+IMAP 使用共享的 TLS 连接入口，校验证书与主机名。只读模式使用 `readonly=True`
+与 `BODY.PEEK[]`；退出使用 `LOGOUT`，不执行可能清除已删除邮件的 `CLOSE`。
+
+### 检索与被引追踪
+
+`pipeline.ingest_keyword_search()` 逐组执行检索。各组按配置顺序调用 Crossref、
+Semantic Scholar 和 OpenAlex，再处理引用滚雪球，结果归一化去重后入库并记录组成员。
+当前请求按顺序执行，没有跨来源或跨组的并行请求。
+
+Semantic Scholar 检索使用 `/paper/search/bulk`。日期先转换为年份范围传给服务端，
+再根据返回记录的具体日期进行本地过滤。检索与被引追踪在未配置 `S2_API_KEY` 时跳过。
+
+滚雪球沿“哪些论文引用了种子文献”的方向检索。`seed_cite` 保存本组的引用关系，
+`seed_query` 保存本组种子的刷新时间；同一 DOI 被多个组使用时，各组独立维护进度。
+每轮优先刷新较久未查询的种子，并在本组全部种子及历史轮次上累计共同引用数量。
+默认门槛为 1，数量主要用于展示质量线索。
+
+### 去重与元数据补全
+
+`item.dedup_key` 有唯一约束。`pipeline._prepare()` 的键生成规则为：
+
+- 有 DOI：`doi:<归一化后的 DOI>`。
+- 无 DOI：`title:<归一化标题的前 120 个字符>`。
+
+DOI 大小写在建键前统一处理，入库时清洗刊名并过滤非 HTTP(S) 链接。
+`db.upsert_item()` 命中已有条目时补充空字段，也允许具体日期替换仅有年份的占位日期。
+无 DOI 的标题键不是模糊匹配，不能保证与日后带 DOI 的同一文献自动合并。
+
+`enrich.run()` 优先处理尚未补全的条目，再处理仍缺摘要且未达到重试上限的条目：
+
+1. Semantic Scholar 批量获取摘要、引用数与开放获取信息。
+2. Crossref 批量补充元数据；规范的期刊、ISSN、作者等非空字段可覆盖旧值。
+3. easyScholar 按刊名查询期刊等级，并缓存到 `journal_rank`。
+
+摘要重试通过 `item_enrichment.abstract_attempts` 限制。期刊等级使用别名归一化和
+每轮 `max_lookups` 上限；仅在接口明确无结果时写入 `hit=0`，网络、限流、认证或
+协议错误保留重试机会。未配置 easyScholar 密钥时不发起查询。
+
+### 排序
+
+`rank.run()` 只读取各组在运行窗口内的 `item_group` 成员：
+
+| 阶段 | 行为 |
+|---|---|
+| 规则过滤 | 按标题前缀、标题排除词及通用排除词筛选；关键词、期刊、作者等作为加分项 |
+| BM25 粗排 | 计算关键词相关度并决定顺序；默认不截断，`rerank_top_k > 0` 时限制候选 |
+| LLM 精排 | 分批评分并给出推荐理由，参考全局收藏和本组已有分数的忽略条目 |
+
+分数和自动排除状态按组保存。收藏条目不会因规则变化被自动隐藏，但仍可能缺少新分数。
+运行时会清理本组窗口内未进入最终候选集的旧分数。
+
+有 LLM 评分时，最终分按 `w_llm × llm + w_coarse × coarse + w_rule × rule` 合成。
+同轮仅部分条目缺少 LLM 分时，这些条目保留粗排与规则的加权分，不重新归一化；若
+整轮没有任何 LLM 分，则将关键词与规则分按其权重和归一化。网页另行区分关闭精排、
+缺少密钥和已启用但缺少评分的状态，避免只凭最终分误判结果。
+
+### 摘要与缓存
+
+`summarize.run()` 将窗口内的摘要任务分为深度和简要两档。每次运行先汇总参与组的
+深度摘要需求，再生成共享内容，最后补齐各组方向性说明。
+
+- `summary` 保存中文标题、简要结论及深度摘要中的中性内容。
+- `summary_group` 保存“对研究的用处”，读取时必须同时限定组和条目。
+- 本轮已成功生成的共享摘要按条目去重，`--force` 也遵循这一规则；各组需要的深度先
+  合并，避免因组的处理顺序重复生成简要和深度版本。
+- 原文摘要指纹变化会使旧摘要失效，也会清理失去原文依据的方向性说明。仅强制重算
+  不会清除未参与本轮的其他组说明。
+- 缺少本组说明时保持为空，不能回退读取全局旧字段或其他组说明。
+
+`db.sync_groups()` 比较方向文本去除首尾空白后的前 300 个字符，与提示词使用范围
+一致。方向改变只清除该组的方向性说明，名称改变不触发清理。
+`interest_group.direction_initialized` 区分已建立的方向基线与旧库首次同步，防止
+升级时误清除已迁移的 `default` 说明。
+
+`verify_numbers()` 标记关键结果中无法在原文摘要匹配的数字。提示词要求标注推断，
+但这些措施不构成对生成内容正确性的完整验证。
+
+## 数据模型与迁移
+
+| 表 | 当前职责 |
+|---|---|
+| `item` | 共享题录；`dedup_key` 唯一，当前采集生成 `paper` 条目 |
+| `item_enrichment` | 一篇一行的元数据补全结果与摘要重试次数 |
+| `item_state` | 全局阅读状态与收藏状态 |
+| `interest_group` | slug、显示名、方向、启用开关及方向同步基线 |
+| `item_group` | `(group_id, item_id)` 成员关系，决定组内可读取的条目 |
+| `score` | `(group_id, item_id)` 评分与推荐理由 |
+| `group_state` | `(group_id, item_id)` 用户忽略及规则排除状态 |
+| `summary` | 按条目共享的中性摘要及原文指纹 |
+| `summary_group` | `(group_id, item_id)` 方向性说明 |
+| `feedback` | 追加记录条目、动作与时间；当前日志不含组标识，实际分组状态以 `group_state` 为准 |
+| `journal_rank` | 按归一化刊名保存查询结果及明确无结果的缓存 |
+| `raw_email` | 邮件原文与完成标记，支持失败重试和历史重放 |
+| `seed_cite` / `seed_query` | 按组保存种子引用关系与刷新记录 |
+| `run_log` | 阶段、状态、统计、错误与可选的组标识 |
+| `item_fts` | 由触发器同步的 FTS5 索引，覆盖标题、原文摘要、期刊和作者 |
+
+`item_state.ignored/excluded` 与 `summary.relevance` 是兼容旧库保留的字段，不再作为
+当前分组状态的读写来源。界面读取 `group_state` 和 `summary_group`；迁移会将可确定
+归属的历史单方向说明转入 `default`。
+
+当前 schema 版本为 7，使用 `PRAGMA user_version` 记录迁移进度。新库直接按最新
+`SCHEMA` 建表，旧库顺序执行尚未完成的迁移。修改表结构时必须同时更新 `SCHEMA`
+和迁移列表，并验证从旧结构升级后的数据保留情况。
+
+## Web 层与组上下文
+
+| 路由 | 用途 |
+|---|---|
+| `GET /` | 当前组收件箱 |
+| `GET /week` | 当前组本期精选 |
+| `GET /search` | 当前组成员的 FTS5 检索 |
+| `GET /item/{item_id}` | 当前组中的文献详情 |
+| `POST /item/{item_id}/action` | 收藏、已读、忽略及撤销 |
+| `GET/POST /interests` | 编辑整份画像，校验后原子替换并轮转备份 |
+| `GET /stats` | 当前组统计与相关运行记录 |
+| `POST /admin/run/{stage}` | 手动运行所选阶段 |
 | `GET /healthz` | 健康检查 |
 
-`/admin/run/{stage}` 是唯一会花钱的入口（`rank` / `summarize` / `all` 走 DeepSeek），
-它依次过四道闸，顺序不能换：
+页面显式携带 `?g=<slug>`，反馈、撤销与流水线请求沿用页面的组。兼容旧写请求时可从
+同源 Referer 获取组；Cookie 仅作没有显式组时的默认值。组标识在 URL 和 Cookie 中
+编码，解析失败时按既定回退规则处理。显式指定已不存在的组进行写操作会被拒绝，
+未同步或没有成员的组显示空列表。
 
-| 顺序 | 闸门 | 作用 |
-|---|---|---|
-| 1 | `require_token` | `?k=` / `X-Token` / cookie；**设了才校验** |
-| 2 | `require_same_origin` | 拒绝跨源写请求（Origin 检查） |
-| 3 | `require_exposure_safe` | 绑了非回环地址又没设口令 → **直接 403**（fail closed） |
-| 4 | `require_admin_password` + `require_stage_limits` | 只对 `admin.guarded_stages`（默认 rank/summarize/all）：步进验证 + 冷却 + 每日上限 |
+`/admin/run/*` 依次检查接口口令、同源条件、非回环地址保护，再对受保护阶段检查
+管理员密码与运行次数，最后获取流水线锁。CLI 也获取同一把锁并记录运行情况，但
+不调用 Web 的密码和频率校验。具体部署范围见 [访问保护](deployment.md#访问保护)。
 
-- `require_token`:设了 `LITRADAR_TOKEN` 就要求 `?k=`、`X-Token` 或 cookie
-  (`hmac.compare_digest` 比较,避免时序侧信道)。未设则放行 —— 默认只绑回环,
-  本就访问不到。
-- `require_same_origin`:写操作要求同源。**这不是多余的**:`/admin/run/*` 是不带
-  CSRF token 的简单 POST,你在浏览器里打开的任意网页都能往 `127.0.0.1:8090`
-  发跨源 POST,把 DeepSeek 额度烧掉,即使服务只绑本机。
-- `require_exposure_safe`:把"对外必须带口令"这条约定从**提示**变成**强制**。
-  以前 `litradar check` 会标 BAD,但代码照旧放行。
-- `require_admin_password`:密码与 URL 里的 token 是两件事 —— token 长期有效、
-  可能在浏览器历史或反代日志里;密码每次输入、只在内存里存在。存的是 PBKDF2
-  哈希(`litradar/passwords.py`,只用标准库),格式非法的存储值一律判为不匹配,
-  绝不放行。前端靠 `X-Admin-Password-Required` 响应头决定"弹密码框"还是
-  "报口令错误"(两者都是 401)。
-- `require_stage_limits`:冷却 + 每日上限,**账本是 `run_log`** —— 所以进程重启
-  不会把额度清零,CLI 与定时任务跑的同样计入。`all` 会展开成它实际跑的每个
-  子阶段,因此"点过 rank 再点 all"同样会被拦住。
+## 开发约定
 
-## 7. 配置
+1. 新来源返回规范记录，通过 `_store()` 入库；按组采集时必须同时记录 `item_group`。
+2. 关联 `score`、`group_state`、`summary_group` 时必须包含组条件，防止重复行或读到其他方向的结果。
+3. 邮件确认必须在事务提交之后，网络等待前应结束不必要的写事务。
+4. 区分自动规则排除与用户忽略；收藏、已读维持全局语义。
+5. 密钥通过 `config.read_secret()` 读取，不写入配置样例、源码或日志。
+6. 跨组运行保留已成功的工作，失败记录需与 CLI 退出码一致；不能将告警一概理解为阶段失败。
+7. 测试使用临时数据库和模拟外部服务。分组改动至少验证重叠成员、方向差异、旧库迁移与跨标签页操作等实际边界。
 
-`config.py` 里按用途分数据类:`AppConfig`、`LLMConfig`、`MailConfig`、
-`SourceConfig`、`RankingConfig`、`JournalRankConfig`,合成一个 `Config`。
-
-- 路径统一用 `_expand` 解析成绝对路径(相对项目根),这样从任何工作目录启动、
-  或在 systemd / 任务计划里启动结果都一致;
-- 项目根由 `__file__` 推导,不依赖当前工作目录;
-- `.env` 的加载规则是"**真实环境优先,空值不回填**":`override=True` 会让 `.env`
-  里的空占位符清掉命令行传入的口令(实测踩过),`override=False` 又让改了 `.env`
-  不重启不生效。
-
-## 8. 怎么加一个新来源
-
-1. 在 `sources/` 下写一个模块,只负责协议:暴露 `search(...)` 或 `fetch(...)`,
-   返回 dict(至少要有 `title`),**不要碰数据库**;
-2. 把它接进 `pipeline.ingest_keyword_search` 或 `enrich.run`;
-3. `dedup_key` 不用自己拼 —— 有 DOI 就填 `doi`,`_prepare` 会生成规范键;没 DOI 时
-   留空,它会退化成 `title:` 键;
-4. 在 `SourceConfig` 加开关(默认关,或明确写清代价),并在 `config.example.yaml`
-   里给注释;
-5. 补测试:解析用真实样本,网络层用打桩,不要依赖线上接口。
-
-## 9. 容易踩的坑
-
-- **排序窗口必须 ≥ 抓取窗口**(`app.pipeline_window_days`)。抓回来却落在排序窗口
-  之外的条目会永远"未评分",在收件箱里长成一片噪声。网页按钮读的是同一个值,
-  早期写死 30 天而抓取 180 天的组合,实测让 51 条里有 26 条从未进过排序器。
-- **期刊等级的 `hit=0` 是有意义的负缓存**,不要把网络故障也写进去,否则一次抖动
-  就会让某本刊永远查不到等级。
-- **`excluded` 是规则结果,不是用户决定**。用户明确收藏的条目应让 `excluded` 让路,
-  下一轮按最新画像重算。
-- **`raw_email` 的留档不等于"已处理"** —— 只有 `processed_at` 才是。补解析逻辑的
-  时候这是重放的基础。
-- **改 schema 要同时改 `SCHEMA` 和加迁移函数**;只改前者,老库不会更新。
+默认配置与相对路径基于 `config.ROOT` 解析，根目录由模块位置确定。环境中已有的
+非空值优先，`.env` 只补充缺少的非空值。参数字段见
+[config.example.yaml](../config.example.yaml)，研究画像字段见
+[interests.example.yaml](../interests.example.yaml)。
