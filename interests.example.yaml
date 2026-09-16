@@ -2,7 +2,12 @@
 # 仅含占位内容，真实研究偏好请在网页填写，或保存在被忽略的 interests.yaml。
 # 不要将真实方向、检索词、期刊偏好、作者或种子文献写回本示例。
 # 本文件保留单方向格式，对应 default 组；多组说明见 docs/subscription-groups.md。
-direction: "请填写自己的研究方向"
+direction: ""
+llm_rank: true
+# 关键词变化后的历史重评范围；新文献始终进行首次评分。
+rerank_policy: score  # score：按旧综合分；top_n：按旧排名
+rerank_min_score: 70
+rerank_top_n: 100
 search_queries: []
 s2_queries: []
 keywords:

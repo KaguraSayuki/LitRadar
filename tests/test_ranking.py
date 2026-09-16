@@ -299,7 +299,7 @@ def test_精排拿到反馈样本(tmp_path, monkeypatch):
 
     seen = {}
 
-    def fake_rerank(rows, prof, cfg_, llm, liked=None, disliked=None):
+    def fake_rerank(rows, prof, cfg_, llm, liked=None, disliked=None, on_batch=None):
         seen["liked"], seen["disliked"] = liked, disliked
         return {}
 

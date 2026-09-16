@@ -221,8 +221,26 @@ class SettingsStore:
             errors = validate_interests(root)
             if errors:
                 raise SettingsError("研究方向内容不完整，请检查名称和列表输入。")
+            self._ranking_baseline(data)
             atomic_write(self.interests_path, dump(root))
             return entry["slug"]
+
+    def _ranking_baseline(self, previous: dict) -> None:
+        """Capture legacy preferences before the first edit after an upgrade."""
+        if not previous or not self.cfg.db_file.exists():
+            return
+        from . import db, ranking_state
+        cfg = copy.copy(self.cfg)
+        cfg.interests_data = previous
+        conn = db.Database(cfg.db_file).connect()
+        try:
+            for profile in load_groups(cfg):
+                gid = db.group_id(conn, profile.slug)
+                if gid is not None:
+                    ranking_state.initialize(conn, gid, profile)
+            conn.commit()
+        finally:
+            conn.close()
 
     def backups(self, kind: str) -> list[Path]:
         target = self.path if kind == 'config' else self.interests_path
@@ -262,6 +280,8 @@ class SettingsStore:
                 detail = {'sections': [k for k in ('sources','mail','llm','ranking','journal_rank','admin','schedule') if k in data]}
                 target = self.path
             if not preview:
+                if kind == 'interests':
+                    self._ranking_baseline(read_mapping(self.interests_path))
                 atomic_write(target, dump(data))
             return detail
 
@@ -272,6 +292,21 @@ def group_patch(form) -> dict:
         raise SettingsError("请填写研究方向名称，最多 100 个字。", "name")
     result = {"name": name, "direction": str(form.get("direction", "")).strip(),
               "enabled": form.get("enabled") == "on", "llm_rank": form.get("llm_rank") == "on"}
+    if "rerank_policy" in form:
+        if form["rerank_policy"] not in ("score", "top_n"):
+            raise SettingsError("请选择按分数或按排名重评。", "rerank_policy")
+        result["rerank_policy"] = form["rerank_policy"]
+    for key, convert, low, high in (("rerank_min_score", float, 0, 100),
+                                    ("rerank_top_n", int, 1, 1000000)):
+        if key not in form:
+            continue
+        try:
+            value = convert(form[key])
+            if not low <= value <= high:
+                raise ValueError
+        except (ValueError, TypeError, OverflowError):
+            raise SettingsError(f"请输入 {low}–{high} 范围内的{'整数' if convert is int else '分数'}。", key) from None
+        result[key] = value
     for key in GROUP_FIELDS:
         if key not in form:  # partial clients must not erase unseen fields
             continue

@@ -33,7 +33,7 @@ def stages(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("stage,argv", [
-    ("rank", ["rank"]), ("summarize", ["summarize"]),
+    ("rank", ["rank"]), ("rank", ["rank", "--force"]), ("summarize", ["summarize"]),
     ("search", ["ingest", "search"]), ("search", ["ingest", "all"]),
 ])
 @pytest.mark.parametrize("failed_groups", [[], ["org"], ["org", "mat"]])

@@ -69,6 +69,9 @@ def group_form(request: Request, slug: str | None, form=None, error: SettingsErr
     values = {key: "\n".join(get_value(entry, key, []) or []) for key in GROUP_FIELDS}
     values.update({key: entry.get(key, "") for key in ("name", "direction")})
     values.update({key: entry.get(key, True) for key in ("enabled", "llm_rank")})
+    values.update({key: entry.get(key) if entry.get(key) is not None else default
+                   for key, default in (("rerank_policy", "score"), ("rerank_min_score", 70),
+                                        ("rerank_top_n", 100))})
     if form is not None:
         values.update(dict(form))
         for key in ("enabled", "llm_rank"):

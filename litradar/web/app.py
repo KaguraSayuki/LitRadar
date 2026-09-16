@@ -421,6 +421,11 @@ def _decorate(rows, conn, *, group: Profile | None = None):
     """
     cfg = get_cfg()
     llm_ready = _ranking_status(cfg, group) == "ready"
+    from ..ranking_state import preference_hash
+    version = preference_hash(group) if group else None
+    gid = db.group_id(conn, group.slug if group else None)
+    pending = {r[0] for r in conn.execute(
+        "SELECT item_id FROM rank_pending WHERE group_id=? AND preference_hash=?", (gid, version))}
 
     if cfg.journal_rank.enabled:
         ranks = db.journal_ranks(conn)
@@ -452,6 +457,10 @@ def _decorate(rows, conn, *, group: Profile | None = None):
         # 关键词分是预期结果,页面顶部统一说明原因。
         d["score_keyword"] = d.get("final_score") is not None and d.get("llm_score") is None
         d["score_partial"] = llm_ready and d["score_keyword"]
+        d["score_status"] = "unscored"
+        if d.get("llm_score") is not None:
+            d["score_status"] = ("pending" if d["id"] in pending else
+                                 "current" if d.get("preference_hash") == version and version else "historical")
         out.append(d)
     return out
 
@@ -581,7 +590,8 @@ def item_detail(request: Request, item_id: int):
         gid = db.group_id(conn, g.slug if g else None) or -1
         row = conn.execute(
             """SELECT i.*, sc.final_score, sc.rule_score, sc.coarse_score, sc.llm_score,
-                      sc.llm_reason, su.title_zh, su.one_liner, su.problem, su.method,
+                      sc.llm_reason, sc.preference_hash, sc.llm_scored_at,
+                      su.title_zh, su.one_liner, su.problem, su.method,
                       su.key_results, su.limitation, su.depth,
                       sg.relevance AS relevance,
                       COALESCE(s.state,'new') state, COALESCE(s.starred,0) starred,
@@ -616,9 +626,12 @@ def stats_page(request: Request):
     conn = _conn()
     try:
         s = db.stats(conn, group_slug=(g.slug if g else None))
+        rerank_count = (len(rank.rule_filter(rank.candidate_rows(conn, db.group_id(conn, g.slug) or -1), g)[0])
+                        if g else 0)
     finally:
         conn.close()
-    return templates.TemplateResponse(request, "stats.html", ctx(request, s=s, page="stats"))
+    return templates.TemplateResponse(request, "stats.html", ctx(
+        request, s=s, page="stats", rerank_count=rerank_count))
 
 
 def _editor_profile(cfg: Config):
@@ -800,7 +813,8 @@ def item_action(request: Request, item_id: int, action: str = Form(...)):
 
 
 @app.post("/admin/run/{stage}")
-def admin_run(request: Request, stage: str, days: int = 0, background: bool = False):
+def admin_run(request: Request, stage: str, days: int = 0, background: bool = False,
+              force: bool = False):
     # 流水线可能调用付费模型,运行前检查:
     #   口令 → 同源 → 暴露检查 →(花钱阶段)密码 →(花钱阶段)冷却 + 每日上限。
     # 前端显式传入当前页面的 ?g=,口令 Cookie 仍随同源 fetch 自动发送。
@@ -810,6 +824,8 @@ def admin_run(request: Request, stage: str, days: int = 0, background: bool = Fa
     require_exposure_safe(cfg)
     if stage not in execution.STAGES:
         raise HTTPException(400, f"未知阶段: {stage}")
+    if force and stage != "rank":
+        raise HTTPException(400, "全部重排只用于排序，请选择排序阶段。")
     # 当前组(切换器/`?g=` 决定的那个)。记账与执行要用同一个组,否则"在 A 组
     # 点了一下"会算到所有组头上,上限自然就不准了。
     prof = active_group(request, cfg, require_known=True)
@@ -834,7 +850,7 @@ def admin_run(request: Request, stage: str, days: int = 0, background: bool = Fa
                 "mail": lambda: pipeline.ingest_mail(cfg),
                 "search": lambda: pipeline.ingest_keyword_search(cfg, group=prof),
                 "enrich": lambda: enrich.run(cfg),
-                "rank": lambda: rank.run(cfg, days=days, group=prof),
+                "rank": lambda: rank.run(cfg, days=days, group=prof, force=force),
                 "summarize": lambda: summarize.run(cfg, days=days, group=prof),
             }
             return progress.run_stage(stage, operations[stage])
@@ -843,7 +859,7 @@ def admin_run(request: Request, stage: str, days: int = 0, background: bool = Fa
         if background:
             from .jobs import JobStore
             state = JobStore(cfg).start(request.headers.get('X-Run-ID', ''), stage,
-                                       prof, days, operation, check)
+                                       prof, days, operation, check, force=force)
             return JSONResponse(state, status_code=202)
         # Keep the synchronous API for scripts; both paths share the CLI lock.
         with single_instance(cfg.db_file.parent / "litradar.lock"):
@@ -896,3 +912,4 @@ def _local_time(raw):
 
 
 templates.env.filters['local_time'] = _local_time
+templates.env.filters['run_summary'] = progress.summary

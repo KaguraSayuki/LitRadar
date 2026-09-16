@@ -49,6 +49,8 @@
 <circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>
 {%- elif name == 'clock' -%}
 <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>
+{%- elif name == 'refresh-cw' -%}
+<path d="M20 7v5h-5M4 17v-5h5M6.1 6.1A8 8 0 0 1 20 12M4 12a8 8 0 0 0 13.9 5.9"/>
 {%- elif name == 'lock' -%}
 <rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/>
 {%- elif name == 'plug' -%}
@@ -86,7 +88,7 @@
   {# 兜底分不叫"相关度" —— 那个词暗示它是 LLM 判断的结果,而这一个不是 #}
   {% set lbl = '未评分' if s is none else ('关键词分' if it['score_keyword'] else '相关度') %}
   <div class="score score--{{ score_band(s) }}{{ ' score--partial' if it['score_partial'] }}"
-       {% if s is not none %}title="{{ lbl }} {{ '%.1f'|format(s) }}{{ ' —— 精排批次失败,只由 BM25 与规则算出' if it['score_partial'] }}"{% endif %}>
+       {% if s is not none %}title="{{ lbl }} {{ '%.1f'|format(s) }}{{ '；尚无 AI 评分，当前使用关键词与规则分' if it['score_partial'] }}"{% endif %}>
     <span class="score__n">{{ '%.0f'|format(s) if s is not none else '–' }}</span>
     <span class="score__l">{{ lbl }}</span>
   </div>
@@ -113,7 +115,9 @@
         {# 手动决定优先展示:置于最前,免得"这条为什么在这儿/为什么不在别处"要靠猜 #}
         {% if it['ignored'] %}<span class="tag tag--ignored" title="你标过「不感兴趣」,它只会出现在「不感兴趣」页签里">已否决</span>{% endif %}
         {% if it['starred'] %}<span class="tag tag--starred" title="已收藏">已收藏</span>{% endif %}
-        {% if it['score_partial'] %}<span class="tag tag--warn" title="这一篇没拿到 AI 打分(精排批次失败)。分数只由 BM25 粗排与规则算出,不能和其他条目横向比较;下次排序会重试">{{ icon('alert') }}精排失败</span>{% endif %}
+        {% if it['score_partial'] %}<span class="tag tag--warn" title="尚无成功的 AI 评分，当前为关键词与规则分；下次排序会继续处理">{{ icon('alert') }}待 AI 评分</span>{% endif %}
+        {% if it['score_status'] == 'historical' %}<span class="tag" title="沿用以前的 AI 评分，尚未按当前偏好重新评估">历史评分</span>{% endif %}
+        {% if it['score_status'] == 'pending' %}<span class="tag tag--warn" title="本次重评尚未完成，当前保留旧评分；下次排序会继续处理">待重评</span>{% endif %}
         {% if it['journal'] %}<span class="meta__journal">{{ it['journal']|unesc }}</span>{% endif %}
         {% if it['published_at'] %}<time datetime="{{ it['published_at'] }}">{{ it['published_at'] }}</time>{% endif %}
         {% if it['impact_factor'] %}<span class="tag tag--if">IF {{ it['impact_factor'] }}</span>{% endif %}

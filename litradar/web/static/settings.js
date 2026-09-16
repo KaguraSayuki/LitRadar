@@ -1,5 +1,15 @@
 /* Progressive settings forms retain their inputs after validation and auth errors. */
 (() => {
+  const rerankPolicy = document.getElementById('rerank_policy');
+  function showRerankPolicy() {
+    if (!rerankPolicy) return;
+    document.querySelectorAll('[data-rerank-policy]').forEach(field => {
+      field.hidden = field.dataset.rerankPolicy !== rerankPolicy.value;
+      field.querySelector('input').disabled = field.hidden;
+    });
+  }
+  rerankPolicy?.addEventListener('change', showRerankPolicy);
+  showRerankPolicy();
   const modelForm = document.getElementById('model-settings');
   const savedModel = modelForm ? JSON.stringify([...new FormData(modelForm)]) : null;
   const modelAddress = document.getElementById('llm.base_url');

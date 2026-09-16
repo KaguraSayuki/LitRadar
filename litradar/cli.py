@@ -75,7 +75,7 @@ def cmd_enrich(cfg, args):
 
 
 def cmd_rank(cfg, args):
-    out = rank.run(cfg, days=args.days, group=_pick_group(cfg, args.group))
+    out = rank.run(cfg, days=args.days, group=_pick_group(cfg, args.group), force=args.force)
     print(json.dumps(out, ensure_ascii=False, indent=2))
     return _result_exit_code(out)
 
@@ -579,7 +579,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_enrich)
 
     sp = sub.add_parser("rank", help="排序")
-    sp.add_argument("--days", type=int, default=None, help=DAYS_HELP)
+    sp.add_argument("--days", type=int, default=None, help="兼容旧命令；评分覆盖本方向全部已入库文献")
+    sp.add_argument("--force", action="store_true", help="全部重排：刷新所选方向全部合格文献的 AI 评分")
     sp.set_defaults(func=cmd_rank)
 
     sp = sub.add_parser("summarize", help="生成中文摘要")

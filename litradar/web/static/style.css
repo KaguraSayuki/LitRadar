@@ -451,6 +451,7 @@ h2 small { font-weight: 400; color: var(--ink-3); font-size: 13px; margin-left: 
 .steps .btn { width: 100%; height: 46px; min-height: 46px; padding: 0 10px; font-size: 13px; gap: 7px; white-space: nowrap; }
 .steps .step-n { width: 20px; height: 20px; flex-shrink: 0; font-size: 11px; }
 .steps .icon { width: 18px; height: 18px; }
+.pipeline-panel [data-run-force] { height: 46px; min-height: 46px; padding: 0 16px; font-size: 13px; }
 .pipeline-progress { padding: 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); }
 .pipeline-progress [hidden] { display: none !important; }
 .pipeline-progress__head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
@@ -749,6 +750,9 @@ h2 small { font-weight: 400; color: var(--ink-3); font-size: 13px; margin-left: 
 .form-grid > .settings-field, .form-grid > label, .source-options > .settings-field { margin: 0; }
 .form-grid--three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .form-grid__wide { grid-column: 1 / -1; }
+.rerank-scope { margin-top: 20px; }
+.settings-form .rerank-scope input[type=number] { max-width: none; }
+.settings-panel > #rerank-help { margin-top: 18px; }
 .settings-form .check { display: flex; align-items: center; gap: 10px; margin: 0; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; cursor: pointer; }
 .settings-form .switch-row { display: flex; align-items: center; justify-content: space-between; gap: 24px; cursor: pointer; }
 .switch-row__text { min-width: 0; }

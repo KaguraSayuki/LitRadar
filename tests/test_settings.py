@@ -41,6 +41,49 @@ def test_empty_instance_can_add_and_rename_without_changing_identity(settings_en
     assert "光催化" in client.get("/settings/groups").text
 
 
+def test_rerank_policy_round_trips_without_resetting_inactive_value(settings_env):
+    path, _, client = settings_env
+    store = SettingsStore(load_config(path))
+    store.update_group(None, {"name": "Synthetic A", "rerank_min_score": 72.5}, store.version())
+    form = {"version": store.version(), "name": "Synthetic A", "enabled": "on", "llm_rank": "on",
+            "rerank_policy": "top_n", "rerank_top_n": "12"}
+    result = client.post('/settings/group?slug=default', data=form, follow_redirects=False)
+    assert result.status_code == 303
+    entry = store.snapshot().interests['groups'][0]
+    assert entry['rerank_policy'] == 'top_n' and entry['rerank_top_n'] == 12
+    assert entry['rerank_min_score'] == 72.5
+    page = client.get('/settings/group?slug=default')
+    assert 'value="top_n" selected' in page.text and 'value="12"' in page.text
+
+
+@pytest.mark.parametrize('key,value', [('rerank_policy', 'unknown'), ('rerank_min_score', 'nan'),
+    ('rerank_min_score', '101'), ('rerank_min_score', '-1'), ('rerank_top_n', '0'),
+    ('rerank_top_n', '2.5'), ('rerank_top_n', 'inf')])
+def test_invalid_rerank_scope_is_rejected(key, value):
+    with pytest.raises(SettingsError) as error:
+        group_patch({'name': 'Synthetic A', key: value})
+    assert error.value.field == key
+
+
+def test_first_edit_after_upgrade_records_old_preference_baseline(settings_env):
+    from litradar import db, rank, ranking_state
+    path, _, _ = settings_env
+    store = SettingsStore(load_config(path))
+    store.update_group(None, {'name': 'Synthetic A', 'direction': 'Before edit'}, store.version())
+    cfg = load_config(path)
+    old_hash = ranking_state.preference_hash(rank.load_groups(cfg)[0])
+    conn = db.Database(cfg.db_file).connect()
+    db.sync_groups(conn, rank.load_groups(cfg))
+    conn.execute('DELETE FROM rank_state')
+    conn.commit()
+    conn.close()
+    store.update_group('default', {'direction': 'After edit'}, store.version())
+    conn = db.Database(cfg.db_file).connect()
+    assert conn.execute('SELECT preference_hash FROM rank_state').fetchone()[0] == old_hash
+    assert ranking_state.preference_hash(rank.load_groups(load_config(path))[0]) != old_hash
+    conn.close()
+
+
 def test_migrate_legacy_copy_disable_reorder_preserves_unedited_data(settings_env):
     path, interests, _ = settings_env
     original = {"name": "旧方向", "direction": "organic", "keywords": {"core": ["old"],

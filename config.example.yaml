@@ -18,8 +18,8 @@ app:
   # 研究方向、检索式及订阅组配置文件。
   interests: "./interests.yaml"
 
-  # 排序与摘要默认处理的时间窗，CLI、定时任务和网页按钮共用。
-  # 建议不小于 sources.s2_search_lookback_days，避免新采集条目落在排序范围外。
+  # 摘要处理的时间窗，建议覆盖来源的回溯范围。
+  # 首次评分和全部重排覆盖所选方向的全部合格文献，不受此窗口限制。
   pipeline_window_days: 200
 
 # 网页手动运行的密码检查；频率检查统一用于网页、CLI 和应用调度。
@@ -56,8 +56,7 @@ llm:
   temperature: 0.2
   # 每批参与 LLM 精排的条目数。
   rerank_batch_size: 20
-  # 0 表示不在 BM25 后截断候选；大于 0 时按粗排限制候选范围。
-  rerank_top_k: 0
+  # 历史重评范围在各方向设置；旧 rerank_top_k 字段已停用。
   # 每组排名前 N 的候选生成深度摘要；其余生成简要摘要。
   deep_summary_top_n: 8
   timeout: 120

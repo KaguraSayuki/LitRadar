@@ -43,6 +43,12 @@ def summary(result) -> str:
               'brief_failed': '篇简要摘要失败', 'deep_failed': '篇深度摘要失败',
               'llm_failed': '篇 AI 评分失败', 'relevance_failed': '条方向说明失败',
               'failed': '篇未补全', 'jr_failed': '项期刊查询失败'}
+    if 'llm_new' in result:
+        labels.pop('scored')
+        labels.pop('llm_scored')
+        labels.pop('llm_failed')
+        labels.update(llm_new='篇首次 AI 评分', llm_refreshed='篇历史重评',
+                      llm_reused='篇复用评分', llm_pending='篇待完成')
     parts = [f'{result[key]} {label}' for key, label in labels.items()
              if type(result.get(key)) is int and result[key] > 0]
     if parts:

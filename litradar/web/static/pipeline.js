@@ -94,6 +94,7 @@
       if (job?.status === 'running' || uncertain) return;
       const url = new URL('/admin/run/' + stage, location.href);
       url.searchParams.set('background', '1');
+      if (button?.dataset?.runForce === 'true') url.searchParams.set('force', '1');
       if (group) url.searchParams.set('g', group);
       // getRandomValues also works on local-network HTTP installations.
       runId = [...crypto.getRandomValues(new Uint8Array(16))].map(n => n.toString(16).padStart(2, '0')).join('');

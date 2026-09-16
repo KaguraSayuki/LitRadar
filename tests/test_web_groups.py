@@ -432,8 +432,9 @@ def test_新配置组同步前页面为空且读请求不建组(both_client, pat
     conn.close()
 
 
-@pytest.mark.parametrize("stage", ["search", "rank", "summarize", "all"])
-def test_真实前端脚本的反馈撤销及后台流水线都沿用页面组(both_client, monkeypatch, stage):
+@pytest.mark.parametrize("stage,force", [("search", False), ("rank", False),
+                                       ("summarize", False), ("all", False), ("rank", True)])
+def test_真实前端脚本的反馈撤销及后台流水线都沿用页面组(both_client, monkeypatch, stage, force):
     node = shutil.which("node")
     if not node:
         pytest.skip("前端执行回归需要 Node.js 18+;其余 Web 测试不依赖 Node")
@@ -445,15 +446,18 @@ def test_真实前端脚本的反馈撤销及后台流水线都沿用页面组(b
     result = subprocess.run(
         [node, str(Path(__file__).parent / "helpers" / "web_context.cjs")],
         input=json.dumps({"itemId": iid, "stage": stage, "group": body["data-group"],
-                          "state": body["data-state"]}),
+                          "state": body["data-state"], "force": force}),
         text=True, capture_output=True, check=True,
     )
     requests = json.loads(result.stdout)
     assert len(requests) == 3  # ignore, undo, one background run
+    assert parse_qs(urlsplit(requests[-1]['url']).query).get('force') == (['1'] if force else None)
     calls, limits = [], []
     cfg.admin.guarded_stages = (stage,)
 
     def run(*a, **kw):
+        if stage == 'rank':
+            assert kw['force'] == force
         calls.append(kw["group"].slug)
         return {"errors": 0}
 
@@ -477,6 +481,35 @@ def test_真实前端脚本的反馈撤销及后台流水线都沿用页面组(b
         pass
     assert calls == limits == ["org"]
     assert c.cookies.get(webapp.GROUP_COOKIE) == "mat"  # 写请求不切换默认视图
+
+
+@pytest.mark.parametrize('path,status', [
+    ('/', 'current'), ('/', 'pending'), ('/search?q=Both', 'historical'),
+    ('/item/1', 'current'), ('/item/1', 'historical'), ('/item/1', 'pending'),
+])
+def test_score_versions_and_pending_refresh_are_visible(both_client, path, status):
+    from litradar.ranking_state import preference_hash
+    c, cfg, iid, ids = both_client
+    version = preference_hash(load_groups(cfg)[0])
+    conn = db.Database(cfg.db_file).connect()
+    db.save_score(conn, iid, group_id=ids['org'], llm_score=80, final_score=75,
+                  preference_hash=None if status == 'historical' else version)
+    if status == 'pending':
+        conn.execute('INSERT INTO rank_pending (group_id,item_id,preference_hash) VALUES (?,?,?)',
+                     (ids['org'], iid, version))
+    conn.commit()
+    conn.close()
+    page = c.get(path, params={'g': 'org', 'q': 'Both'})
+    assert page.status_code == 200
+    if status == 'historical':
+        assert '历史' in page.text
+    elif status == 'pending':
+        assert ('待重评' in page.text or '重评尚未完成' in page.text)
+    elif path.startswith('/item'):
+        assert '已按当前评分偏好评估' in page.text
+    else:
+        assert '历史评分' not in page.text and '待重评' not in page.text
+
 
 
 @pytest.mark.parametrize("path", ["/", "/week", "/search?q=Both", "/item/1"])
@@ -590,7 +623,7 @@ def test_评分界面区分主动关闭真实失败和成功(both_client, monkey
     assert page.status_code == 200
     assert "Both groups" in page.text
     assert ('class="score__l">' + label + "</span>") in page.text
-    assert ("精排失败" in page.text) == (mode == "failed")
+    assert ("待 AI 评分" in page.text) == (mode == "failed")
     assert ("score--partial" in page.text) == (mode == "failed")
     notices = [p for p in PageElements(page.text).attrs("p") if p.get("class") == "notice"]
     assert bool(notices) == bool(notice)
