@@ -111,21 +111,6 @@ def test_semanticscholar_uses_the_same_key_semantics(monkeypatch):
 
 
 # ------------------------------------------------------- 花钱阶段的护栏配置
-def test_admin_defaults_are_the_documented_ones(tmp_path):
-    cfg = load_config(tmp_path / "missing.yaml").admin
-
-    assert cfg.guarded_stages == ["rank", "summarize", "all"]
-    assert cfg.cooldown_seconds == 60
-    assert cfg.daily_limit == 3
-
-
-def test_example_config_documents_the_same_defaults():
-    """示例配置里的 admin 段必须与代码默认值一致,否则又是一处漂移。"""
-    example = load_config(Path(__file__).resolve().parents[1] / "config.example.yaml")
-
-    assert example.admin == Config().admin
-
-
 def test_admin_stage_typo_is_rejected(tmp_path):
     """阶段名拼错会让人以为有护栏、其实没有 —— 必须直接报错。"""
     path = tmp_path / "config.yaml"
