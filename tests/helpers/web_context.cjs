@@ -9,7 +9,7 @@ const vm = require('node:vm');
   const classes = { add() {}, remove() {} };
   const box = { classList: classes };
   const row = { classList: classes, parentNode: {}, isConnected: true };
-  const button = { innerHTML: 'Run' };
+  const button = { innerHTML: 'Run', dataset: {runForce: input.force ? 'true' : 'false'} };
   const empty = () => ({dataset:{},querySelector:empty,replaceChildren(){},append(){},
     setAttribute(){},removeAttribute(){},scrollIntoView(){}});
   const panel = empty();

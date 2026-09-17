@@ -18,7 +18,7 @@
     <div class="meta">
       {% if it['ignored'] %}<span class="tag tag--ignored">已否决</span>{% endif %}
       {% if it['starred'] %}<span class="tag tag--starred">已收藏</span>{% endif %}
-      {% if it['score_partial'] %}<span class="tag tag--warn">{{ icon('alert') }}精排失败</span>{% endif %}
+      {% if it['score_partial'] %}<span class="tag tag--warn">{{ icon('alert') }}待 AI 评分</span>{% endif %}
       {% if it['journal'] %}<span class="meta__journal">{{ it['journal']|unesc }}</span>{% endif %}
       {% if it['published_at'] %}<time datetime="{{ it['published_at'] }}">{{ it['published_at'] }}</time>{% endif %}
       {% if it['impact_factor'] %}<span class="tag tag--if">IF {{ it['impact_factor'] }}</span>{% endif %}
@@ -50,11 +50,14 @@
       </div>
       {% if it['score_partial'] %}
         <p class="notice notice--ignored">
-          <b>这一篇没拿到 AI 打分</b> —— 它的精排批次失败了。<br>
-          所以上面的分数只由 BM25 粗排与规则算出,<b>不能和其他条目横向比较</b>。
-          下次排序会自动重试。
+          <b>待 AI 评分</b><br>
+          当前分数仅由关键词与规则计算，下次排序会继续处理。
         </p>
       {% endif %}
+      {% if it['score_status'] == 'historical' %}<p class="hint">沿用历史 AI 评分，尚未按当前偏好重评。</p>{% endif %}
+      {% if it['score_status'] == 'pending' %}<p class="hint">重评尚未完成，当前保留旧评分。下次排序会继续处理。</p>{% endif %}
+      {% if it['score_status'] == 'current' %}<p class="hint">已按当前评分偏好评估。</p>{% endif %}
+      {% if it['llm_scored_at'] %}<p class="hint">AI 评分时间：{{ it['llm_scored_at']|local_time }}</p>{% endif %}
       {% if s is not none %}
         <dl class="parts">
           <dt>AI 精排</dt><dd>{{ it['llm_score'] if it['llm_score'] is not none else '—' }}</dd>

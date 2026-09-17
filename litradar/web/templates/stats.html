@@ -71,7 +71,7 @@
         </div>
       {% endfor %}
     </div>
-    <p>反馈是整个系统里唯一会随时间变好的部分。攒够几十条后,可以把收藏过的条目做成精排提示词的示例。</p>
+    <p>AI 评分会参考收藏与不感兴趣的文献。新增反馈用于之后的评分，不会自动重评全部历史文献。</p>
   {% else %}
     <p>还没有反馈。在雷达页点收藏、已读或不感兴趣就会记下来。</p>
   {% endif %}
@@ -88,6 +88,13 @@
     <button type="button" class="btn" data-run-stage="summarize"><span class="step-n">5</span>摘要</button>
     <button type="button" class="btn btn--primary" data-run-stage="all">{{ icon('play') }}全部运行</button>
   </div>
+  <p class="hint">排序只初评新文献并续跑待完成的重评；关键词变化后按方向设置重评历史范围。“全部运行”也使用这一规则。</p>
+  <details class="settings-disclosure">
+    <summary>重新评估历史文献</summary>
+    <p>全部重排会刷新“{{ group.name if group else '当前方向' }}”中通过排除规则的 {{ rerank_count }} 篇文献，包括较早发表的文章。适合大幅调整方向或更换模型后使用，会重新调用 AI。</p>
+    <button type="button" class="btn" data-run-stage="rank" data-run-force="true">{{ icon('refresh-cw') }}全部重排</button>
+    <p class="hint">只更新评分，不重新采集或生成摘要。失败时保留旧评分，下次点击“排序”可继续未完成的部分。</p>
+  </details>
   {% include 'partials/pipeline.html' %}
 </div>
 
@@ -98,11 +105,10 @@
   {% for r in s['last_runs'] %}
     <div class="run">
       <span class="stage">{{ stage_name.get(r['stage'], r['stage']) }}</span>
-      <span class="status {{ 'status--ok' if r['status'] == 'ok' else 'status--err' }}">{{ '成功' if r['status'] == 'ok' else '失败' }}</span>
+      <span class="status {{ 'status--ok' if r['status'] == 'ok' else 'status--err' }}">{{ {'ok':'成功', 'partial':'部分完成'}.get(r['status'], '失败') }}</span>
       <time datetime="{{ r['finished_at'] }}">{{ r['finished_at']|local_time }}</time>
       <span class="kvs">
-        {# 值可能是整段查询列表,截到 60 字,完整内容放 title #}
-        {% for k, v in (r['stats']|fromjsonobj).items() %}{% set vs = v|string %}<span{% if vs|length > 65 %} title="{{ vs }}"{% endif %}>{{ k }} <b>{{ vs|truncate(60, true, '…') }}</b></span>{% endfor %}
+        <span>{{ r['stats']|fromjsonobj|run_summary }}</span>
       </span>
     </div>
   {% else %}

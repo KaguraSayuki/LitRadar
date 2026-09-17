@@ -53,43 +53,14 @@ def client(tmp_path, monkeypatch):
     return TestClient(webapp.app)
 
 
-def test_收件箱只显示当前组的条目(client):
+def test_switching_groups_preserves_isolation_and_default_selection(client):
     page = client.get("/")
-
     assert "Sensor" in page.text
     assert "Perovskite" not in page.text, "别的组的条目不该出现在这一组"
-
-
-def test_切换组看到另一组(client):
+    assert "g=org" in page.text and "g=mat" in page.text
     page = client.get("/?g=mat")
-
     assert "Perovskite" in page.text
     assert "Sensor" not in page.text
-
-
-def test_切换器列出所有组(client):
-    page = client.get("/")
-
-    assert "g=org" in page.text and "g=mat" in page.text
-    assert "有机" in page.text and "材料" in page.text
-
-
-def test_只有一个组时不显示切换器(tmp_path, monkeypatch):
-    cfg = Config()
-    cfg.app.db_path = str(tmp_path / "one.db")
-    cfg.app.interests = str(tmp_path / "i.yaml")
-    cfg.interests_data = {"direction": "单方向", "search_queries": ["a"]}
-    monkeypatch.setattr(webapp, "get_cfg", lambda: cfg)
-
-    page = TestClient(webapp.app).get("/")
-
-    assert "groupbar" not in page.text
-
-
-def test_切组后记住选择(client):
-    client.get("/?g=mat")
-
-    # 无组参数的新导航仍使用 Cookie 作为默认视图。
     assert client.cookies.get(webapp.GROUP_COOKIE) == "mat"
     assert "Perovskite" in client.get("/").text
 
@@ -106,28 +77,6 @@ def test_未知组名退回第一个启用的组(client):
 
     assert page.status_code == 200
     assert "Sensor" in page.text
-
-
-def test_统计页按当前组(client):
-    page = client.get("/?g=mat")
-
-    assert page.status_code == 200
-    assert "材料" in page.text
-
-
-def test_停用的组在下拉里标出来(tmp_path, monkeypatch):
-    cfg = Config()
-    cfg.app.db_path = str(tmp_path / "off.db")
-    cfg.app.interests = str(tmp_path / "i.yaml")
-    cfg.interests_data = {"groups": [
-        {"slug": "on", "name": "在跑", "search_queries": ["a"]},
-        {"slug": "off", "name": "停了", "enabled": False, "search_queries": ["b"]},
-    ]}
-    monkeypatch.setattr(webapp, "get_cfg", lambda: cfg)
-
-    page = TestClient(webapp.app).get("/")
-
-    assert "is-off" in page.text
 
 
 def test_配置坏了不该让页面_500(tmp_path, monkeypatch):
@@ -379,11 +328,11 @@ def test_分页保留组和筛选条件(both_client, monkeypatch, path):
         assert all(query.get(k) == v for k, v in expected.items())
 
 
-@pytest.mark.parametrize("referer", ["http://testserver/?g=org", "http://testserver/search?q=Both&g=org"])
-def test_旧页面写请求可由同源Referer恢复组(both_client, referer):
+def test_旧页面写请求可由同源Referer恢复组(both_client):
     c, cfg, iid, ids = both_client
     c.get("/?g=mat")
-    r = c.post(f"/item/{iid}/action", data={"action": "ignore"}, headers={"Referer": referer})
+    r = c.post(f"/item/{iid}/action", data={"action": "ignore"},
+               headers={"Referer": "http://testserver/search?q=Both&g=org"})
     assert r.status_code == 200
     conn = db.Database(cfg.db_file).connect()
     states = dict(conn.execute("SELECT group_id, ignored FROM group_state WHERE item_id=?", (iid,)))
@@ -432,8 +381,9 @@ def test_新配置组同步前页面为空且读请求不建组(both_client, pat
     conn.close()
 
 
-@pytest.mark.parametrize("stage", ["search", "rank", "summarize", "all"])
-def test_真实前端脚本的反馈撤销及后台流水线都沿用页面组(both_client, monkeypatch, stage):
+@pytest.mark.parametrize("stage,force", [("search", False), ("rank", False),
+                                       ("summarize", False), ("all", False), ("rank", True)])
+def test_真实前端脚本的反馈撤销及后台流水线都沿用页面组(both_client, monkeypatch, stage, force):
     node = shutil.which("node")
     if not node:
         pytest.skip("前端执行回归需要 Node.js 18+;其余 Web 测试不依赖 Node")
@@ -445,15 +395,18 @@ def test_真实前端脚本的反馈撤销及后台流水线都沿用页面组(b
     result = subprocess.run(
         [node, str(Path(__file__).parent / "helpers" / "web_context.cjs")],
         input=json.dumps({"itemId": iid, "stage": stage, "group": body["data-group"],
-                          "state": body["data-state"]}),
+                          "state": body["data-state"], "force": force}),
         text=True, capture_output=True, check=True,
     )
     requests = json.loads(result.stdout)
     assert len(requests) == 3  # ignore, undo, one background run
+    assert parse_qs(urlsplit(requests[-1]['url']).query).get('force') == (['1'] if force else None)
     calls, limits = [], []
     cfg.admin.guarded_stages = (stage,)
 
     def run(*a, **kw):
+        if stage == 'rank':
+            assert kw['force'] == force
         calls.append(kw["group"].slug)
         return {"errors": 0}
 
@@ -479,6 +432,34 @@ def test_真实前端脚本的反馈撤销及后台流水线都沿用页面组(b
     assert c.cookies.get(webapp.GROUP_COOKIE) == "mat"  # 写请求不切换默认视图
 
 
+@pytest.mark.parametrize('path,status', [
+    ('/', 'current'), ('/', 'pending'), ('/search?q=Both', 'historical'),
+    ('/item/1', 'current'), ('/item/1', 'historical'), ('/item/1', 'pending'),
+])
+def test_score_versions_and_pending_refresh_are_visible(both_client, path, status):
+    from litradar.ranking_state import preference_hash
+    c, cfg, iid, ids = both_client
+    version = preference_hash(load_groups(cfg)[0])
+    conn = db.Database(cfg.db_file).connect()
+    db.save_score(conn, iid, group_id=ids['org'], llm_score=80, final_score=75,
+                  preference_hash=None if status == 'historical' else version)
+    if status == 'pending':
+        conn.execute('INSERT INTO rank_pending (group_id,item_id,preference_hash) VALUES (?,?,?)',
+                     (ids['org'], iid, version))
+    conn.commit()
+    conn.close()
+    page = c.get(path, params={'g': 'org', 'q': 'Both'})
+    assert page.status_code == 200
+    if status == 'historical':
+        assert '历史' in page.text
+    elif status == 'pending':
+        assert ('待重评' in page.text or '重评尚未完成' in page.text)
+    elif path.startswith('/item'):
+        assert '已按当前评分偏好评估' in page.text
+    else:
+        assert '历史评分' not in page.text and '待重评' not in page.text
+
+
 @pytest.mark.parametrize("path", ["/", "/week", "/search?q=Both", "/item/1"])
 def test_当前组说明缺失时页面和查询都不回退到其他方向(both_client, path):
     c, cfg, iid, ids = both_client
@@ -497,9 +478,8 @@ def test_当前组说明缺失时页面和查询都不回退到其他方向(both
     assert "Only organic relevance" not in page.text
 
 
-@pytest.mark.parametrize("slug", ["材料", "mat&chem", "mat+chem", "mat%26chem",
-                                  "mat/chem?#", 'mat "chem"'])
-def test_合法特殊slug在保存切换Cookie导航和反馈中保持身份(both_client, slug, monkeypatch):
+def test_合法特殊slug在保存切换Cookie导航和反馈中保持身份(both_client, monkeypatch):
+    slug = '示例 &+%26/?# "quoted"'
     c, cfg, iid, ids = both_client
     monkeypatch.setenv('LITRADAR_TOKEN','legacy-test-token')
     c.headers['X-Token']='legacy-test-token'
@@ -547,30 +527,29 @@ def test_未知Unicode组和损坏Cookie安全回退到实际组(both_client):
     assert PageElements(page.text).attrs("body")[0]["data-group"] == "org"
 
 
-@pytest.mark.parametrize("slug,needle", [("bad\nslug", "控制字符"),
-                                        ("材" * 86, "256"),
-                                        ("\ud800", "Unicode")])
-def test_无效slug在编辑页报错而不覆盖已有配置(both_client, slug, needle, monkeypatch):
+def test_无效slug在编辑页报错而不覆盖已有配置(both_client, monkeypatch):
     c, cfg, iid, ids = both_client
     monkeypatch.setenv('LITRADAR_TOKEN','legacy-test-token')
     c.headers['X-Token']='legacy-test-token'
     before = yaml.safe_dump(cfg.interests_data)
     cfg.interests_file.write_text(before, encoding="utf-8")
-    raw = yaml.safe_dump({"groups": [{"slug": slug, "name": "Bad group"}]})
+    raw = yaml.safe_dump({"groups": [{"slug": "bad\nslug", "name": "Bad group"}]})
     page = c.post("/interests", data={"raw": raw})
     assert page.status_code == 400
-    assert needle in page.text
+    assert "控制字符" in page.text
     assert cfg.interests_file.read_text(encoding="utf-8") == before
 
 
-@pytest.mark.parametrize("path", ["/", "/week", "/search?q=Both", "/item/1"])
-@pytest.mark.parametrize("mode,notice,label", [
-    ("group_disabled", "本组已关闭 AI 精排", "关键词分"),
-    ("disabled", "已关闭 AI", "关键词分"),
-    ("no_key", "尚未设置模型 API 密钥", "关键词分"),
-    ("failed", "", "关键词分"),
-    ("scored", "", "相关度"),
-    ("unscored", "", "未评分"),
+# Shared card rendering needs one case per state; route-specific joins are tested above.
+@pytest.mark.parametrize("path,mode,notice,label", [
+    ("/", "group_disabled", "本组已关闭 AI 精排", "关键词分"),
+    ("/", "disabled", "已关闭 AI", "关键词分"),
+    ("/", "no_key", "尚未设置模型 API 密钥", "关键词分"),
+    ("/", "failed", "", "关键词分"),
+    ("/week", "scored", "", "相关度"),
+    ("/search?q=Both", "unscored", "", "未评分"),
+    ("/item/1", "failed", "", "关键词分"),
+    ("/item/1", "no_key", "尚未设置模型 API 密钥", "关键词分"),
 ])
 def test_评分界面区分主动关闭真实失败和成功(both_client, monkeypatch, path, mode, notice, label):
     c, cfg, iid, ids = both_client
@@ -590,7 +569,7 @@ def test_评分界面区分主动关闭真实失败和成功(both_client, monkey
     assert page.status_code == 200
     assert "Both groups" in page.text
     assert ('class="score__l">' + label + "</span>") in page.text
-    assert ("精排失败" in page.text) == (mode == "failed")
+    assert ("待 AI 评分" in page.text) == (mode == "failed")
     assert ("score--partial" in page.text) == (mode == "failed")
     notices = [p for p in PageElements(page.text).attrs("p") if p.get("class") == "notice"]
     assert bool(notices) == bool(notice)

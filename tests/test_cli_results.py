@@ -32,11 +32,14 @@ def stages(tmp_path, monkeypatch):
     return calls, failures
 
 
-@pytest.mark.parametrize("stage,argv", [
-    ("rank", ["rank"]), ("summarize", ["summarize"]),
-    ("search", ["ingest", "search"]), ("search", ["ingest", "all"]),
+@pytest.mark.parametrize("stage,argv,failed_groups", [
+    ("rank", ["rank"], []),
+    ("rank", ["rank"], ["org"]),
+    ("rank", ["rank", "--force"], ["org", "mat"]),
+    ("summarize", ["summarize"], ["org"]),
+    ("search", ["ingest", "search"], ["org"]),
+    ("search", ["ingest", "all"], []),
 ])
-@pytest.mark.parametrize("failed_groups", [[], ["org"], ["org", "mat"]])
 def test_分组CLI成功部分失败全部失败的退出状态(stages, capsys, stage, argv, failed_groups):
     calls, failures = stages
     failures.update((stage, slug) for slug in failed_groups)

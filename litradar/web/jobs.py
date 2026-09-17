@@ -62,11 +62,11 @@ class JobStore:
                 pass
         return state
 
-    def start(self, job_id, stage, group, days, operation, check):
+    def start(self, job_id, stage, group, days, operation, check, *, force=False):
         if not re.fullmatch(r'[A-Za-z0-9_-]{16,80}', job_id):
             raise SettingsError('运行请求标识无效，请刷新页面后重试。')
         def same_request(previous):
-            if (previous['stage'], previous['group_slug'], previous['days']) != (stage, group.slug if group else None, days):
+            if (previous['stage'], previous['group_slug'], previous['days'], previous.get('force', False)) != (stage, group.slug if group else None, days, force):
                 raise SettingsError('这个运行请求已用于其他操作，请刷新页面。', status=409)
             return previous
         previous = self.snapshot(job_id)
@@ -77,12 +77,12 @@ class JobStore:
             stack.enter_context(single_instance(self.pipeline_lock))
             now = time.time()
             plan = list(LABELS) if stage == 'all' else [stage]
-            state = {'id': job_id, 'stage': stage, 'status': 'running',
+            state = {'id': job_id, 'stage': stage, 'force': force, 'status': 'running',
                 'group_slug': group.slug if group else None,
                 'group_name': group.name if group and stage not in ('mail', 'enrich') else '全部方向',
                 'days': days, 'started_at': now, 'updated_at': now, 'finished_at': None,
                 'message': '任务已启动', 'current': None, 'total': None,
-                'steps': [{'key': key, 'label': LABELS[key], 'status': 'waiting', 'message': ''} for key in plan]}
+                'steps': [{'key': key, 'label': '全部重排' if force else LABELS[key], 'status': 'waiting', 'message': ''} for key in plan]}
             with single_instance(self.metadata_lock, blocking=True):
                 data = self._read()
                 # A concurrent duplicate may have completed before the pipeline lock was obtained.

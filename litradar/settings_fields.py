@@ -64,8 +64,7 @@ MODEL = [
 READING = [
     Field("llm.enabled", "启用 AI 排序与摘要", "bool", "关闭后保留已有摘要，新文献按关键词和规则排序"),
     Field("llm.deep_summary_top_n", "每个方向生成深度摘要的篇数", "int", "按相关度选择；其他文献生成简要摘要，同篇中性摘要在各方向复用", 0, 200),
-    Field("llm.rerank_top_k", "每个方向最多精排篇数", "int", "0 表示处理范围内全部候选；会产生模型调用费用", 0, 10000),
-    Field("app.pipeline_window_days", "文献处理范围（天）", "int", "排序与摘要覆盖这段时间，应不小于已启用来源的回溯范围", 1, 3650),
+    Field("app.pipeline_window_days", "摘要处理范围（天）", "int", "摘要覆盖这段时间，应不小于已启用来源的回溯范围；首次评分和全部重排不受此限制", 1, 3650),
     Field("journal_rank.enabled", "展示期刊等级与影响因子", "bool", "需要 easyScholar 密钥"),
     Field("journal_rank.max_lookups", "每次最多查询新期刊数", "int", "结果会缓存，后续优先复用", 0, 1000),
     Field("llm.rerank_batch_size", "每个精排批次篇数", "int", "过大可能超过模型输入上限", 1, 100, advanced=True),

@@ -1,11 +1,4 @@
-"""排序:三阶段漏斗。
-
-    Stage 1  规则过滤      命中 negative 直接丢;命中关键词/期刊/CAS → 加分
-    Stage 2  BM25 粗排     本地关键词评分,可选截取 top-K
-    Stage 3  LLM 精排      分批 listwise 打分 + 给理由
-
-最终分 = w_llm*llm + w_coarse*coarse + w_rule*rule
-"""
+"""Local filtering and ranking, with incremental per-group AI scores."""
 from __future__ import annotations
 
 import hashlib
@@ -14,9 +7,9 @@ import math
 import re
 import sqlite3
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
-from . import db, progress
+from . import db, progress, ranking_state
 from .config import Config
 from .llm import LLMClient, LLMError, validate_scores
 
@@ -218,6 +211,21 @@ def validate_interests(data: Any, *, require_keys: bool = True) -> list[str]:
     for path in _INTERESTS_LIST_FIELDS:
         check_string_list(path, data.get(path))
 
+    policy = data.get("rerank_policy")
+    if policy is not None and policy not in ("score", "top_n"):
+        errors.append("rerank_policy 必须选择 score 或 top_n")
+    for key, default, low, high in (("rerank_min_score", 70, 0, 100),
+                                   ("rerank_top_n", 100, 1, 1000000)):
+        value = data.get(key, default)
+        if value is None:
+            continue
+        valid = (isinstance(value, (int, float)) and not isinstance(value, bool)
+                 and low <= value <= high and math.isfinite(value))
+        if key == "rerank_top_n":
+            valid = valid and isinstance(value, int)
+        if not valid:
+            errors.append(f"{key} 必须是 {low}–{high} 范围内的{'整数' if key == 'rerank_top_n' else '数字'}")
+
     keywords = data.get("keywords")
     if keywords is not None and not isinstance(keywords, dict):
         errors.append(f"keywords 必须是映射或 null,当前是{_type_label(keywords)}")
@@ -281,6 +289,9 @@ class Profile:
     # 本组是否跑 LLM 精排。规则与 BM25 是本地计算、不花钱,永远都跑;
     # 精排是按组花钱的,所以给一个按组的开关(见 config 的 admin 段)。
     llm_rank: bool = True
+    rerank_policy: str = "score"
+    rerank_min_score: float = 70.0
+    rerank_top_n: int = 100
 
     @classmethod
     def from_dict(cls, d: dict) -> "Profile":
@@ -295,6 +306,8 @@ class Profile:
         jr = d.get("journals") or {}
         multi = [q for q in (d.get("search_queries") or []) if q and q.strip()]
         return cls(
+            enabled=_as_bool(d.get("enabled"), True, field_name="enabled"),
+            llm_rank=_as_bool(d.get("llm_rank"), True, field_name="llm_rank"),
             name=d.get("name") or "default",
             direction=(d.get("direction") or "").strip(),
             core=[k.lower() for k in kw.get("core") or []],
@@ -315,6 +328,9 @@ class Profile:
             seed_dois=[x.strip() for x in (d.get("seed_dois") or []) if x and x.strip()],
             exclude_title_prefixes=[p.lower() for p in
                                     (d.get("exclude_title_prefixes") or [])],
+            rerank_policy=d.get("rerank_policy") or "score",
+            rerank_min_score=70.0 if d.get("rerank_min_score") is None else float(d["rerank_min_score"]),
+            rerank_top_n=100 if d.get("rerank_top_n") is None else int(d["rerank_top_n"]),
         )
 
     @property
@@ -555,9 +571,7 @@ def coarse_rank(kept: list[tuple[sqlite3.Row, float, dict]], prof: Profile,
     must.sort(key=lambda x: -(x[3] * 0.7 + x[1] * 0.3))
     rest.sort(key=lambda x: -(x[3] * 0.7 + x[1] * 0.3))
 
-    # 核心期刊条目优先,但不设硬上限 —— 上限会把"核心期刊占了 24 本里一大半"
-    # 这种配置下的保送放大成事实上的全部放行,反而掩盖问题。顺序由这里决定,
-    # 是否值得看由 LLM 分数决定。
+    # 核心期刊优先，其余条目再按关键词与规则分排序。
     picked = must + rest
     return _cap([(r, rule, d) for r, rule, d, _ in picked])
 
@@ -605,7 +619,7 @@ RERANK_PROMPT = """根据用户的研究方向与偏好,为每篇候选文献打
 4. 只输出 JSON,不要任何额外文字
 
 输出格式:
-{{"scores":[{{"id":1,"score":85,"reason":"光氧化还原C–H活化,与在研项目直接相关"}}]}}"""
+{{"scores":[{{"id":1,"score":85,"reason":"与当前关注主题直接相关"}}]}}"""
 
 
 def _format_item(i: int, row: sqlite3.Row) -> str:
@@ -647,12 +661,14 @@ def feedback_examples(conn: sqlite3.Connection, limit: int = 6, *,
 def llm_rerank(rows: list[tuple[sqlite3.Row, float, dict]], prof: Profile,
                cfg: Config, llm: LLMClient,
                liked: list[str] | None = None,
-               disliked: list[str] | None = None) -> dict[int, tuple[float, str]]:
+               disliked: list[str] | None = None,
+               on_batch: Callable[[dict[int, tuple[float, str]]], None] | None = None,
+               ) -> dict[int, tuple[float, str]]:
     """返回 {item_id: (llm_score, reason)}。失败时返回空 dict,由调用方降级。"""
     out: dict[int, tuple[float, str]] = {}
     liked_txt = "\n".join(f"- {t[:90]}" for t in (liked or [])) or "(暂无)"
     disliked_txt = "\n".join(f"- {t[:90]}" for t in (disliked or [])) or "(暂无)"
-    bs = max(5, cfg.llm.rerank_batch_size)
+    bs = max(1, cfg.llm.rerank_batch_size)
 
     for start in range(0, len(rows), bs):
         batch = rows[start:start + bs]
@@ -671,144 +687,142 @@ def llm_rerank(rows: list[tuple[sqlite3.Row, float, dict]], prof: Profile,
             items=listing,
         )
         try:
-            data = llm.json(RERANK_SYSTEM, prompt, max_tokens=2048)
+            data = llm.json(RERANK_SYSTEM, prompt, max_tokens=max(2048, len(batch) * 128))
+            accepted = {}
             for entry in validate_scores(data, len(batch)):
                 iid = int(batch[entry["id"] - 1][0]["id"])
-                out[iid] = (float(entry["score"]), entry["reason"].strip()[:80])
+                accepted[iid] = (float(entry["score"]), entry["reason"].strip()[:80])
         except (LLMError, ValueError, KeyError, TypeError) as e:
             print(f"  [warn] 精排批次 {start//bs+1} 失败: {e}")
+            progress.report(f'{prof.name} · 第 {start // bs + 1} 批未完成，已有评分保留',
+                            start + len(batch), len(rows))
             continue
-        finally:
-            progress.report(f'{prof.name} · AI 评分，已处理 {start + len(batch)} 篇', start + len(batch), len(rows))
+        # Commit before reporting success; database failures must escape this loop.
+        if on_batch and accepted:
+            on_batch(accepted)
+        out.update(accepted)
+        progress.report(f'{prof.name} · 已处理 {start + len(batch)} / {len(rows)} 篇，成功 {len(out)} 篇',
+                        start + len(batch), len(rows))
     return out
 
 
 # ------------------------------------------------------------------- driver
-def _rank_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
-                group_id: int, *, days: int, verbose: bool) -> dict:
-    """**一个组**的排序:规则 → BM25 →(可选)LLM 精排。
+def candidate_rows(conn: sqlite3.Connection, group_id: int) -> list[sqlite3.Row]:
+    return list(conn.execute(
+        """SELECT i.* FROM item i
+           JOIN item_group ig ON ig.item_id=i.id AND ig.group_id=?
+           WHERE i.kind='paper' ORDER BY i.published_at DESC, i.id""", (group_id,)))
 
-    候选只取**本组的成员**:不给全库打分,否则 LLM 花费会随组数直接翻倍。
-    规则与 BM25 是本地计算(免费),所以永远都跑;LLM 精排花钱,受
-    ``prof.llm_rank`` 控制。
+
+def _rank_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
+                group_id: int, *, days: int, verbose: bool, force: bool = False) -> dict:
+    """Score new group members and a durable snapshot of requested historical items.
+
+    ``days`` remains accepted for pipeline/CLI compatibility. First scoring and
+    explicit refreshes include all stored members, regardless of publication date.
     """
     started = db.now()
-    stat: dict[str, Any] = {"group": prof.slug}
+    stat: dict[str, Any] = {"group": prof.slug, "force": force}
     try:
-        rows = list(conn.execute(
-            f"""SELECT i.* FROM item i
-                JOIN item_group ig ON ig.item_id = i.id AND ig.group_id = ?
-               WHERE i.kind='paper' AND {db.in_window('i')}
-               ORDER BY i.published_at DESC""",
-            # in_window 占两个 ?(没有 published_at 时回退比 created_at)
-            (group_id, f"-{days} days", f"-{days} days"),
-        ).fetchall())
+        rows = candidate_rows(conn, group_id)
+        scores = {r["item_id"]: dict(r) for r in conn.execute(
+            "SELECT * FROM score WHERE group_id=?", (group_id,))}
         stat["candidates"] = len(rows)
         progress.report(f'{prof.name} · 正在筛选 {len(rows)} 篇文献')
-
         kept, dropped = rule_filter(rows, prof)
-        stat["after_rule"] = len(kept)
-        stat["dropped_by_rule"] = dropped
+        stat["after_rule"], stat["dropped_by_rule"] = len(kept), dropped
+        eligible = {int(r["id"]) for r, _, _ in kept}
+        version, pending = ranking_state.prepare(
+            conn, group_id, prof, eligible, scores, force=force)
+        new_ids = {iid for iid in eligible if scores.get(iid, {}).get("llm_score") is None}
+        target_ids = new_ids | pending
 
-        # 被规则丢掉的条目标记为 excluded —— 收件箱据此隐藏它们。
-        # 之前它们只是"没有分数",仍排在列表末尾逼用户手动忽略 ——
-        # 实测 139 条忽略反馈里 119 条属于这种。
-        #
-        # **excluded 是按组的**:组 A 的规则排除的文献,完全可能是组 B 的核心。
-        #
-        # 例外只有一个:被**收藏**的不参与自动排除。收藏是用户明确说过的
-        # "我要留着",不能被后续收紧的检索词悄悄吃掉。
+        # Explicit exclusions affect visibility, but never erase successful scores.
         starred = db.starred_ids(conn)
-        kept_ids_now = {int(r["id"]) for r, _, _ in kept}
-        auto_dropped = [int(r["id"]) for r in rows if int(r["id"]) not in kept_ids_now]
-        dropped_ids = [i for i in auto_dropped if i not in starred]
-        # 反过来说,历史上被旧逻辑误伤的收藏条目要恢复出来
-        db.set_excluded(conn, [i for i in auto_dropped if i in starred], False,
+        auto_dropped = {int(r["id"]) for r in rows} - eligible
+        db.set_excluded(conn, list(auto_dropped - starred), True, group_slug=prof.slug)
+        db.set_excluded(conn, list(eligible | (auto_dropped & starred)), False,
                         group_slug=prof.slug)
-        stat["protected_by_star"] = len(auto_dropped) - len(dropped_ids)
-        db.set_excluded(conn, dropped_ids, True, group_slug=prof.slug)
+        stat["protected_by_star"] = len(auto_dropped & starred)
         conn.commit()
 
-        db.set_excluded(conn, [int(r["id"]) for r, _, _ in kept], False,
-                        group_slug=prof.slug)
-
-        kept = coarse_rank(kept, prof, cfg.llm.rerank_top_k)
+        kept = coarse_rank(kept, prof)
         stat["after_coarse"] = len(kept)
-
-        # 清掉本轮【最终未被保留】条目**在本组**的旧分数。
-        # 必须在 coarse_rank 之后做:放在之前只会按中间集合清理,
-        # 那些"过了规则但没进 LLM"的条目会带着上一轮的分数残留下来。
-        kept_ids = [int(r["id"]) for r, _, _ in kept]
-        window = ("item_id IN (SELECT id FROM item WHERE kind='paper' "
-                  f"AND {db.in_window('')})")
-        if kept_ids:
-            ph = ",".join("?" for _ in kept_ids)
-            conn.execute(
-                f"DELETE FROM score WHERE group_id = ? AND {window} "
-                f"AND item_id NOT IN ({ph})",
-                [group_id, f"-{days} days", f"-{days} days", *kept_ids],
-            )
-        else:
-            conn.execute(f"DELETE FROM score WHERE group_id = ? AND {window}",
-                         [group_id, f"-{days} days", f"-{days} days"])
-        conn.commit()
-
-        llm = LLMClient(cfg.llm)
-        llm_scores: dict[int, tuple[float, str]] = {}
-        if not prof.llm_rank:
-            stat["llm_skipped"] = "本组已关闭 LLM 精排(interests.yaml 的 llm_rank)"
-        elif llm.available and kept:
-            # 反馈闭环的消费端:收藏 / 否决过的标题当少样本塞进精排 prompt。
-            # 之前这里没传,prompt 里的正负例永远是"(暂无)"——
-            # 用户点的每一次收藏都只是落库,从不影响下一轮打分。
-            liked, disliked = feedback_examples(conn, group_id=group_id)
-            stat["feedback_liked"] = len(liked)
-            stat["feedback_disliked"] = len(disliked)
-            if verbose:
-                print(f"  [{prof.name}] LLM 精排 {len(kept)} 篇…"
-                      f"(参考 {len(liked)} 正例 / {len(disliked)} 负例)")
-            llm_scores = llm_rerank(kept, prof, cfg, llm,
-                                    liked=liked, disliked=disliked)
-            stat["llm_scored"] = len(llm_scores)
-            stat["llm_failed"] = len(kept) - len(llm_scores)
-        else:
-            stat["llm_skipped"] = "未配置 API key 或已禁用"
+        by_id = {int(row["id"]): (row, rule, detail) for row, rule, detail in kept}
+        targets = [entry for entry in kept if int(entry[0]["id"]) in target_ids]
+        stat.update(llm_new=0, llm_refreshed=0, llm_scored=0, llm_failed=0,
+                    new_candidates=len(new_ids), refresh_candidates=len(pending - new_ids))
+        progress.report(f'{prof.name} · 待初评 {len(new_ids)} 篇，历史重评 {len(pending - new_ids)} 篇，'
+                        f'复用 {len(eligible - target_ids)} 篇', 0, len(targets))
 
         w = cfg.ranking
-        # 没拿到 LLM 分的条目怎么合成 final,取决于这一轮 LLM 到底跑没跑:
-        #   * 跑了、只是个别批次失败(llm_scores 非空)—— **不归一化**,分数
-        #     封顶在 w_coarse+w_rule(=15)。以前这里除以 0.15 补回满量程,
-        #     一个只有粗排分的条目能冲到 100,反超真被 LLM 评过的,而界面上
-        #     根本看不出它没被评过。宁可让它明显偏低,也不要假装它很相关。
-        #   * 压根没跑(没配 key / 全部批次失败 / 本组关了精排)—— 保持归一化。
-        #     此时全场都没有 LLM 分,谁也不会反超谁;分数铺满 0-100,界面的
-        #     阈值筛选才有意义。
-        normalize_missing = not llm_scores
-        for row, rule, detail in kept:
-            iid = int(row["id"])
+        successful: set[int] = set()
+        has_ai = any(scores.get(iid, {}).get("llm_score") is not None for iid in eligible)
+
+        def save_local(iid):
+            _, rule, detail = by_id[iid]
             coarse = float(detail.get("coarse", 0.0))
-            rule_norm = min(rule, 100.0)
-            coarse_norm = min(coarse, 100.0)
-            if iid in llm_scores:
-                ls, reason = llm_scores[iid]
-                final = (w.w_llm * ls + w.w_coarse * coarse_norm + w.w_rule * rule_norm)
-            else:
-                ls, reason = None, None
-                base = w.w_coarse * coarse_norm + w.w_rule * rule_norm
-                total_w = w.w_coarse + w.w_rule
-                final = (base / total_w if total_w else 0.0) if normalize_missing else base
-            db.save_score(
-                conn, iid, group_id=group_id,
-                rule_score=round(rule, 2), coarse_score=round(coarse, 2),
-                llm_score=ls, llm_reason=reason,
-                llm_model=cfg.llm.model if ls is not None else None,
-                final_score=round(final, 2),
-            )
-        stat["scored"] = len(kept)
-        db.log_run(conn, "rank", "ok", stat, started_at=started,
-                   group_slug=prof.slug)
+            previous = scores.get(iid, {})
+            ls = previous.get("llm_score")
+            base = w.w_coarse * min(coarse, 100.0) + w.w_rule * min(rule, 100.0)
+            local_weight = w.w_coarse + w.w_rule
+            final = (w.w_llm * ls + base) if ls is not None else (
+                base if has_ai else (base / local_weight if local_weight else 0.0))
+            values = {key: previous.get(key) for key in (
+                "llm_score", "llm_reason", "llm_model", "preference_hash",
+                "evidence_hash", "feedback_hash", "llm_scored_at")}
+            db.save_score(conn, iid, group_id=group_id, rule_score=round(rule, 2),
+                          coarse_score=round(coarse, 2), final_score=round(final, 2), **values)
+
+        feedback_hash = None
+
+        def persist_batch(results):
+            nonlocal has_ai
+            has_ai = has_ai or bool(results)
+            for iid, (score, reason) in results.items():
+                if iid not in target_ids or iid in successful:
+                    continue
+                row = by_id[iid][0]
+                scores.setdefault(iid, {}).update(
+                    llm_score=score, llm_reason=reason, llm_model=cfg.llm.model,
+                    preference_hash=version, evidence_hash=ranking_state.fingerprint(_format_item(1, row)),
+                    feedback_hash=feedback_hash, llm_scored_at=db.now())
+                save_local(iid)
+                conn.execute("DELETE FROM rank_pending WHERE group_id=? AND item_id=? AND preference_hash=?",
+                             (group_id, iid, version))
+                successful.add(iid)
+            conn.commit()
+
+        llm = LLMClient(cfg.llm)
+        if not prof.llm_rank:
+            stat["llm_skipped"] = "本方向已关闭 AI 精排"
+        elif not targets:
+            stat["llm_skipped"] = "没有待评分文献，已复用历史结果"
+        elif llm.available:
+            liked, disliked = feedback_examples(conn, group_id=group_id)
+            feedback_hash = ranking_state.fingerprint([liked, disliked])
+            stat["feedback_liked"], stat["feedback_disliked"] = len(liked), len(disliked)
+            if verbose:
+                print(f"  [{prof.name}] 初评 {len(new_ids)} 篇，重评 {len(pending - new_ids)} 篇")
+            results = llm_rerank(targets, prof, cfg, llm, liked=liked, disliked=disliked,
+                                 on_batch=persist_batch)
+            persist_batch({iid: value for iid, value in results.items() if iid not in successful})
+            stat["llm_failed"] = len(target_ids - successful)
+        else:
+            stat["llm_skipped"] = "未配置模型凭据或已禁用，待评分文献将在启用后继续处理"
+
+        for iid in by_id:
+            save_local(iid)
+        stat.update(scored=len(kept), llm_scored=len(successful),
+                    llm_new=len(successful & new_ids), llm_refreshed=len(successful - new_ids),
+                    llm_reused=sum(scores.get(iid, {}).get("llm_score") is not None
+                                   for iid in eligible - successful),
+                    llm_pending=len(target_ids - successful))
+        db.log_run(conn, "rank", "partial" if stat["llm_failed"] else "ok", stat,
+                   started_at=started, group_slug=prof.slug)
         conn.commit()
     except Exception as e:  # noqa: BLE001
+        conn.rollback()
         db.log_run(conn, "rank", "failed", stat, error=str(e),
                    started_at=started, group_slug=prof.slug)
         conn.commit()
@@ -817,37 +831,31 @@ def _rank_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
 
 
 def run(cfg: Config, *, days: int = 30, verbose: bool = True,
-        group: Profile | None = None) -> dict:
-    """按订阅组排序。``group`` 指定时只跑那一个组。
-
-    **一个组失败不影响其它组**:某个方向的画像写坏了,不该让另外两个方向
-    当天没有分数。
-    """
+        group: Profile | None = None, force: bool = False) -> dict:
+    """Rank selected groups independently; force refreshes every eligible member."""
     groups = [group] if group is not None else load_enabled_groups(cfg)
     conn = db.Database(cfg.db_file).connect()
     try:
         ids = db.sync_groups(conn, load_groups(cfg))
         conn.commit()
-        total: dict[str, Any] = {"groups": {}, "candidates": 0, "after_rule": 0,
-                                 "dropped_by_rule": 0, "after_coarse": 0,
-                                 "scored": 0, "llm_scored": 0, "errors": 0,
-                                 "feedback_liked": 0, "feedback_disliked": 0}
+        counters = ("candidates", "after_rule", "dropped_by_rule", "after_coarse", "scored",
+                    "llm_scored", "llm_new", "llm_refreshed", "llm_reused", "llm_pending",
+                    "llm_failed", "feedback_liked", "feedback_disliked")
+        total: dict[str, Any] = {"groups": {}, "errors": 0, **dict.fromkeys(counters, 0)}
         for prof in groups:
             gid = ids.get(prof.slug)
             if gid is None:
                 continue
             try:
-                stat = _rank_group(conn, cfg, prof, gid, days=days, verbose=verbose)
+                stat = _rank_group(conn, cfg, prof, gid, days=days, verbose=verbose, force=force)
             except Exception as e:  # noqa: BLE001
                 total["errors"] += 1
                 total["groups"][prof.slug] = {"error": f"{type(e).__name__}: {e}"}
                 if verbose:
-                    print(f"  [warn] 订阅组「{prof.name}」排序失败: "
-                          f"{type(e).__name__}: {e}")
+                    print(f"  [warn] 订阅组「{prof.name}」排序失败: {type(e).__name__}: {e}")
                 continue
             total["groups"][prof.slug] = stat
-            for key in ("candidates", "after_rule", "dropped_by_rule", "after_coarse",
-                        "scored", "llm_scored", "feedback_liked", "feedback_disliked"):
+            for key in counters:
                 total[key] += int(stat.get(key, 0) or 0)
         return total
     finally:

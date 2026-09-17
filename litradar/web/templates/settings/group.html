@@ -30,7 +30,7 @@
   <input type="hidden" name="version" value="{{ version }}">
   <section class="settings-panel">
     {{ section_head('方向信息', '为这个课题取一个容易识别的名字。', 'target') }}
-    <div class="settings-field"><label for="name">研究方向名称</label><input id="name" name="name" maxlength="100" required value="{{ values.name }}" placeholder="例如：可见光催化" {% if errors.get('name') %}aria-invalid="true"{% endif %}>{% if errors.get('name') %}<p class="field-error">{{ errors.name }}</p>{% endif %}</div>
+    <div class="settings-field"><label for="name">研究方向名称</label><input id="name" name="name" maxlength="100" required value="{{ values.name }}" placeholder="为这个方向命名" {% if errors.get('name') %}aria-invalid="true"{% endif %}>{% if errors.get('name') %}<p class="field-error">{{ errors.name }}</p>{% endif %}</div>
     <div class="settings-field"><label for="direction">方向说明</label><textarea id="direction" name="direction" rows="3" placeholder="描述正在研究的问题，或希望从文献中了解什么。">{{ values.direction }}</textarea></div>
     <div class="settings-actions term-assist"><button class="btn btn--quiet" type="button" id="suggest-terms">{{ icon('sparkles') }}建议英文关键词</button><span class="hint">可选 AI 辅助，可能产生少量费用</span></div>
     <div id="term-suggestions" class="settings-result" role="status"></div>
@@ -56,6 +56,32 @@
       </div>
       <button class="btn" type="button" data-add-pair="issn-rows">{{ icon('plus') }}增加期刊编号</button>
     </details>
+  </section>
+  <section class="settings-panel">
+    {{ section_head('评分更新', '新文献会逐篇获得首次 AI 评分，已有结果在日常更新中复用。') }}
+    <div class="settings-field">
+      <label for="rerank_policy">关键词或评分偏好变化后，重评哪些历史文献</label>
+      <select id="rerank_policy" name="rerank_policy" aria-describedby="rerank-help" {% if errors.get('rerank_policy') %}aria-invalid="true"{% endif %}>
+        <option value="score" {% if values.rerank_policy == 'score' %}selected{% endif %}>按原综合分筛选</option>
+        <option value="top_n" {% if values.rerank_policy == 'top_n' %}selected{% endif %}>按原排名筛选</option>
+      </select>
+      {% if errors.get('rerank_policy') %}<p class="field-error">{{ errors.rerank_policy }}</p>{% endif %}
+    </div>
+    <div class="form-grid rerank-scope">
+      <div class="settings-field" data-rerank-policy="score">
+        <label for="rerank_min_score">原综合分至少达到</label>
+        <input id="rerank_min_score" name="rerank_min_score" type="number" min="0" max="100" step="0.1" required value="{{ values.rerank_min_score }}" {% if errors.get('rerank_min_score') %}aria-invalid="true"{% endif %}>
+        <p class="hint">0–100 分，包含等于此分数的文献。</p>
+        {% if errors.get('rerank_min_score') %}<p class="field-error">{{ errors.rerank_min_score }}</p>{% endif %}
+      </div>
+      <div class="settings-field" data-rerank-policy="top_n">
+        <label for="rerank_top_n">原排名前多少篇</label>
+        <input id="rerank_top_n" name="rerank_top_n" type="number" min="1" max="1000000" step="1" required value="{{ values.rerank_top_n }}" {% if errors.get('rerank_top_n') %}aria-invalid="true"{% endif %}>
+        <p class="hint">只从本方向已有 AI 评分的文献中选择。</p>
+        {% if errors.get('rerank_top_n') %}<p class="field-error">{{ errors.rerank_top_n }}</p>{% endif %}
+      </div>
+    </div>
+    <p class="hint" id="rerank-help">保存后在下次更新时执行，新文献始终评分。大幅调整方向或更换模型后，可在统计页“全部重排”。</p>
   </section>
   <section class="settings-panel">
     {{ section_head('检索条件', '每条条件分别检索，结果合并。每个输入框每行一个术语或短语。', 'search') }}

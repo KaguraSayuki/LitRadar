@@ -215,6 +215,32 @@ def test_interrupted_worker_is_not_automatically_restarted(owner, monkeypatch):
     assert state['finished_at'] and '中断' in state['message']
 
 
+def test_force_ranking_has_distinct_identity_and_retains_run_guards(owner, monkeypatch):
+    client, cfg = owner
+    calls = []
+    monkeypatch.setattr(web.rank, 'run', lambda *a, **kw: calls.append(kw) or {'llm_refreshed': 3})
+    run_id = uuid.uuid4().hex
+    url = '/admin/run/rank?background=1&g=default&force=1'
+    headers = {'X-Run-ID': run_id}
+    response = client.post(url, headers=headers)
+    assert response.status_code == 202 and response.json()['force'] is True
+    assert response.json()['steps'][0]['label'] == '全部重排'
+    with single_instance(cfg.db_file.parent / 'litradar.lock', blocking=True):
+        pass
+    assert client.post(url, headers=headers).status_code == 202
+    assert post_run(client, run_id=run_id).status_code == 409
+    assert len(calls) == 1 and calls[0]['force'] is True and calls[0]['group'].slug == 'default'
+    assert client.post('/admin/run/all?force=1').status_code == 400
+    assert client.post(url, headers={'Origin': 'https://elsewhere.invalid', 'X-Run-ID': uuid.uuid4().hex}).status_code == 403
+    def limited(*args):
+        raise web.HTTPException(429, '今天已达到上限')
+    monkeypatch.setattr(web, 'require_stage_limits', limited)
+    assert client.post(url, headers={'X-Run-ID': uuid.uuid4().hex}).status_code == 429
+    client.cookies.delete(access.ADMIN_COOKIE)
+    assert client.post(url, headers={'X-Run-ID': uuid.uuid4().hex}).status_code == 401
+    assert len(calls) == 1
+
+
 def test_limits_and_cli_lock_apply_before_background_work(owner, monkeypatch):
     client, cfg = owner
     calls = []

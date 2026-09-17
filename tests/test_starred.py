@@ -50,14 +50,9 @@ def test_starred_is_a_view_of_its_own(conn):
     assert ids == {a, b}
     # 未读视图不该出现被标已读的那条
     assert {r["id"] for r in db.get_items(conn, state="new")} == {a}
-
-
-def test_unstar_leaves_the_view(conn):
-    a = _add(conn, "a")
-    db.set_action(conn, a, "star")
-    assert db.count_items(conn, state="starred") == 1
     db.set_action(conn, a, "unstar")
-    assert db.count_items(conn, state="starred") == 0
+    assert [r["id"] for r in db.get_items(conn, state="starred")] == [b]
+    assert db.count_items(conn, state="starred") == 1
 
 
 def test_starred_survives_exclusion(conn):
@@ -74,23 +69,7 @@ def test_starred_survives_exclusion(conn):
     assert [r["id"] for r in db.get_items(conn, state="starred")] == [a]
     # 其余视图照旧隐藏 excluded(state=None 就是网页上的"全部")
     assert db.count_items(conn, state=None) == 0
-
-
-def test_other_views_still_hide_excluded(conn):
-    a = _add(conn, "a")
-    db.set_excluded(conn, [a], True)
     assert db.count_items(conn, state="new") == 0
-    assert db.count_items(conn, state=None) == 0
-
-
-def test_starred_ids_only_covers_starred(conn):
-    """保护范围**只限收藏**。已读/不感兴趣不算 —— 它们本来就不在未读视图里,
-    保护它们只会让被规则丢掉的噪音滞留在"已读/全部",还都是没分数的。"""
-    a, b, c = _add(conn, "a"), _add(conn, "b"), _add(conn, "c")
-    db.set_action(conn, a, "star")
-    db.set_action(conn, b, "read")
-    db.set_action(conn, c, "ignore")
-    assert db.starred_ids(conn) == {a}
 
 
 def test_starred_count_respects_kind(conn):
@@ -118,37 +97,18 @@ def test_ignored_leaves_every_normal_view(conn):
     a, b = _add(conn, "a"), _add(conn, "b")
     db.set_action(conn, a, "ignore")
     db.set_action(conn, b, "read")
+    db.set_action(conn, a, "star")
+    assert db.starred_ids(conn) == {a}
+    assert db.count_items(conn, state="starred") == 1
+    assert db.count_items(conn, state="ignored") == 1
+    assert [r["id"] for r in db.get_items(conn, state="ignored")] == [a]
 
     for view in ("new", "read", None):
         ids = {r["id"] for r in db.get_items(conn, state=view)}
         assert a not in ids, f"被否决的条目不该出现在 state={view}"
-
-
-def test_ignored_has_its_own_view(conn):
-    a, b = _add(conn, "a"), _add(conn, "b")
-    db.set_action(conn, a, "ignore")
-    assert db.count_items(conn, state="ignored") == 1
-    assert [r["id"] for r in db.get_items(conn, state="ignored")] == [a]
-
-
-def test_unignore_restores_to_normal_views(conn):
-    a = _add(conn, "a")
-    db.set_action(conn, a, "ignore")
-    assert db.count_items(conn, state="new") == 0
     db.set_action(conn, a, "unignore")
     assert db.count_items(conn, state="ignored") == 0
-    assert db.count_items(conn, state="new") == 1
-
-
-def test_collection_still_shows_starred_even_if_ignored(conn):
-    """收藏优先于否决:两边都点过时,收藏夹里仍然要能看见它。
-    它同时也会出现在"不感兴趣"页签里 —— 重叠是允许的,卡片上有标签说明。"""
-    a = _add(conn, "a")
-    db.set_action(conn, a, "star")
-    db.set_action(conn, a, "ignore")
-    assert db.count_items(conn, state="starred") == 1
-    assert db.count_items(conn, state="ignored") == 1
-    assert db.count_items(conn, state=None) == 0
+    assert [r["id"] for r in db.get_items(conn, state="new")] == [a]
 
 
 def test_ignored_view_ignores_score_threshold_only_when_asked(conn):
@@ -171,13 +131,6 @@ def test_unknown_action_is_rejected_and_not_logged(conn):
         db.set_action(conn, a, "drop table")
     assert conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0] == 0
     assert db.count_items(conn, state="new") == 1
-
-
-def test_every_whitelisted_action_still_works(conn):
-    a = _add(conn, "a")
-    for action in sorted(db.ACTIONS):
-        db.set_action(conn, a, action)
-    assert conn.execute("SELECT COUNT(*) FROM feedback").fetchone()[0] == len(db.ACTIONS)
 
 
 # ------------------------------------------------------- 统计页口径

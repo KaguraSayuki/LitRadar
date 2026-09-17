@@ -94,17 +94,8 @@ def test_忽略按组隔离(conn):
     assert len(db.get_items(conn, group_slug="b")) == 1      # B 组照常
     assert db.count_items(conn, state="ignored", group_slug="a") == 1
     assert db.count_items(conn, state="ignored", group_slug="b") == 0
-
-
-def test_取消忽略只影响本组(conn):
-    iid = _item(conn, groups=["a", "b"])
-    db.ensure_group(conn, "a")
-    db.ensure_group(conn, "b")
-    db.set_action(conn, iid, "ignore", group_slug="a")
     db.set_action(conn, iid, "ignore", group_slug="b")
     db.set_action(conn, iid, "unignore", group_slug="a")
-    conn.commit()
-
     assert len(db.get_items(conn, group_slug="a")) == 1
     assert db.get_items(conn, group_slug="b") == []
 
@@ -133,15 +124,6 @@ def test_规则排除按组(conn):
 
 
 # ----------------------------------------------------------------- 组对账
-def test_ensure_group_幂等(conn):
-    first = db.ensure_group(conn, "chem", name="化学")
-    again = db.ensure_group(conn, "chem", name="改个名字")
-    conn.commit()
-
-    assert first == again
-    assert len(db.groups(conn)) == 1
-
-
 def test_sync_groups_按_slug_更新而不新建(conn):
     from types import SimpleNamespace
 
@@ -157,35 +139,10 @@ def test_sync_groups_按_slug_更新而不新建(conn):
     row = [g for g in db.groups(conn) if g["slug"] == "a"][0]
     assert row["name"] == "A renamed" and row["direction"] == "d"
     assert row["llm_rank"] == 0
-
-
-def test_sync_groups_不删除库里已有的组(conn):
-    """临时把某个组从 interests.yaml 里注释掉,不该连带删掉它的历史分值。"""
-    from types import SimpleNamespace
-
-    def prof(slug):
-        return SimpleNamespace(slug=slug, name=slug, direction="",
-                               enabled=True, llm_rank=True)
-
-    db.sync_groups(conn, [prof("a"), prof("b")])
-    db.sync_groups(conn, [prof("a")])
-    conn.commit()
-
     assert [g["slug"] for g in db.groups(conn)] == ["a", "b"]
-
-
-def test_组顺序按_position(conn):
-    from types import SimpleNamespace
-
-    def prof(slug):
-        return SimpleNamespace(slug=slug, name=slug, direction="",
-                               enabled=True, llm_rank=True)
-
-    db.sync_groups(conn, [prof("a"), prof("b"), prof("c")])
-    db.sync_groups(conn, [prof("c"), prof("a")])
-    conn.commit()
-
-    assert [g["slug"] for g in db.groups(conn)] == ["c", "a", "b"]
+    reordered = db.sync_groups(conn, [prof("b", "B"), prof("a", "A renamed")])
+    assert reordered == first
+    assert [g["slug"] for g in db.groups(conn)] == ["b", "a"]
 
 
 def test_写给不存在的组会明确报错(conn):

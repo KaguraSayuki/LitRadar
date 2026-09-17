@@ -44,6 +44,19 @@ def _clean_url(url: Any) -> str | None:
     return None
 
 
+_RANK_TABLES = (
+    """CREATE TABLE IF NOT EXISTS rank_state (
+        group_id INTEGER PRIMARY KEY REFERENCES interest_group(id) ON DELETE CASCADE,
+        preference_hash TEXT NOT NULL
+    );""",
+    """CREATE TABLE IF NOT EXISTS rank_pending (
+        group_id INTEGER NOT NULL REFERENCES interest_group(id) ON DELETE CASCADE,
+        item_id INTEGER NOT NULL REFERENCES item(id) ON DELETE CASCADE,
+        preference_hash TEXT NOT NULL,
+        PRIMARY KEY (group_id, item_id)
+    );""",
+)
+
 _SCHEDULER_TABLES = (
     """CREATE TABLE IF NOT EXISTS scheduled_run (
         slot TEXT PRIMARY KEY, scheduled_at TEXT NOT NULL,
@@ -207,6 +220,10 @@ CREATE TABLE IF NOT EXISTS score (
     llm_score    REAL,
     llm_reason   TEXT,
     llm_model    TEXT,
+    preference_hash TEXT,
+    evidence_hash TEXT,
+    feedback_hash TEXT,
+    llm_scored_at TEXT,
     final_score  REAL,
     ranked_at    TEXT,
     PRIMARY KEY (group_id, item_id)
@@ -264,7 +281,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS item_fts USING fts5(
     title, abstract, journal, authors,
     content='item', content_rowid='id', tokenize='unicode61'
 );
-""" + "\n".join(_SCHEDULER_TABLES)
+""" + "\n".join(_SCHEDULER_TABLES + _RANK_TABLES)
 
 FTS_TRIGGERS = """
 CREATE TRIGGER IF NOT EXISTS item_ai AFTER INSERT ON item BEGIN
@@ -701,6 +718,8 @@ def sync_groups(conn: sqlite3.Connection, groups) -> dict[str, int]:
     只增改不删除:删掉一个组不该连带删掉它的历史分值(想清干净就自己
     删库里的行)。这样"临时注释掉一个组"是可逆的。
     """
+    from .ranking_state import initialize
+
     mapping: dict[str, int] = {}
     for position, group in enumerate(groups):
         gid = ensure_group(
@@ -722,6 +741,7 @@ def sync_groups(conn: sqlite3.Connection, groups) -> dict[str, int]:
             (group.name or group.slug, group.direction, int(bool(group.enabled)),
              int(bool(group.llm_rank)), position, now(), gid),
         )
+        initialize(conn, gid, group)
         mapping[group.slug] = gid
     return mapping
 
@@ -829,11 +849,21 @@ def _migrate_v8(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _migrate_v9(conn: sqlite3.Connection) -> None:
+    """Keep legacy AI results, with unknown preference versions left unknown."""
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(score)")}
+    for name in ("preference_hash", "evidence_hash", "feedback_hash", "llm_scored_at"):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE score ADD COLUMN {name} TEXT")
+    for statement in _RANK_TABLES:
+        conn.execute(statement)
+
+
 # 迁移步骤按版本排列:下标 + 1 = 跑完这步之后的 user_version。
 # 加新迁移就在末尾追加一个函数,**同时把 SCHEMA 改成最新结构** ——
 # 新库只建 SCHEMA、不走这里。
 _MIGRATIONS = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5,
-               _migrate_v6, _migrate_v7, _migrate_v8]
+               _migrate_v6, _migrate_v7, _migrate_v8, _migrate_v9]
 SCHEMA_VERSION = len(_MIGRATIONS)
 
 # 只能在迁移之后建的索引(见 Database.init 的注释)。
@@ -1170,7 +1200,7 @@ def get_items(
     }.get(order, "COALESCE(sc.final_score,-1) DESC")
 
     sql = f"""
-        SELECT i.*, sc.final_score, sc.llm_score, sc.llm_reason,
+        SELECT i.*, sc.final_score, sc.llm_score, sc.llm_reason, sc.preference_hash, sc.llm_scored_at,
                su.title_zh, su.one_liner, su.method, su.key_results,
                su.problem, su.limitation,
                sg.relevance AS relevance,
@@ -1195,7 +1225,8 @@ def search_items(conn: sqlite3.Connection, q: str, limit: int = 100,
     # 必须与 get_items 选出同一组列 —— 卡片宏会用到 cited_by_count / is_oa / oa_url
     gid = _read_group_id(conn, group_slug)
     sql = f"""
-        SELECT i.*, sc.final_score, sc.llm_score, sc.llm_reason, su.title_zh, su.one_liner,
+        SELECT i.*, sc.final_score, sc.llm_score, sc.llm_reason, sc.preference_hash, sc.llm_scored_at,
+               su.title_zh, su.one_liner,
                sg.relevance AS relevance,
                COALESCE(s.state,'new') AS state, COALESCE(s.starred,0) AS starred,
                COALESCE(gs.ignored,0) AS ignored,
@@ -1237,16 +1268,20 @@ def save_score(conn: sqlite3.Connection, item_id: int, *,
     gid = group_id if group_id is not None else _write_group_id(conn, group_slug)
     conn.execute(
         """INSERT INTO score (group_id, item_id, rule_score, coarse_score,
-                              llm_score, llm_reason, llm_model, final_score, ranked_at)
-           VALUES (?,?,?,?,?,?,?,?,?)
+                              llm_score, llm_reason, llm_model, final_score, ranked_at,
+                              preference_hash, evidence_hash, feedback_hash, llm_scored_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(group_id, item_id) DO UPDATE SET
              rule_score=excluded.rule_score, coarse_score=excluded.coarse_score,
              llm_score=excluded.llm_score, llm_reason=excluded.llm_reason,
              llm_model=excluded.llm_model, final_score=excluded.final_score,
-             ranked_at=excluded.ranked_at""",
+             ranked_at=excluded.ranked_at, preference_hash=excluded.preference_hash,
+             evidence_hash=excluded.evidence_hash, feedback_hash=excluded.feedback_hash,
+             llm_scored_at=excluded.llm_scored_at""",
         (gid, item_id, kw.get("rule_score"), kw.get("coarse_score"),
          kw.get("llm_score"), kw.get("llm_reason"), kw.get("llm_model"),
-         kw.get("final_score"), now()),
+         kw.get("final_score"), now(), kw.get("preference_hash"), kw.get("evidence_hash"),
+         kw.get("feedback_hash"), kw.get("llm_scored_at")),
     )
 
 

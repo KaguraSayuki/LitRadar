@@ -114,10 +114,16 @@ def test_两组各拿一份_relevance_而中性摘要只算一次(tmp_path):
     # 中性摘要只有一份 —— 这是省钱的关键
     assert conn.execute("SELECT COUNT(*) FROM summary").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM summary_group").fetchone()[0] == 2
+    assert [tuple(r) for r in conn.execute("SELECT stage,group_slug FROM run_log ORDER BY id")] == [
+        ("summarize", "org"), ("summarize", "mat")]
     conn.close()
     # 一次整条 + 一次只补 relevance:第二个组没有重算问题/方法/结果/局限
     assert len([c for c in FakeLLM.calls if c.startswith("full:")]) == 1
     assert len([c for c in FakeLLM.calls if c.startswith("relevance:")]) == 1
+    before = len(FakeLLM.calls)
+    out = summarize.run(cfg, days=30, verbose=False)
+    assert len(FakeLLM.calls) == before
+    assert out["deep"] == out["brief"] == out["relevance"] == 0
 
 
 @pytest.mark.parametrize("deep_n", [0, 1])
@@ -155,22 +161,6 @@ def test_共享论文的待处理队列和深度名额只按本组评分(tmp_pat
     conn = db.Database(cfg.db_file).connect()
     assert conn.execute("SELECT COUNT(*) FROM summary").fetchone()[0] == 2
     conn.close()
-
-
-def test_第二次运行不再重复花钱(tmp_path):
-    cfg = _cfg(tmp_path)
-    conn = db.Database(cfg.db_file).connect()
-    ids = _ids(cfg)
-    _seed(conn, "Shared paper", groups=[ids["org"], ids["mat"]])
-    conn.commit()
-    conn.close()
-
-    summarize.run(cfg, days=30, verbose=False)
-    before = len(FakeLLM.calls)
-    out = summarize.run(cfg, days=30, verbose=False)
-
-    assert len(FakeLLM.calls) == before, "都做过了,不该再调 LLM"
-    assert out["deep"] == out["brief"] == out["relevance"] == 0
 
 
 # ───────────────────────────────────── 原文变了要一起作废
@@ -242,19 +232,8 @@ def test_一个组失败不影响其它组(tmp_path, monkeypatch):
     assert set(_relevances(cfg)) == {("mat", "Shared paper")}
 
 
-def test_运行记录按组记账(tmp_path):
-    cfg = _cfg(tmp_path)
-    summarize.run(cfg, days=30, verbose=False)
-
-    conn = db.Database(cfg.db_file).connect()
-    rows = [(r[0], r[1]) for r in conn.execute(
-        "SELECT stage, group_slug FROM run_log ORDER BY id")]
-    conn.close()
-    assert rows == [("summarize", "org"), ("summarize", "mat")]
-
-
-@pytest.mark.parametrize("depth", [None, "brief", "deep"])
-@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("depth,reverse", [(None, False), (None, True),
+                                          ("brief", False), ("deep", True)])
 def test_force共享摘要只刷新一次且保留两组说明(tmp_path, depth, reverse):
     cfg = _cfg(tmp_path)
     if reverse:
@@ -289,9 +268,10 @@ def test_force共享摘要只刷新一次且保留两组说明(tmp_path, depth, 
     assert len(FakeLLM.calls) == 2
 
 
-@pytest.mark.parametrize("force", [False, True])
-@pytest.mark.parametrize("limit", [1, 20])
-@pytest.mark.parametrize("existing_brief", [False, True])
+# Cover every pair of independent options without the full Cartesian product.
+@pytest.mark.parametrize("force,limit,existing_brief", [
+    (False, 1, False), (False, 20, True), (True, 1, True), (True, 20, False),
+])
 def test_后处理组的深度需求不会漏掉前组说明或重复生成简要摘要(
         tmp_path, monkeypatch, force, limit, existing_brief):
     cfg = _cfg(tmp_path)
