@@ -41,7 +41,7 @@ def test_一封邮件任一条失败则整封回滚并可重试(tmp_path, monkey
     first = pipeline.ingest_mail(cfg, verbose=False)
     conn = db.Database(cfg.db_file).connect()
     assert first["errors"] == 1
-    assert first["new"] == first["updated"] == 0
+    assert first["new"] == first["updated"] == first["duplicate"] == 0
     assert conn.execute("SELECT COUNT(*) FROM item").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM raw_email").fetchone()[0] == 0
     assert message.ack.call_count == 0
@@ -76,7 +76,9 @@ def test_迁移前未完成raw邮件可离线重放(tmp_path, monkeypatch):
     out = pipeline.ingest_mail(cfg, verbose=False)
     conn = db.Database(cfg.db_file).connect()
     assert out["messages"] == 1 and out["records"] == 2
-    assert out["new"] == 1 and out["updated"] == 1
+    # 第一条早先已由别的来源入库,而且字段齐全 —— 重放只是又见到它一次,
+    # 不能被算成"更新"(见 db.upsert_item_status)。
+    assert out["new"] == 1 and out["updated"] == 0 and out["duplicate"] == 1
     assert conn.execute("SELECT COUNT(*) FROM item").fetchone()[0] == 2
     assert conn.execute("SELECT processed_at FROM raw_email").fetchone()[0]
     conn.close()

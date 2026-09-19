@@ -37,7 +37,8 @@ def has_errors(value) -> bool:
 def summary(result) -> str:
     if not isinstance(result, dict):
         return '处理完成'
-    labels = {'messages': '封邮件', 'new': '篇新增', 'updated': '篇更新', 'scored': '篇评分',
+    labels = {'messages': '封邮件', 'new': '篇新增', 'updated': '篇更新',
+              'duplicate': '篇重复命中', 'scored': '篇评分',
               'llm_scored': '篇 AI 评分', 'deep': '篇深度摘要', 'brief': '篇简要摘要',
               'relevance': '条方向说明', 'enriched': '篇补全', 'errors': '项错误',
               'brief_failed': '篇简要摘要失败', 'deep_failed': '篇深度摘要失败',

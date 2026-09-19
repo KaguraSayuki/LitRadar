@@ -40,8 +40,12 @@ def _prepare(data: dict) -> dict | None:
 
 
 def _store(conn: sqlite3.Connection, data: dict, *,
-           group_id: int | None = None) -> tuple[int, bool]:
+           group_id: int | None = None) -> tuple[int, str]:
     """入库唯一入口。``group_id`` 给了就把这篇记进该组。
+
+    返回 ``(item_id, status)``,status 见 ``db.upsert_item_status``:采集摘要
+    要能区分"新增 / 真的补了字段 / 只是重复命中",否则逐日重复捞回的同一批
+    论文会被报成永远不兑现的"N 篇更新"。
 
     成员关系决定"它出现在哪个组的收件箱里",所以凡是分组采集都必须带上它。
     """
@@ -49,7 +53,7 @@ def _store(conn: sqlite3.Connection, data: dict, *,
     data = _prepare(data)
     if data is None:
         raise ValueError("缺少标题")
-    iid, created = db.upsert_item(conn, data)
+    iid, status = db.upsert_item_status(conn, data)
     if group_id is not None:
         db.add_to_group(conn, group_id, iid)
     if extras and any(v is not None for v in extras.values()):
@@ -59,7 +63,7 @@ def _store(conn: sqlite3.Connection, data: dict, *,
             "oa_url": extras.get("_oa_url"),
             "openalex_id": extras.get("_openalex_id"),
         }, partial=True)
-    return iid, created
+    return iid, status
 
 
 def ingest_mail(cfg: Config, *, verbose: bool = True) -> dict:
@@ -68,8 +72,8 @@ def ingest_mail(cfg: Config, *, verbose: bool = True) -> dict:
         return {"skipped": "sources.xmol_enabled=false"}
     database = db.Database(cfg.db_file)
     conn = database.connect()
-    stat = {"messages": 0, "records": 0, "new": 0, "updated": 0, "errors": 0,
-            "mode": cfg.mail.mode}
+    stat = {"messages": 0, "records": 0, "new": 0, "updated": 0, "duplicate": 0,
+            "errors": 0, "mode": cfg.mail.mode}
     started = db.now()
     try:
         # X-MOL 是全局来源,条目记进所有启用的组。组同步是独立短事务,
@@ -104,7 +108,7 @@ def ingest_mail(cfg: Config, *, verbose: bool = True) -> dict:
             # 共用一个 savepoint，任何一条失败都会撤销整封邮件的写入；
             # savepoint 结束后才提交，外部邮件确认仍在提交之后。
             stat["records"] += len(records)
-            message_new = message_updated = 0
+            message_new = message_updated = message_duplicate = 0
             conn.execute("SAVEPOINT ingest_mail_message")
             try:
                 conn.execute(
@@ -117,13 +121,15 @@ def ingest_mail(cfg: Config, *, verbose: bool = True) -> dict:
                 )
 
                 for rec in records:
-                    iid, created = _store(conn, xmol_email.to_item_data(rec, source_ref=mid))
+                    iid, status = _store(conn, xmol_email.to_item_data(rec, source_ref=mid))
                     for gid in mail_group_ids:
                         db.add_to_group(conn, gid, iid)
-                    if created:
+                    if status == "created":
                         message_new += 1
-                    else:
+                    elif status == "updated":
                         message_updated += 1
+                    else:
+                        message_duplicate += 1
                 conn.execute("UPDATE raw_email SET processed_at=? WHERE message_id=?",
                              (db.now(), mid))
                 conn.execute("RELEASE SAVEPOINT ingest_mail_message")
@@ -143,6 +149,7 @@ def ingest_mail(cfg: Config, *, verbose: bool = True) -> dict:
             # acknowledge 抛错，外层异常处理会 rollback/留待下次重试。
             stat["new"] += message_new
             stat["updated"] += message_updated
+            stat["duplicate"] += message_duplicate
             conn.commit()
             if live_msg is not None:
                 mail.acknowledge(cfg.mail, live_msg)
@@ -300,7 +307,8 @@ def _ingest_group(conn, cfg: Config, prof: Profile, group_id: int, *,
     stat: dict[str, Any] = {"queries": queries, "s2_queries": prof.s2_queries,
                             "per_query": {}, "crossref": 0, "s2": 0,
                             "snowball": 0, "unique": 0, "openalex": 0,
-                            "raw": 0, "new": 0, "updated": 0, "errors": 0}
+                            "raw": 0, "new": 0, "updated": 0, "duplicate": 0,
+                            "errors": 0}
     started = db.now()
     try:
         raw: list[dict] = []
@@ -401,8 +409,13 @@ def _ingest_group(conn, cfg: Config, prof: Profile, group_id: int, *,
 
         for data in found:
             try:
-                _, created = _store(conn, data, group_id=group_id)
-                stat["new" if created else "updated"] += 1
+                _, status = _store(conn, data, group_id=group_id)
+                if status == "created":
+                    stat["new"] += 1
+                elif status == "updated":
+                    stat["updated"] += 1
+                else:
+                    stat["duplicate"] += 1
             except Exception as e:  # noqa: BLE001
                 stat["errors"] += 1
                 if verbose:
@@ -413,7 +426,8 @@ def _ingest_group(conn, cfg: Config, prof: Profile, group_id: int, *,
         conn.commit()
         if verbose:
             print(f"  [{prof.name}] {len(queries)} 条查询 → 原始 {stat['raw']} → "
-                  f"去重 {stat['unique']} → 新增 {stat['new']} / 更新 {stat['updated']}")
+                  f"去重 {stat['unique']} → 新增 {stat['new']} / "
+                  f"更新 {stat['updated']} / 重复 {stat['duplicate']}")
     except Exception as e:  # noqa: BLE001
         db.log_run(conn, "ingest_search", "failed", stat, error=str(e),
                    started_at=started, group_slug=prof.slug)
@@ -439,7 +453,7 @@ def ingest_keyword_search(cfg: Config, *, verbose: bool = True,
         conn.commit()
         total: dict[str, Any] = {"groups": {}, "crossref": 0, "s2": 0, "snowball": 0,
                                  "openalex": 0, "unique": 0, "new": 0,
-                                 "updated": 0, "errors": 0}
+                                 "updated": 0, "duplicate": 0, "errors": 0}
         for prof in groups:
             gid = ids.get(prof.slug)
             if gid is None:
@@ -455,7 +469,7 @@ def ingest_keyword_search(cfg: Config, *, verbose: bool = True,
                 continue
             total["groups"][prof.slug] = stat
             for key in ("crossref", "s2", "snowball", "openalex", "unique",
-                        "new", "updated", "errors"):
+                        "new", "updated", "duplicate", "errors"):
                 total[key] += int(stat.get(key, 0))
         return total
     finally:
