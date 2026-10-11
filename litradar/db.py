@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS item (
     title            TEXT NOT NULL,
     title_norm       TEXT NOT NULL,
     abstract         TEXT,
+    abstract_zh      TEXT,          -- 中文摘要(X-MOL ispace 接口自带)
     authors          TEXT,          -- JSON array
     journal          TEXT,
     issn             TEXT,
@@ -859,11 +860,23 @@ def _migrate_v9(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _migrate_v10(conn: sqlite3.Connection) -> None:
+    """item.abstract_zh:中文摘要。
+
+    X-MOL ispace 接口同时给出英文摘要(截断在 ~445 字符)和完整的中文摘要。
+    只留 `abstract` 会把那份完整的中文丢掉,而它不影响排序输入 ——
+    排序读的是 `abstract`,这里只是并排存一份,给摘要展示多一个来源。
+    """
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(item)")}
+    if columns and "abstract_zh" not in columns:
+        conn.execute("ALTER TABLE item ADD COLUMN abstract_zh TEXT")
+
+
 # 迁移步骤按版本排列:下标 + 1 = 跑完这步之后的 user_version。
 # 加新迁移就在末尾追加一个函数,**同时把 SCHEMA 改成最新结构** ——
 # 新库只建 SCHEMA、不走这里。
 _MIGRATIONS = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5,
-               _migrate_v6, _migrate_v7, _migrate_v8, _migrate_v9]
+               _migrate_v6, _migrate_v7, _migrate_v8, _migrate_v9, _migrate_v10]
 SCHEMA_VERSION = len(_MIGRATIONS)
 
 # 只能在迁移之后建的索引(见 Database.init 的注释)。
@@ -962,9 +975,9 @@ class Database:
 
 # ---------------------------------------------------------------- item 读写
 ITEM_FIELDS = (
-    "kind", "dedup_key", "doi", "title", "title_norm", "abstract", "authors",
-    "journal", "issn", "published_at", "url", "impact_factor", "xmol_url",
-    "matched_keywords", "source", "source_ref",
+    "kind", "dedup_key", "doi", "title", "title_norm", "abstract", "abstract_zh",
+    "authors", "journal", "issn", "published_at", "url", "impact_factor",
+    "xmol_url", "matched_keywords", "source", "source_ref",
 )
 
 

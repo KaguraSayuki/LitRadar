@@ -30,6 +30,7 @@ SERVICES = [
     Field("sources.crossref_enabled", "Crossref 元数据补全", "bool"),
     Field("sources.crossref_search_enabled", "Crossref 文献检索", "bool", "匹配较宽泛，建议用预览检查相关性"),
     Field("sources.openalex_enabled", "OpenAlex 文献检索", "bool", "需要接入 OpenAlex 密钥"),
+    Field("sources.ispace_enabled", "采集 X-MOL 个人空间订阅结果", "bool", "需要接入 X-MOL 会话令牌；与订阅邮件互补，自带摘要"),
     Field("sources.mailto", "联系邮箱", "email", "可选，用于数据服务识别请求来源"),
     Field("mail.mode", "邮件接入方式", "select", choices=(("folder", "上传邮件文件"), ("imap", "连接邮箱"), ("maildir", "现有 Maildir（由部署管理）"))),
     Field("mail.imap_host", "邮箱服务器", hint="例如 imap.gmail.com、imap.qq.com；需要邮箱提供商支持授权码登录"),
@@ -50,6 +51,8 @@ SERVICES = [
     Field("sources.snowball_seeds_per_run", "每次刷新种子论文数", "int", low=1, high=1000, advanced=True),
     Field("sources.snowball_min_cocitations", "至少关联多少篇种子论文", "int", low=1, high=1000, advanced=True),
     Field("sources.snowball_per_seed", "每篇种子最多获取引用论文数", "int", low=1, high=1000, advanced=True),
+    Field("sources.ispace_min_interval", "X-MOL 个人空间请求间隔（秒）", "float", "默认 30 秒；每轮只需 1-2 次请求，间隔只在异常重入时兜底", 1, 3600, advanced=True),
+    Field("sources.ispace_page", "X-MOL 个人空间读取页数位置", "int", "服务端每页固定 60 条，首页约覆盖 4 个月；调大会线性增加请求量", 1, 10, advanced=True),
 ]
 
 MODEL = [

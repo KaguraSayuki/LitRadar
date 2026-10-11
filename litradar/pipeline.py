@@ -10,7 +10,8 @@ from .config import Config, read_secret
 from .normalize import normalize_doi, title_norm
 from .rank import (Profile, load_enabled_groups, load_groups,
                    load_interests)
-from .sources import crossref_search, mail, openalex_search, semanticscholar, xmol_email
+from .sources import (crossref_search, mail, openalex_search, semanticscholar,
+                      xmol_email, xmol_ispace)
 
 
 # ------------------------------------------------------------------ ingest
@@ -307,6 +308,7 @@ def _ingest_group(conn, cfg: Config, prof: Profile, group_id: int, *,
     stat: dict[str, Any] = {"queries": queries, "s2_queries": prof.s2_queries,
                             "per_query": {}, "crossref": 0, "s2": 0,
                             "snowball": 0, "unique": 0, "openalex": 0,
+                            "ispace": 0,
                             "raw": 0, "new": 0, "updated": 0, "duplicate": 0,
                             "errors": 0}
     started = db.now()
@@ -388,6 +390,30 @@ def _ingest_group(conn, cfg: Config, prof: Profile, group_id: int, *,
         elif cfg.sources.openalex_enabled:
             stat["openalex_skipped"] = f"环境变量 {cfg.sources.openalex_api_key_env} 未设置"
 
+        # X-MOL 个人空间订阅结果。与邮件通道互补:邮件是推送的精选 teaser,
+        # 这里是首屏 60 条(实测覆盖约 4 个月)且自带摘要。同一 DOI 入库时合并。
+        #
+        # 这里**不吞异常**:会话过期(401)和限流(429)都必须让人看见,
+        # 否则雷达会安静地停止更新而用户以为一切正常。失败只影响本组采集,
+        # 由外层记进 stat["errors"]。
+        if cfg.sources.ispace_enabled:
+            ispace_token = read_secret(cfg.sources.ispace_token_env)
+            if not ispace_token:
+                stat["ispace_skipped"] = f"未设置 {cfg.sources.ispace_token_env}"
+            else:
+                progress.report(f'{prof.name} · X-MOL 订阅，拉取第 {cfg.sources.ispace_page} 页', 0, 1)
+                got = xmol_ispace.fetch(
+                    ispace_token,
+                    page=cfg.sources.ispace_page,
+                    min_interval=cfg.sources.ispace_min_interval,
+                    timeout=cfg.sources.ispace_timeout,
+                )
+                stat["ispace"] = len(got.items)
+                stat["ispace_total"] = got.total
+                if got.notes:
+                    stat["ispace_notes"] = got.notes
+                raw += got.items
+
         # 引用滚雪球:第三条召回腿。前两条靠词表,这条靠领域前辈的引用关系 ——
         # 所以它能捞到"换了说法"的工作,那是关键词召回天然的盲区。
         got_snow = _ingest_snowball(conn, cfg, prof, group_id, stat, verbose=verbose)
@@ -452,7 +478,7 @@ def ingest_keyword_search(cfg: Config, *, verbose: bool = True,
         ids = db.sync_groups(conn, load_groups(cfg))
         conn.commit()
         total: dict[str, Any] = {"groups": {}, "crossref": 0, "s2": 0, "snowball": 0,
-                                 "openalex": 0, "unique": 0, "new": 0,
+                                 "openalex": 0, "ispace": 0, "unique": 0, "new": 0,
                                  "updated": 0, "duplicate": 0, "errors": 0}
         for prof in groups:
             gid = ids.get(prof.slug)
@@ -468,7 +494,7 @@ def ingest_keyword_search(cfg: Config, *, verbose: bool = True,
                           f"{type(e).__name__}: {e}")
                 continue
             total["groups"][prof.slug] = stat
-            for key in ("crossref", "s2", "snowball", "openalex", "unique",
+            for key in ("crossref", "s2", "snowball", "openalex", "ispace", "unique",
                         "new", "updated", "duplicate", "errors"):
                 total[key] += int(stat.get(key, 0))
         return total

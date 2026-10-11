@@ -5,8 +5,10 @@ from . import (  # noqa: F401
     openalex_search,
     semanticscholar,
     xmol_email,
+    xmol_ispace,
 )
 
 __all__ = [
-    "crossref_search", "mail", "openalex_search", "semanticscholar", "xmol_email",
+    "crossref_search", "mail", "openalex_search", "semanticscholar",
+    "xmol_email", "xmol_ispace",
 ]
