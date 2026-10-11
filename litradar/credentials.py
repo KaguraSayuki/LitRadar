@@ -64,6 +64,7 @@ def services(cfg) -> dict[str, tuple[str, str]]:
         "openalex": ("OpenAlex", cfg.sources.openalex_api_key_env),
         "journal": ("easyScholar 期刊标签", cfg.journal_rank.api_key_env),
         "mail": ("邮箱授权码", cfg.mail.imap_password_env),
+        "ispace": ("X-MOL 个人空间会话", cfg.sources.ispace_token_env),
     }
 
 
