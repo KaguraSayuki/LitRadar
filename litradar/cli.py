@@ -248,6 +248,62 @@ def cmd_admin_password(cfg, args):
     return 0
 
 
+def cmd_ispace_token(cfg, args):
+    """设置 / 清除 / 验证 X-MOL 个人空间会话令牌。
+
+    网页“数据与邮箱”里有同样的入口,那是推荐方式。这里给不方便开浏览器的场景
+    留一条命令行通路,并支持 ``--stdin`` 与 ``--check``:
+
+    * ``--stdin`` 让令牌只经过管道,不进命令行参数(``ps`` 可见)、不进 shell 历史;
+    * ``--check`` 只读验证会话是否仍然有效,不修改任何东西。
+    """
+    from .sources import xmol_ispace
+
+    name = cfg.sources.ispace_token_env
+
+    if args.clear:
+        credentials.write(cfg, name, None)
+        print("已清除 X-MOL 个人空间会话令牌；采集该来源时会跳过并提示。")
+        return 0
+
+    if args.check:
+        token = read_secret(name)
+        if not token:
+            print(f"尚未设置 {name}。", file=sys.stderr)
+            return 1
+        session = xmol_ispace._session()
+        try:
+            subs = xmol_ispace.load_subscriptions(session, token, timeout=25,
+                                                  use_cache=False)
+        except xmol_ispace.IspaceError as error:
+            print(f"令牌不可用:{error}", file=sys.stderr)
+            return 1
+        print(f"令牌有效,读到 {len(subs)} 个订阅关键词。")
+        return 0
+
+    if args.stdin:
+        token = sys.stdin.read().strip()
+    else:
+        import getpass
+        token = getpass.getpass("X-MOL 会话令牌(输入不回显): ").strip()
+
+    if not token:
+        print("错误:没有读到令牌。", file=sys.stderr)
+        return 1
+    # 令牌是整串 Cookie,格式错了在请求时只表现为"会话过期",很难排查。
+    # 校验逻辑放在适配器里,网页那条路也能复用同一套判断。
+    problem = xmol_ispace.check_token_shape(token)
+    if problem:
+        print(f"错误:{problem}", file=sys.stderr)
+        return 1
+
+    credentials.write(cfg, name, token)
+    print("已保存 X-MOL 个人空间会话令牌。")
+    print("可在网页“数据与邮箱”点“测试连接”验证,或运行:"
+          "litradar ispace-token --check")
+    return 0
+
+
 def cmd_check(cfg, args):
     """体检:配置 / 密钥 / 数据库 / 网络 / LLM 连通性。
 
@@ -300,7 +356,9 @@ def cmd_check(cfg, args):
 
     # 可选
     for name, why in [("S2_API_KEY", "Semantic Scholar 限流会宽松很多,建议申请"),
-                      ("OPENALEX_API_KEY", "只有开了 sources.openalex_enabled 才需要")]:
+                      ("OPENALEX_API_KEY", "只有开了 sources.openalex_enabled 才需要"),
+                      (cfg.sources.ispace_token_env,
+                       "只有开了 sources.ispace_enabled 才需要;在网页“数据与邮箱”粘贴")]:
         if read_secret(name):
             line(OK, f"{name} 已设置")
         else:
@@ -600,6 +658,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="设置/清除花钱阶段的管理员密码(只存哈希)")
     sp.add_argument("--clear", action="store_true", help="删除已设置的密码")
     sp.set_defaults(func=cmd_admin_password)
+    sp = sub.add_parser("ispace-token",
+                        help="设置/清除 X-MOL 个人空间会话令牌")
+    sp.add_argument("--clear", action="store_true", help="删除已保存的令牌")
+    sp.add_argument("--stdin", action="store_true",
+                    help="从标准输入读取令牌(推荐:不经过命令行参数与终端回显)")
+    sp.add_argument("--check", action="store_true",
+                    help="只验证已保存的令牌是否仍然有效,不做修改")
+    sp.set_defaults(func=cmd_ispace_token)
     for name in ("ingest", "rank", "summarize", "run"):
         parser = sub.choices.get(name)
         if parser is not None and not any(

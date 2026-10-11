@@ -227,3 +227,52 @@ def test_原文更新后深度摘要掉出前N仍保留深度(tmp_path, monkeypa
     assert brief_ids == []
     assert conn.execute("SELECT method FROM summary WHERE item_id=?", (iid,)).fetchone()[0] == "m"
     conn.close()
+
+
+# ------------------------------------------- 简要摘要的输出预算（回归）
+
+class _BudgetLLM:
+    """记录每次调用拿到的 max_tokens,并按请求条数返回合法 JSON。"""
+
+    available = True
+
+    def __init__(self):
+        self.calls: list[int] = []
+
+    def json(self, system, user, *, max_tokens=2048):
+        import re
+        self.calls.append(max_tokens)
+        # 条目形如 "[1] 标题: …";不能按空行数,prompt 末尾还带 JSON 模板。
+        count = len(re.findall(r"^\[\d+\] 标题:", user, re.M))
+        return {"items": [{"id": i, "title_zh": f"标题{i}", "one_liner": f"结论{i}"}
+                          for i in range(1, count + 1)]}
+
+
+def _rows(n: int):
+    return [{"id": i + 1, "title": f"Paper {i}", "abstract": "x" * 700}
+            for i in range(n)]
+
+
+@pytest.mark.parametrize("count", [1, 3, 5, 10, 20])
+def test_brief_budget_scales_with_batch_and_clears_truncation(count):
+    """回归:写死的 2500 连推理开销都不够,整批被截断后静默丢弃。
+
+    实测 deepseek-flash 处理 10 条时推理吃掉 3600-5500 token,原先的预算在
+    finish_reason=length 上全军覆没,调用方只看到 brief_failed 计数。
+    """
+    llm = _BudgetLLM()
+    out = summarize.summarize_brief(_rows(count), llm)
+
+    assert len(out) == count, "整批都必须有结果,不能再被截断"
+    budget = llm.calls[0]
+    assert budget >= summarize.BRIEF_MIN_TOKENS
+    # 实测批量 20 的总用量约 8851,预算必须留出余量
+    assert budget >= count * summarize.BRIEF_TOKENS_PER_ROW or budget == summarize.BRIEF_MIN_TOKENS
+
+
+def test_brief_budget_never_below_measured_reasoning_cost():
+    """实测最低一次推理开销是批量 3 的 3348;批量 2 也要够。"""
+    for count in (1, 2, 3):
+        llm = _BudgetLLM()
+        summarize.summarize_brief(_rows(count), llm)
+        assert llm.calls[0] >= 4000, f"批量 {count} 的预算会重演截断"

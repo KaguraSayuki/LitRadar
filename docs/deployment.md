@@ -86,6 +86,52 @@ journalctl -u "litradar@$(whoami).service" -f
 [nginx 示例](../deploy/litradar-nginx.conf)提供 HTTPS 代理；使用前替换证书和端口，
 运行 `nginx -t` 验证后再重载。
 
+改完配置或用网页改过凭据后都**不需要**重启：网页保存的设置与凭据立即生效。只有更新
+代码、或需要让新版本首次连接数据库（自动迁移）时才重启：
+
+```bash
+sudo systemctl restart "litradar@$(whoami).service"
+sudo systemctl status "litradar@$(whoami).service" --no-pager
+```
+
+重启会中断正在运行的流水线，先确认没有任务在跑（网页的运行页会显示）。调度内嵌在
+`litradar serve` 进程里，重启后自动恢复；不要同时启用 `litradar-daily@.timer`，
+否则同一天会跑两次。
+
+### 用命令行设置 X-MOL 个人空间会话
+
+日常操作推荐在网页“数据与邮箱”里粘贴（见[使用指南](web-settings.md)）。没有浏览器可用，
+或不想让令牌出现在终端回滚里时，用命令行。
+
+`litradar` 装在项目虚拟环境里，没有全局安装，所以要么先用全路径，要么激活环境：
+
+```bash
+cd /path/to/LitRadar
+. .venv/bin/activate        # 之后可以直接写 litradar
+# 或每次都用全路径：.venv/bin/litradar
+```
+
+然后在浏览器登录 `ispace.x-mol.com`，打开开发者工具的 Application → Cookies，取
+`atk0210` 与 `rtk0210` 两个值，按下例写成一行（`<access>`、`<refresh>` 换成实际值，
+**不要把尖括号和省略号一起复制进去**）：
+
+```bash
+printf '%s' "atk0210=<access>; rtk0210=<refresh>" | litradar ispace-token --stdin
+litradar ispace-token --check     # 只读验证会话是否仍然有效
+litradar ispace-token --clear     # 移除令牌
+```
+
+用 `--stdin` 是因为它从标准输入读取，令牌不进命令行参数（`ps` 看不到）。
+注意用 `printf` 而不是 `echo`：令牌里可能含 `%` 等字符，交给 shell 解释容易出错。
+
+不带 `--stdin` 时命令用无回显输入提示粘贴，适合手工执行。写入前会校验形状：令牌必须是
+单行、同时含 `atk0210=` 与 `rtk0210=`、且值不是占位文本。这道校验值得保留 ——
+格式错误的令牌到了服务端只表现为“会话过期”，很难判断是哪里出了问题。
+
+> 无论哪种方式，令牌都会进入当前命令的历史记录。处理敏感凭据时优先用网页表单。
+> 这里只读取你**自己账号**的会话；请确认这种程序化访问符合 X-MOL 的服务条款，
+> 不需要时可关闭 `sources.ispace_enabled` 或清除令牌。
+
 ## macOS 常驻服务
 
 使用用户 LaunchAgent，在登录期间保持 `litradar serve` 运行。创建 `data` 日志目录，

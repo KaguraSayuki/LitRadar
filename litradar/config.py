@@ -97,6 +97,22 @@ class MailConfig:
 class SourceConfig:
     xmol_enabled: bool = True
 
+    # X-MOL 个人空间(ispace)订阅关键词结果。与上面的邮件通道**互补**:
+    # 邮件是被动推送的精选 teaser(通常 2 条),这里是主动拉取的首屏 60 条
+    # (实测覆盖约 4 个月),且自带摘要。两条路按 DOI 去重合并,不会重复。
+    #
+    # 需要先在网页设置页粘贴浏览器会话令牌(见 credentials.services)。
+    # 会话有效期约 10 个月;失效时采集明确报错,不静默跳过。
+    ispace_enabled: bool = False
+    ispace_token_env: str = "X_MOL_ISPACE_TOKEN"
+    # 两次请求之间的最小间隔。刻意设得比其它源都大:S2 是 5s,这里 30s。
+    # 采集一轮只需 1-2 次请求,所以这个值几乎不影响耗时,只在异常重入时兜底。
+    ispace_min_interval: float = 30.0
+    # 取第几页。服务端每页固定 60 条,首屏覆盖约 4 个月,日报一页足够。
+    # 调大它会线性增加请求量,请先确认必要性。
+    ispace_page: int = 1
+    ispace_timeout: int = 30
+
     # Crossref 分两个用途,开关分开:
     #   crossref_enabled        -> 富化:元数据最权威(期刊全称/ISSN/作者)
     #   crossref_search_enabled -> 检索发现

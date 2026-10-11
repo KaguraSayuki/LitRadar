@@ -126,6 +126,19 @@ sources:
   openalex_per_query: 60
   openalex_lookback_days: 14
 
+  # 可选 X-MOL 个人空间订阅结果。与上面的 xmol_enabled（订阅邮件）互补：
+  # 邮件是被动推送的精选 teaser，这里主动拉取首屏 60 条（约覆盖 4 个月），
+  # 且自带摘要。同一 DOI 入库时合并，不会重复。
+  #
+  # 需要先在网页“数据与邮箱”粘贴会话令牌（见 X_MOL_ISPACE_TOKEN 说明）。
+  # 服务端每页固定 60 条，首页对日报已远超所需，因此默认只取一页；
+  # 请求间隔刻意设得比其它源都大：每轮仅 1-2 次请求，间隔只在异常重入时兜底。
+  ispace_enabled: false
+  ispace_token_env: "X_MOL_ISPACE_TOKEN"
+  ispace_min_interval: 30.0
+  ispace_page: 1
+  ispace_timeout: 30
+
   # 请求中提供的联系邮箱，可供 Crossref 等服务识别调用方。
   mailto: ""
 

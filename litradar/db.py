@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS item (
     title            TEXT NOT NULL,
     title_norm       TEXT NOT NULL,
     abstract         TEXT,
+    abstract_zh      TEXT,          -- 中文摘要(X-MOL ispace 接口自带)
     authors          TEXT,          -- JSON array
     journal          TEXT,
     issn             TEXT,
@@ -859,11 +860,23 @@ def _migrate_v9(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
+def _migrate_v10(conn: sqlite3.Connection) -> None:
+    """item.abstract_zh:中文摘要。
+
+    X-MOL ispace 接口同时给出英文摘要(截断在 ~445 字符)和完整的中文摘要。
+    只留 `abstract` 会把那份完整的中文丢掉,而它不影响排序输入 ——
+    排序读的是 `abstract`,这里只是并排存一份,给摘要展示多一个来源。
+    """
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(item)")}
+    if columns and "abstract_zh" not in columns:
+        conn.execute("ALTER TABLE item ADD COLUMN abstract_zh TEXT")
+
+
 # 迁移步骤按版本排列:下标 + 1 = 跑完这步之后的 user_version。
 # 加新迁移就在末尾追加一个函数,**同时把 SCHEMA 改成最新结构** ——
 # 新库只建 SCHEMA、不走这里。
 _MIGRATIONS = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5,
-               _migrate_v6, _migrate_v7, _migrate_v8, _migrate_v9]
+               _migrate_v6, _migrate_v7, _migrate_v8, _migrate_v9, _migrate_v10]
 SCHEMA_VERSION = len(_MIGRATIONS)
 
 # 只能在迁移之后建的索引(见 Database.init 的注释)。
@@ -962,9 +975,9 @@ class Database:
 
 # ---------------------------------------------------------------- item 读写
 ITEM_FIELDS = (
-    "kind", "dedup_key", "doi", "title", "title_norm", "abstract", "authors",
-    "journal", "issn", "published_at", "url", "impact_factor", "xmol_url",
-    "matched_keywords", "source", "source_ref",
+    "kind", "dedup_key", "doi", "title", "title_norm", "abstract", "abstract_zh",
+    "authors", "journal", "issn", "published_at", "url", "impact_factor",
+    "xmol_url", "matched_keywords", "source", "source_ref",
 )
 
 
@@ -976,8 +989,29 @@ def upsert_item(conn: sqlite3.Connection, data: dict[str, Any]) -> tuple[int, bo
     **这里不管订阅组的成员关系。** 入库但没记 ``item_group`` 的条目不会出现在
     任何组的收件箱与排序里(排序与列表都只认成员)。采集路径统一走
     ``pipeline._store(group_id=...)``;手动插数据时记得自己调 ``add_to_group``。
+
+    需要区分"真的补了字段"与"只是又见到一次"时用 ``upsert_item_status``。
     """
-    # ``upsert_item`` 也是若干来源和管理脚本直接使用的共同边界，不能只
+    iid, status = upsert_item_status(conn, data)
+    return iid, status == "created"
+
+
+def upsert_item_status(conn: sqlite3.Connection,
+                       data: dict[str, Any]) -> tuple[int, str]:
+    """同 ``upsert_item``,但把"这一趟到底动没动库"也报出来。
+
+    返回 ``(item_id, status)``,status 为 ``'created'`` / ``'updated'`` /
+    ``'duplicate'``。采集摘要需要这个区分:逐日的关键词检索会把同一批论文
+    一遍遍捞回来,若把"又见到一次"记成"更新",运行记录里就会出现一条永远
+    不兑现的"N 篇更新"——实测 2026-09-14 到 09-19 连续六天如此,用户看着
+    "7 篇更新"却在列表里找不到任何变化。
+
+    ``'updated'`` 只算 item 行真的被改了(补上以前为空的字段,或把
+    ``YYYY-01-01`` 占位日期更正为精确日期);携带引用数等富化元数据的重复
+    命中仍算 ``'duplicate'``,因为那是另一条链路的事,对用户可见的文献
+    列表没有影响。
+    """
+    # 这里是若干来源和管理脚本直接使用的共同边界，不能只
     # 依赖 pipeline._prepare。DOI 与 dedup_key 必须始终使用同一个 canonical
     # 小写值，避免一个来源写 ``doi:10.../ABC``、另一个写 ``.../abc``。
     data = dict(data)
@@ -1014,7 +1048,7 @@ def upsert_item(conn: sqlite3.Connection, data: dict[str, Any]) -> tuple[int, bo
         )
         iid = int(cur.lastrowid)
         conn.execute("INSERT OR IGNORE INTO item_state (item_id) VALUES (?)", (iid,))
-        return iid, True
+        return iid, "created"
 
     iid = int(row["id"])
     updates, values = [], []
@@ -1040,7 +1074,7 @@ def upsert_item(conn: sqlite3.Connection, data: dict[str, Any]) -> tuple[int, bo
         values.extend([now(), iid])
         conn.execute(f"UPDATE item SET {', '.join(updates)} WHERE id = ?", values)
     conn.execute("INSERT OR IGNORE INTO item_state (item_id) VALUES (?)", (iid,))
-    return iid, False
+    return iid, "updated" if updates else "duplicate"
 
 
 def in_window(alias: str = "i") -> str:

@@ -323,6 +323,14 @@ async def credential_save(request: Request, service: str):
         raise SettingsError("未知服务。", status=404)
     form = await request.form()
     secret = str(form.get('secret','')).strip()
+    if form.get('action') != 'clear' and secret:
+        # 少数凭据有可校验的形状。X-MOL 会话令牌是一整串 Cookie,粘错(只粘名字、
+        # 带上文档里的省略号)在请求时只表现为"会话过期",所以在这里就挡住。
+        from ..sources import xmol_ispace
+        if service == 'ispace':
+            problem = xmol_ispace.check_token_shape(secret)
+            if problem:
+                raise SettingsError(problem, field='credentials')
     if form.get('action') == 'clear' or secret:
         credentials.write(cfg, services[service][1],
                           None if form.get('action') == 'clear' else secret,

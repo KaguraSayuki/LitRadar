@@ -455,3 +455,38 @@ def test_v7_adds_scheduler_tables_without_changing_papers(tmp_path):
     assert conn.execute('SELECT COUNT(*) FROM scheduled_run').fetchone()[0] == 1
     assert conn.execute('SELECT COUNT(*) FROM scheduler_worker').fetchone()[0] == 0
     conn.close()
+
+
+def test_v10_adds_chinese_abstract_without_touching_items(tmp_path):
+    """v10 只加一列,已有条目的内容一个字节都不该动。"""
+    path = tmp_path / 'ispace-migration.db'
+    conn = db.Database(path).connect()
+    db.upsert_item(conn, {'kind': 'paper', 'source': 'xmol',
+                         'dedup_key': 'doi:10.1/abstract', 'doi': '10.1/abstract',
+                         'title': 'Keep this abstract', 'title_norm': 'keep this abstract',
+                         'abstract': 'English abstract stays put'})
+    conn.commit()
+
+    # 退回 v9:去掉新列,模拟升级前的老库
+    assert 'abstract_zh' in _cols(conn, 'item')
+    conn.execute('ALTER TABLE item DROP COLUMN abstract_zh')
+    conn.execute('PRAGMA user_version=9')
+    conn.commit()
+    assert 'abstract_zh' not in _cols(conn, 'item')
+
+    db.Database._migrate(conn)
+
+    assert conn.execute('PRAGMA user_version').fetchone()[0] == db.SCHEMA_VERSION
+    assert 'abstract_zh' in _cols(conn, 'item')
+    row = conn.execute('SELECT title, abstract, abstract_zh FROM item').fetchone()
+    assert row[0] == 'Keep this abstract'
+    assert row[1] == 'English abstract stays put', '迁移不得清空已有摘要'
+    assert row[2] is None, '中文摘要留空,由来源自己填'
+    conn.close()
+
+
+def test_v10_已是最新版时重复迁移不出错(tmp_path):
+    conn = db.Database(tmp_path / 'twice.db').connect()
+    db.Database._migrate(conn)
+    assert 'abstract_zh' in _cols(conn, 'item')
+    conn.close()

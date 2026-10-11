@@ -77,6 +77,21 @@ def check(cfg, service: str) -> str:
         key = read_secret(names[service][1]) if service in names else None
         if service != "crossref" and not key:
             raise SettingsError("尚未接入此服务，请先保存密钥。")
+        if service == "ispace":
+            # 只读检查会话是否还有效。故意不拉文献列表:测试连接不该产生采集量。
+            from .sources import xmol_ispace
+            session = xmol_ispace._session()
+            try:
+                subs = xmol_ispace.load_subscriptions(session, key, timeout=25,
+                                                      use_cache=False)
+            except xmol_ispace.IspaceAuthError as error:
+                raise SettingsError(str(error)) from None
+            except xmol_ispace.IspaceError as error:
+                raise SettingsError(str(error)) from None
+            if not subs:
+                return ("会话有效，但没有读到订阅关键词。"
+                        "请先在 X-MOL 个人空间添加关键词或作者订阅。")
+            return f"会话有效，读到 {len(subs)} 个订阅关键词。本次未采集文献。"
         if service == "s2":
             semanticscholar._throttle(cfg.sources.s2_min_interval)
             request_json(semanticscholar.BASE + "/paper/search", params={"query": "chemistry", "limit": 1, "fields": "title"}, headers={"x-api-key": key})

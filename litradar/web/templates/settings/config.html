@@ -7,16 +7,25 @@
 {% include 'settings/model.html' %}
 <section class="settings-panel">
   {{ section_head('文献与邮件服务', '按需连接即可。凭据分别保存，页面不会显示已保存的密钥。', 'plug') }}
-  {% set service_info = {'s2':('S2','文献检索与摘要补全'),'openalex':('OA','开放学术文献检索'),'journal':('ES','期刊等级与影响因子'),'mail':('@','订阅邮件的只读连接检查')} %}
+  {# 每项 (角标, 用途说明, 输入框提示)。新增凭据服务时必须在这里加一行,
+     否则下面的 service_info[service] 会抛 KeyError 把整页打挂。 #}
+  {% set service_info = {
+    's2': ('S2', '文献检索与摘要补全', '新的 API 密钥'),
+    'openalex': ('OA', '开放学术文献检索', '新的 API 密钥'),
+    'journal': ('ES', '期刊等级与影响因子', '新的 API 密钥'),
+    'mail': ('@', '订阅邮件的只读连接检查', '新的邮箱授权码'),
+    'ispace': ('XM', 'X-MOL 个人空间订阅结果（需浏览器登录后取会话令牌，取法见文档）', '粘贴会话令牌：atk0210=…; rtk0210=…'),
+  } %}
   <div class="services-list">
   {% for service,info in service_states.items() if service != 'llm' %}
+    {% set meta = service_info.get(service, ('?', info.label, '新的凭据')) %}
     <details class="service-row">
-      <summary><span class="service-mark" aria-hidden="true">{{ service_info[service][0] }}</span><span class="service-row__title"><strong>{{ info.label }}</strong><small>{{ service_info[service][1] }}</small></span><span class="settings-badge {{ 'settings-badge--active' if info.configured }}">{{ '已设置' if info.configured else '未设置' }}</span>{{ icon('chevron-right') }}</summary>
+      <summary><span class="service-mark" aria-hidden="true">{{ meta[0] }}</span><span class="service-row__title"><strong>{{ info.label }}</strong><small>{{ meta[1] }}</small></span><span class="settings-badge {{ 'settings-badge--active' if info.configured }}">{{ '已设置' if info.configured else '未设置' }}</span>{{ icon('chevron-right') }}</summary>
       <div class="service-row__body">
         <form method="post" action="/settings/credentials/{{ service }}" class="settings-form" data-settings-form>
           <input type="hidden" name="credential_version" value="{{ credential_version }}">
           {% if info.managed %}
-          <div class="settings-field"><label for="credential-{{ service }}">{{ '新的邮箱授权码' if service == 'mail' else '新的 API 密钥' }}</label><input type="password" id="credential-{{ service }}" name="secret" autocomplete="new-password" placeholder="留空保持原值"></div>
+          <div class="settings-field"><label for="credential-{{ service }}">{{ meta[2] }}</label><input type="password" id="credential-{{ service }}" name="secret" autocomplete="new-password" placeholder="留空保持原值"></div>
           {% else %}<p class="hint">{{ info.source }}</p>{% endif %}
           <div class="settings-actions">
             {% if info.managed %}<button class="btn btn--soft" name="action" value="save">保存凭据</button>{% endif %}
@@ -24,7 +33,7 @@
             {% if info.managed %}<button class="btn btn--quiet" name="action" value="clear" data-confirm="清除这个服务的凭据？下次调用将无法使用此服务。">清除</button>{% endif %}
           </div>
         </form>
-        <p class="hint">测试使用已保存的凭据。{{ '只读检查，不标记已读、不移动或删除邮件。' if service == 'mail' else '只测试连接，不采集文献。' }}</p>
+        <p class="hint">测试使用已保存的凭据。{% if service == 'mail' %}只读检查，不标记已读、不移动或删除邮件。{% elif service == 'ispace' %}只读检查会话是否有效，不采集文献、不修改你在 X-MOL 的任何订阅。{% else %}只测试连接，不采集文献。{% endif %}</p>
         <p id="check-{{ service }}" class="settings-result" role="status"></p>
       </div>
     </details>
