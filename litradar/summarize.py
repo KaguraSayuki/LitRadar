@@ -63,6 +63,11 @@ title_zh 是**翻译**,不要重写或添加原文没有的内容。
 只输出 JSON:
 {{"items":[{{"id":1,"title_zh":"中文标题","one_liner":"一句话结论,不超过40字"}}]}}"""
 
+# 简要摘要的输出预算。推理模型先花掉大量 token 思考再写正文,而思考量取决于输入
+# 结构而非条数,所以按条数给系数之外还要有一个下限兜底。实测值见 summarize_brief。
+BRIEF_TOKENS_PER_ROW = 1200
+BRIEF_MIN_TOKENS = 6000
+
 RELEVANCE_SYSTEM = "你是化学文献助手,只输出 JSON,不编造。"
 
 # 只有"对研究的用处"与方向有关,所以已经算过中性摘要的条目,换一个组时
@@ -185,13 +190,20 @@ def summarize_one(row: sqlite3.Row, prof: Profile, llm: LLMClient) -> dict:
 
 
 def summarize_brief(rows: list[sqlite3.Row], llm: LLMClient) -> dict[int, dict]:
-    """批量:每条产出中文标题 + 一句话结论。"""
+    """批量:每条产出中文标题 + 一句话结论。
+
+    预算按**推理模型**估。实测 deepseek-flash 处理 10 条时推理吃掉 3600-5500
+    token,而正文只有 800 左右 —— 推理占大头,且不随批量线性增长(输入结构影响推理
+    难度)。原先写死的 2500 连批量 3 的推理都不够,整批被截断后静默丢弃,调用方只
+    看到 brief_failed 计数。这里给足余量:批量 10 时约 12000。
+    """
     blocks = []
     for i, r in enumerate(rows, 1):
         blocks.append(f"[{i}] 标题: {r['title']}\n    摘要: {(r['abstract'] or '(无摘要)')[:700]}")
     try:
         data = llm.json(BRIEF_SYSTEM, BRIEF_PROMPT.format(items="\n\n".join(blocks)),
-                        max_tokens=2500)
+                        max_tokens=max(BRIEF_MIN_TOKENS,
+                                       len(rows) * BRIEF_TOKENS_PER_ROW))
         entries = validate_items(data.get("items") or data.get("summaries"), len(rows))
         out = {int(rows[entry["id"] - 1]["id"]):
                validate_text(entry, ("title_zh", "one_liner")) for entry in entries}
