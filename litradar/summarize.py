@@ -151,6 +151,8 @@ _SUMMARY_VISIBLE = """NOT EXISTS (
        AND (gs.excluded=1 OR gs.ignored=1)
 )"""
 
+_FAILURE_FIELDS = ("brief_failed", "deep_failed", "relevance_failed")
+
 
 def verify_numbers(summary: dict, abstract: str) -> dict:
     """key_results 里出现但摘要原文没有的数字 -> 标疑,避免幻觉数据流到界面。"""
@@ -322,8 +324,8 @@ def _summarize_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
                 print(f"  [{prof.name}] 批量摘要 {s + 1}-{s + len(chunk)} / {len(rest)}…")
             brief = summarize_brief(chunk, llm)
             progress.report(f'{prof.name} · 简要摘要，已处理 {s + len(chunk)} 篇', s + len(chunk), len(rest))
+            stat["brief_failed"] += sum(int(r["id"]) not in brief for r in chunk)
             if not brief:
-                stat["brief_failed"] += len(chunk)
                 continue
             for r in chunk:
                 iid = int(r["id"])
@@ -375,11 +377,11 @@ def _complete_group_relevance(conn: sqlite3.Connection, cfg: Config, prof: Profi
         try:
             got = summarize_relevance(need_rel, prof, llm)
         except Exception as e:  # noqa: BLE001
-            stat["relevance_failed"] = len(need_rel)
             if verbose:
                 print(f"  [warn] 补 relevance 失败({len(need_rel)} 篇): "
                       f"{type(e).__name__}: {e}")
             got = {}
+        stat["relevance_failed"] = sum(int(r["id"]) not in got for r in need_rel)
         for iid, text in got.items():
             db.save_group_relevance(conn, group_id, iid, text, cfg.llm.model)
             stat["relevance"] += 1
@@ -396,6 +398,7 @@ def run(cfg: Config, *, limit: int = 200, days: int = 30, verbose: bool = True,
     按组重算会把 LLM 成本乘上组数。
 
     **一个组失败不影响其它组**:某个方向画像写坏了,不该让别的方向没摘要。
+    ``errors`` 统计出现失败的组数,包括部分摘要失败;成功结果仍然保留。
     """
     groups = (selected_groups if selected_groups is not None else
               [group] if group is not None else load_enabled_groups(cfg))
@@ -428,8 +431,8 @@ def run(cfg: Config, *, limit: int = 200, days: int = 30, verbose: bool = True,
                         (gid, gid, f"-{days} days", f"-{days} days", cfg.llm.deep_summary_top_n),
                     )
         conn.commit()
-        total: dict = {"groups": {}, "deep": 0, "brief": 0, "brief_failed": 0,
-                       "skipped": 0, "relevance": 0, "errors": 0}
+        counters = ("deep", "brief", "skipped", "relevance", *_FAILURE_FIELDS)
+        total: dict = {"groups": {}, "errors": 0, **dict.fromkeys(counters, 0)}
         started = {}
         for prof in groups:
             gid = ids.get(prof.slug)
@@ -456,15 +459,18 @@ def run(cfg: Config, *, limit: int = 200, days: int = 30, verbose: bool = True,
             try:
                 _complete_group_relevance(conn, cfg, prof, ids[prof.slug], llm, stat,
                                           limit=limit, days=days, verbose=verbose, force=force)
-                db.log_run(conn, "summarize", "ok", stat, started_at=started[prof.slug],
+                failed = any(stat.get(key, 0) for key in _FAILURE_FIELDS)
+                db.log_run(conn, "summarize", "partial" if failed else "ok", stat,
+                           started_at=started[prof.slug],
                            group_slug=prof.slug)
+                total["errors"] += int(failed)
             except Exception as e:  # noqa: BLE001
                 total["errors"] += 1
                 stat["error"] = f"{type(e).__name__}: {e}"
                 db.log_run(conn, "summarize", "failed", stat, error=str(e),
                            started_at=started[prof.slug], group_slug=prof.slug)
             conn.commit()
-            for key in ("deep", "brief", "brief_failed", "skipped", "relevance"):
+            for key in counters:
                 total[key] += int(stat.get(key, 0) or 0)
         return total
     finally:

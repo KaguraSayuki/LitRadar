@@ -431,6 +431,7 @@ def test_新组说明失败后下轮只重试说明(tmp_path, monkeypatch):
     monkeypatch.setattr(summarize, "summarize_relevance", fail)
     out = summarize.run(cfg, verbose=False)
     assert out["groups"]["mat"]["relevance_failed"] == 1
+    assert out["errors"] == out["relevance_failed"] == 1
     assert set(_relevances(cfg)) == {("org", "Shared paper")}
     monkeypatch.setattr(summarize, "summarize_relevance", original)
     FakeLLM.calls = []
@@ -475,4 +476,94 @@ def test_hidden_papers_do_not_take_summary_slots_from_visible_group_members(tmp_
     assert set(_relevances(cfg)) == {("org", "Synthetic visible paper"),
                                    ("mat", "Synthetic other top"),
                                    ("mat", "Synthetic shared paper")}
+    conn.close()
+
+
+def test_partial_brief_response_reports_failure_preserves_old_summary_and_retries(tmp_path, monkeypatch):
+    from litradar import progress
+
+    cfg = _cfg(tmp_path, groups={"groups": [{"slug": "errors", "direction": "Synthetic direction"}]})
+    cfg.llm.deep_summary_top_n = 0
+    ids = _ids(cfg)
+    conn = db.Database(cfg.db_file).connect()
+    first = _seed(conn, "Synthetic first paper", groups=list(ids.values()))
+    missing = _seed(conn, "Synthetic missing paper", groups=list(ids.values()))
+    for iid, score in ((first, 90), (missing, 80)):
+        db.save_score(conn, iid, group_id=ids["errors"], final_score=score)
+    db.save_summary(conn, missing, {"title_zh": "Synthetic old title", "one_liner": "Synthetic old conclusion"},
+                    "brief", "old", abstract_hash=summarize._abstract_hash("Synthetic old abstract"))
+    conn.commit()
+    old = tuple(conn.execute("SELECT * FROM summary WHERE item_id=?", (missing,)).fetchone())
+    prompts = []
+
+    def partial_json(self, system, prompt, **kwargs):
+        prompts.append(prompt)
+        return {"items": [{"id": 1, "title_zh": "Synthetic new title", "one_liner": "Synthetic new conclusion"}]}
+
+    monkeypatch.setattr(FakeLLM, "json", partial_json)
+    events = []
+    with progress.observe(events.append):
+        out = progress.run_stage("summarize", lambda: summarize.run(cfg, verbose=False))
+    assert out["brief"] == out["brief_failed"] == out["errors"] == 1
+    assert events[-1]["status"] == "partial"
+    assert tuple(conn.execute("SELECT * FROM summary WHERE item_id=?", (missing,)).fetchone()) == old
+    success = tuple(conn.execute("SELECT * FROM summary WHERE item_id=?", (first,)).fetchone())
+    assert conn.execute("SELECT status FROM run_log ORDER BY id DESC LIMIT 1").fetchone()[0] == "partial"
+
+    with progress.observe(events.append):
+        out = progress.run_stage("summarize", lambda: summarize.run(cfg, verbose=False))
+    assert out["brief"] == 1 and out["brief_failed"] == out["errors"] == 0
+    assert events[-1]["status"] == "completed"
+    assert "Synthetic missing paper" in prompts[1] and "Synthetic first paper" not in prompts[1]
+    assert tuple(conn.execute("SELECT * FROM summary WHERE item_id=?", (first,)).fetchone()) == success
+    assert conn.execute("SELECT one_liner FROM summary WHERE item_id=?", (missing,)).fetchone()[0] == "Synthetic new conclusion"
+    assert conn.execute("SELECT status FROM run_log ORDER BY id DESC LIMIT 1").fetchone()[0] == "ok"
+    conn.close()
+
+
+@pytest.mark.parametrize("failure_count", [1, 2])
+def test_relevance_timeouts_report_missing_items_and_retry_only_failures(tmp_path, monkeypatch, failure_count):
+    from litradar import progress
+    from litradar.llm import LLMError
+
+    cfg = _cfg(tmp_path, groups={"groups": [{"slug": "synthetic", "direction": "Synthetic direction"}]})
+    cfg.llm.deep_summary_top_n = 0
+    ids = _ids(cfg)
+    conn = db.Database(cfg.db_file).connect()
+    titles = ["Synthetic paper one", "Synthetic paper two"]
+    for title in titles:
+        iid = _seed(conn, title, groups=list(ids.values()))
+        db.save_summary(conn, iid, {"one_liner": "Synthetic neutral"}, "deep", "old",
+                        abstract_hash=summarize._abstract_hash(f"abstract of {title}"))
+    conn.commit()
+    neutral = [tuple(r) for r in conn.execute("SELECT * FROM summary ORDER BY item_id")]
+    failures = set(titles[-failure_count:])
+    calls = []
+
+    def flaky_json(self, system, prompt, **kwargs):
+        title = next(title for title in titles if title in prompt)
+        calls.append(title)
+        if title in failures:
+            raise LLMError("Synthetic timeout")
+        return {"relevance": "Synthetic relevance"}
+
+    monkeypatch.setattr(FakeLLM, "json", flaky_json)
+    events = []
+    with progress.observe(events.append):
+        out = progress.run_stage("summarize", lambda: summarize.run(cfg, verbose=False))
+    assert out["errors"] == 1  # Failed groups, not failed papers.
+    assert out["relevance_failed"] == failure_count
+    assert out["relevance"] == 2 - failure_count
+    assert events[-1]["status"] == "partial"
+    assert conn.execute("SELECT status FROM run_log ORDER BY id DESC LIMIT 1").fetchone()[0] == "partial"
+    completed = [tuple(r) for r in conn.execute("SELECT * FROM summary_group ORDER BY item_id")]
+
+    failures.clear()
+    calls.clear()
+    out = summarize.run(cfg, verbose=False)
+    assert out["errors"] == out["relevance_failed"] == 0
+    assert out["relevance"] == failure_count and set(calls) == set(titles[-failure_count:])
+    assert conn.execute("SELECT status FROM run_log ORDER BY id DESC LIMIT 1").fetchone()[0] == "ok"
+    assert [tuple(r) for r in conn.execute("SELECT * FROM summary ORDER BY item_id")] == neutral
+    assert all(row in [tuple(r) for r in conn.execute("SELECT * FROM summary_group")] for row in completed)
     conn.close()

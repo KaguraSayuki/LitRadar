@@ -58,8 +58,12 @@ def test_failed_deep_summary_shows_partial_progress_instead_of_skipped(tmp_path,
     with progress.observe(events.append):
         result = progress.run_stage('summarize', lambda: summarize.run(cfg, verbose=False))
     assert result['skipped'] == 1
+    assert result['errors'] == result['deep_failed'] == 1
     assert events[-1]['status'] == 'partial'
     assert [(e['current'], e['total']) for e in events if e['kind'] == 'progress'] == [(0, 1), (1, 1)]
+    conn = db.Database(cfg.db_file).connect()
+    assert conn.execute("SELECT status FROM run_log").fetchone()[0] == 'partial'
+    conn.close()
 
 
 def _patch(monkeypatch) -> tuple[list, list]:
