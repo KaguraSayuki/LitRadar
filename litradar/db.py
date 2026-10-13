@@ -125,7 +125,9 @@ CREATE TABLE IF NOT EXISTS item_enrichment (
     enriched_at    TEXT,
     -- 富化过但没拿到摘要的次数。攒够上限就不再进"缺摘要重试"队列(见 enrich._pending),
     -- 否则来源里真没有摘要的条目会每轮都陪跑 S2 + Crossref 批量,永远烧请求。
-    abstract_attempts INTEGER NOT NULL DEFAULT 0
+    abstract_attempts INTEGER NOT NULL DEFAULT 0,
+    lookup_attempts INTEGER NOT NULL DEFAULT 0, -- 轮换未命中/暂时失败的条目
+    lookup_failed INTEGER NOT NULL DEFAULT 0   -- 来源失败仍须重试，不能当成完整富化
 );
 
 -- 期刊等级缓存(easyScholar)。按刊名缓存,同一本刊只查一次 ——
@@ -872,11 +874,21 @@ def _migrate_v10(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE item ADD COLUMN abstract_zh TEXT")
 
 
+def _migrate_v11(conn: sqlite3.Connection) -> None:
+    """Track enrichment attempts without claiming failed lookups succeeded."""
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(item_enrichment)")}
+    for name in ("lookup_attempts", "lookup_failed"):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE item_enrichment "
+                         f"ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
+
+
 # 迁移步骤按版本排列:下标 + 1 = 跑完这步之后的 user_version。
 # 加新迁移就在末尾追加一个函数,**同时把 SCHEMA 改成最新结构** ——
 # 新库只建 SCHEMA、不走这里。
 _MIGRATIONS = [_migrate_v1, _migrate_v2, _migrate_v3, _migrate_v4, _migrate_v5,
-               _migrate_v6, _migrate_v7, _migrate_v8, _migrate_v9, _migrate_v10]
+               _migrate_v6, _migrate_v7, _migrate_v8, _migrate_v9, _migrate_v10,
+               _migrate_v11]
 SCHEMA_VERSION = len(_MIGRATIONS)
 
 # 只能在迁移之后建的索引(见 Database.init 的注释)。

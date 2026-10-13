@@ -158,6 +158,66 @@ def test_重新富化不会把计数归零(tmp_path):
     conn.close()
 
 
+def test_未收录的新DOI不会饿死较旧的有效文献(tmp_path, monkeypatch):
+    cfg = Config()
+    cfg.app.db_path = str(tmp_path / "rotation.db")
+    cfg.journal_rank.enabled = False
+    missing = _seed(cfg, "10.9999/missing")
+    available = _seed(cfg, "10.9999/available")
+    conn = db.Database(cfg.db_file).connect()
+    conn.execute("UPDATE item SET published_at='2026-10-01' WHERE id=?", (missing,))
+    conn.execute("UPDATE item SET published_at='2026-09-01' WHERE id=?", (available,))
+    conn.commit()
+    conn.close()
+    attempted = []
+    def s2(dois, **kwargs):
+        attempted.append(dois)
+        return {doi: {"abstract": "Synthetic abstract"} for doi in dois
+                if doi == "10.9999/available"}
+    monkeypatch.setattr(enrich.semanticscholar, "fetch_many_by_doi", s2)
+    monkeypatch.setattr(enrich.crossref_search, "fetch_many_by_doi", lambda *a, **kw: {})
+    # Calls reconnect to the DB, so fairness cannot depend on in-memory cursors.
+    assert enrich.run(cfg, limit=1, verbose=False)["failed"] == 1
+    assert enrich.run(cfg, limit=1, verbose=False)["with_abstract"] == 1
+    assert attempted == [["10.9999/missing"], ["10.9999/available"]]
+    conn = db.Database(cfg.db_file).connect()
+    row = conn.execute("SELECT enriched_at,abstract_attempts,lookup_attempts "
+                       "FROM item_enrichment WHERE item_id=?", (missing,)).fetchone()
+    assert tuple(row) == (None, 0, 1)
+    assert [r["id"] for r in enrich._pending(conn, 1)] == [missing]
+    conn.close()
+
+
+def test_来源暂时失败保留补全结果且不消耗摘要重试上限(tmp_path, monkeypatch):
+    from litradar.http import SourceFetchError
+
+    cfg = Config()
+    cfg.app.db_path = str(tmp_path / "retry.db")
+    cfg.journal_rank.enabled = False
+    iid = _seed(cfg, "10.9999/retry")
+    monkeypatch.setattr(enrich.crossref_search, "fetch_many_by_doi", lambda *a, **kw:
+                        {"10.9999/retry": {"journal": "Synthetic Canonical Journal"}})
+    def unavailable(*args, **kwargs):
+        raise SourceFetchError("synthetic temporary outage")
+    monkeypatch.setattr(enrich.semanticscholar, "fetch_many_by_doi", unavailable)
+    for _ in range(enrich.MAX_ABSTRACT_ATTEMPTS + 1):
+        result = enrich.run(cfg, limit=1, verbose=False)
+        assert result["errors"] == 1 and result["enriched"] == 1
+    conn = db.Database(cfg.db_file).connect()
+    row = conn.execute("SELECT i.journal,e.enriched_at,e.abstract_attempts,e.lookup_failed "
+                       "FROM item i JOIN item_enrichment e ON e.item_id=i.id").fetchone()
+    assert tuple(row) == ("Synthetic Canonical Journal", None, 0, 1)
+    assert [r["id"] for r in enrich._pending(conn, 1)] == [iid]
+    conn.close()
+    monkeypatch.setattr(enrich.semanticscholar, "fetch_many_by_doi", lambda *a, **kw:
+                        {"10.9999/retry": {"abstract": "Recovered synthetic abstract"}})
+    assert enrich.run(cfg, limit=1, verbose=False)["errors"] == 0
+    conn = db.Database(cfg.db_file).connect()
+    assert enrich._pending(conn, 1) == []
+    assert conn.execute("SELECT lookup_failed FROM item_enrichment").fetchone()[0] == 0
+    conn.close()
+
+
 # ------------------------------------------------------- 期刊等级缓存
 @pytest.mark.parametrize("payload", [
     {"code": 200},

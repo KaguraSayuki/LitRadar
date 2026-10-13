@@ -15,6 +15,7 @@ import sqlite3
 
 from . import db, progress
 from .config import Config
+from .http import SourceFetchError
 from .sources import crossref_search, easyscholar, openalex_search, semanticscholar
 
 
@@ -97,33 +98,21 @@ MAX_ABSTRACT_ATTEMPTS = 5
 
 
 def _pending(conn: sqlite3.Connection, limit: int) -> list[sqlite3.Row]:
-    """需要富化的条目:从未富化的 + 已富化但缺摘要(且还没试够次数)的。"""
+    """轮换待富化条目，尚未命中的新 DOI 不能永久占据整轮名额。"""
     # 检索可能已经带回引用数/OA，生成只有部分字段的 enrichment 行；
     # enriched_at 为空说明仍需完整富化，不能仅凭行存在就跳过。
     rows = conn.execute(
         """SELECT i.id, i.doi FROM item i
            LEFT JOIN item_enrichment e ON e.item_id = i.id
            WHERE i.doi IS NOT NULL AND i.doi <> ''
-             AND (e.item_id IS NULL OR e.enriched_at IS NULL)
-           ORDER BY i.published_at DESC LIMIT ?""",
-        (limit,),
-    ).fetchall()
-    rows += conn.execute(
-        """SELECT i.id, i.doi FROM item i
-           JOIN item_enrichment e ON e.item_id = i.id
-           WHERE (i.abstract IS NULL OR i.abstract = '')
-             AND i.doi IS NOT NULL AND i.doi <> ''
-             AND e.abstract_attempts < ?
-           ORDER BY i.published_at DESC LIMIT ?""",
+             AND (e.item_id IS NULL OR e.enriched_at IS NULL OR e.lookup_failed = 1
+                  OR ((i.abstract IS NULL OR i.abstract = '')
+                      AND e.abstract_attempts < ?))
+           ORDER BY COALESCE(e.lookup_attempts, 0), i.published_at DESC, i.id
+           LIMIT ?""",
         (MAX_ABSTRACT_ATTEMPTS, limit),
     ).fetchall()
-    seen: set[int] = set()
-    out = []
-    for r in rows:
-        if int(r["id"]) not in seen:
-            seen.add(int(r["id"]))
-            out.append(r)
-    return out
+    return rows
 
 
 def _journal_ranks(conn, cfg: Config, *, verbose: bool = True) -> dict:
@@ -217,8 +206,20 @@ def run(cfg: Config, *, limit: int = 300, verbose: bool = True) -> dict:
     database = db.Database(cfg.db_file)
     conn = database.connect()
     started = db.now()
-    stat = {"checked": 0, "enriched": 0, "with_abstract": 0, "failed": 0,
+    stat = {"checked": 0, "enriched": 0, "with_abstract": 0, "failed": 0, "errors": 0,
             "s2_batches": 0, "s2_hits": 0, "cr_batches": 0, "cr_hits": 0}
+    failed_dois: set[str] = set()
+
+    def fetch_batch(label, operation, *args, **kwargs):
+        try:
+            return operation(*args, **kwargs, strict=True)
+        except Exception as exc:
+            stat["errors"] += 1
+            failed_dois.update(args[0])
+            stat.setdefault("source_errors", []).append(f"{label}: {exc}")
+            if verbose:
+                print(f"  [warn] {label} 富化查询失败: {exc}")
+            return exc.partial if isinstance(exc, SourceFetchError) and exc.partial else {}
 
     try:
         rows = _pending(conn, limit)
@@ -232,7 +233,7 @@ def run(cfg: Config, *, limit: int = 300, verbose: bool = True) -> dict:
                 progress.report('Semantic Scholar · 补全摘要与引用', s, len(dois))
                 if verbose:
                     print(f"  S2 批量 {s + 1}-{s + len(chunk)} / {len(dois)}…")
-                s2_map.update(semanticscholar.fetch_many_by_doi(
+                s2_map.update(fetch_batch("Semantic Scholar", semanticscholar.fetch_many_by_doi,
                     chunk, interval=cfg.sources.s2_min_interval, verbose=verbose))
                 stat["s2_batches"] += 1
                 progress.report('Semantic Scholar · 已完成查询', s + len(chunk), len(dois))
@@ -246,7 +247,8 @@ def run(cfg: Config, *, limit: int = 300, verbose: bool = True) -> dict:
                 progress.report('Crossref · 补全文献信息', s, len(dois))
                 if verbose:
                     print(f"  Crossref 批量 {s + 1}-{s + len(chunk)} / {len(dois)}…")
-                cr_map.update(crossref_search.fetch_many_by_doi(chunk, cfg.sources.mailto))
+                cr_map.update(fetch_batch("Crossref", crossref_search.fetch_many_by_doi,
+                                         chunk, cfg.sources.mailto))
                 stat["cr_batches"] += 1
                 progress.report('Crossref · 已完成查询', s + len(chunk), len(dois))
             stat["cr_hits"] = len(cr_map)
@@ -256,11 +258,16 @@ def run(cfg: Config, *, limit: int = 300, verbose: bool = True) -> dict:
         for row in rows:
             iid, doi = int(row["id"]), row["doi"]
             stat["checked"] += 1
+            conn.execute(
+                """INSERT INTO item_enrichment (item_id, lookup_attempts, lookup_failed)
+                   VALUES (?, 1, ?) ON CONFLICT(item_id) DO UPDATE SET
+                   lookup_attempts=item_enrichment.lookup_attempts + 1,
+                   lookup_failed=excluded.lookup_failed""", (iid, int(doi in failed_dois)))
             res = _merge(doi, cr_map.get(doi), s2_map.get(doi), None)
             if not res:
                 stat["failed"] += 1
                 continue
-            db.save_enrichment(conn, iid, res["meta"])
+            db.save_enrichment(conn, iid, res["meta"], partial=doi in failed_dois)
             sets, vals = [], []
             # overwrite:Crossref 的规范字段,非空就直接盖掉旧值
             for k, v in res["overwrite"].items():
@@ -284,7 +291,7 @@ def run(cfg: Config, *, limit: int = 300, verbose: bool = True) -> dict:
             # 退出 _pending 的重试队列;一旦拿到摘要,条目自然不再缺摘要,计数作废。
             conn.execute(
                 """UPDATE item_enrichment SET abstract_attempts = abstract_attempts + 1
-                   WHERE item_id = ? AND EXISTS (
+                   WHERE item_id = ? AND lookup_failed = 0 AND EXISTS (
                        SELECT 1 FROM item WHERE id = ?
                          AND (abstract IS NULL OR abstract = ''))""",
                 (iid, iid))
@@ -307,7 +314,8 @@ def run(cfg: Config, *, limit: int = 300, verbose: bool = True) -> dict:
         # 所以这一步和逐条富化无关:全库也就几十本刊,查一遍进缓存,之后全走本地。
         stat.update(_journal_ranks(conn, cfg, verbose=verbose))
 
-        db.log_run(conn, "enrich", "ok", stat, started_at=started)
+        db.log_run(conn, "enrich", "partial" if stat["errors"] or stat["failed"]
+                   or stat.get("jr_failed") else "ok", stat, started_at=started)
         conn.commit()
     except Exception as e:  # noqa: BLE001
         db.log_run(conn, "enrich", "failed", stat, error=str(e), started_at=started)

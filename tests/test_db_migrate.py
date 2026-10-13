@@ -127,6 +127,35 @@ def test_已是最新版时迁移不再碰数据(tmp_path):
     conn.close()
 
 
+@pytest.mark.parametrize("source_version", [9, 10])
+def test_enrichment_upgrade_preserves_results_and_adds_retry_state(tmp_path, source_version):
+    path = tmp_path / f"v{source_version}.db"
+    conn = db.Database(path).connect()
+    iid, _ = db.upsert_item(conn, {"kind": "paper", "dedup_key": "doi:10.9999/legacy",
+                                  "title": "Synthetic legacy paper", "title_norm": "synthetic legacy paper",
+                                  "abstract_zh": "合成中文摘要", "source": "test"})
+    db.save_enrichment(conn, iid, {"cited_by_count": 7, "crossref_json": '{"synthetic":true}'})
+    conn.execute("UPDATE item_enrichment SET abstract_attempts=3")
+    before = tuple(conn.execute("SELECT cited_by_count,crossref_json,enriched_at,abstract_attempts "
+                                "FROM item_enrichment").fetchone())
+    conn.execute("ALTER TABLE item_enrichment DROP COLUMN lookup_attempts")
+    conn.execute("ALTER TABLE item_enrichment DROP COLUMN lookup_failed")
+    if source_version == 9:
+        conn.execute("ALTER TABLE item DROP COLUMN abstract_zh")
+    conn.execute(f"PRAGMA user_version={source_version}")
+    conn.commit()
+    conn.close()
+    db._READY.discard(str(path))
+    conn = db.Database(path).connect()
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+    assert tuple(conn.execute("SELECT cited_by_count,crossref_json,enriched_at,abstract_attempts "
+                              "FROM item_enrichment").fetchone()) == before
+    assert tuple(conn.execute("SELECT lookup_attempts,lookup_failed FROM item_enrichment").fetchone()) == (0, 0)
+    assert conn.execute("SELECT abstract_zh FROM item WHERE id=?", (iid,)).fetchone()[0] == (
+        "合成中文摘要" if source_version == 10 else None)
+    conn.close()
+
+
 def test_混合大小写DOI迁移合并关联数据(tmp_path):
     """合并重复条目时，用户反馈/评分/摘要/富化都跟到保留项。"""
     database = db.Database(tmp_path / "dupe.db")
