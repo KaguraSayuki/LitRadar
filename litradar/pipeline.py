@@ -241,7 +241,8 @@ def _ingest_snowball(conn: sqlite3.Connection, cfg: Config, prof: Profile,
     """
     stat.update({"snowball_refreshed": 0, "snowball_failed": 0,
                  "snowball_new_cites": 0, "snowball_kept": 0})
-    seeds = [s.strip() for s in (prof.seed_dois or []) if s and s.strip()]
+    seeds = list(dict.fromkeys(normalize_doi(s) for s in (prof.seed_dois or [])
+                               if s and s.strip()))
     if not cfg.sources.snowball_enabled or not seeds:
         return []
     seeds = seeds[:cfg.sources.snowball_max_seeds]
@@ -281,7 +282,7 @@ def _ingest_snowball(conn: sqlite3.Connection, cfg: Config, prof: Profile,
 
     # ---- 2. 在累积的引用关系上做共被引闸门 ----
     kept = db.cocited_items(conn, cfg.sources.snowball_min_cocitations,
-                            group_id=group_id)
+                            group_id=group_id, seed_dois=seeds)
     stat["snowball_kept"] = len(kept)
     if verbose:
         total = conn.execute("SELECT COUNT(DISTINCT citing_doi) FROM seed_cite "

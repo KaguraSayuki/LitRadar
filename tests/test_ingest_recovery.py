@@ -87,6 +87,29 @@ def test_venue_queries_run_without_general_s2_queries(tmp_path, monkeypatch):
     assert search.call_args.kwargs["venues"] == ["Synthetic Journal"]
 
 
+def test_removed_seed_cannot_contribute_to_current_threshold(tmp_path, monkeypatch):
+    cfg = config(tmp_path, seed_dois=["10.9999/seed-b", "10.9999/seed-c"])
+    cfg.sources.snowball_enabled = True
+    cfg.sources.snowball_min_cocitations = 2
+    conn = db.Database(cfg.db_file).connect()
+    profile = load_groups(cfg)[0]
+    gid = db.sync_groups(conn, [profile])[profile.slug]
+    candidate = paper("10.9999/candidate")
+    db.save_seed_cites(conn, "10.9999/removed-seed-a", [candidate], group_id=gid)
+    conn.commit()
+    assert db.cocited_items(conn, 2, group_id=gid) == []
+    monkeypatch.setattr(pipeline, "read_secret", lambda *_: "synthetic-key")
+    monkeypatch.setattr(semanticscholar, "fetch_citations", lambda ref, **k:
+                        [candidate] if ref.endswith("seed-b") else [])
+    stats = {}
+    assert pipeline._ingest_snowball(conn, cfg, profile, gid, stats, verbose=False) == []
+    assert stats["snowball_failed"] == 0  # A successful empty response is not failure.
+    assert conn.execute("SELECT COUNT(*) FROM seed_cite").fetchone()[0] == 2
+    db.save_seed_cites(conn, "10.9999/seed-c", [candidate], group_id=gid)
+    assert db.cocited_items(conn, 2, group_id=gid, seed_dois=profile.seed_dois)[0]["source_ref"] == "cocite:2"
+    conn.close()
+
+
 def test_source_outage_keeps_other_queries_and_partial_s2_pages(tmp_path, monkeypatch):
     # Query/group names may be "errors" without being confused with a counter.
     cfg = config(tmp_path, slug="errors", search_queries=["errors", "unavailable"],

@@ -1532,7 +1532,8 @@ def mark_seed_queried(conn: sqlite3.Connection, seed_doi: str,
 
 
 def cocited_items(conn: sqlite3.Connection, min_seeds: int, *,
-                  group_id: int | None = None) -> list[dict]:
+                  group_id: int | None = None,
+                  seed_dois: list[str] | None = None) -> list[dict]:
     """共被引达到门槛、且**还没进这个组**的候选。
 
     只统计**本组的种子**:两个方向混在一起算,A 的候选会因为"也被 B 的种子
@@ -1540,18 +1541,25 @@ def cocited_items(conn: sqlite3.Connection, min_seeds: int, *,
     的论文,对 B 组仍然是合法候选,只是要再记一次 B 组的成员关系。
     """
     gid = _read_group_id(conn, None) if group_id is None else group_id
+    seed_filter = ""
+    seed_args: list[str] = []
+    if seed_dois is not None:
+        seed_args = list(dict.fromkeys(normalize_doi(s) for s in seed_dois if s))
+        if not seed_args:
+            return []
+        seed_filter = " AND seed_doi IN (" + ",".join("?" for _ in seed_args) + ")"
     out: list[dict] = []
     for r in conn.execute(
-            """SELECT citing_doi, COUNT(DISTINCT seed_doi) n,
+            f"""SELECT citing_doi, COUNT(DISTINCT seed_doi) n,
                       MAX(item_json) item_json
                FROM seed_cite
-               WHERE group_id = ?
+               WHERE group_id = ?{seed_filter}
                  AND citing_doi NOT IN
                      (SELECT LOWER(i.doi) FROM item i
                         JOIN item_group g ON g.item_id = i.id AND g.group_id = ?
                        WHERE i.doi IS NOT NULL)
                GROUP BY citing_doi
-               HAVING n >= ?""", (gid, gid, max(1, min_seeds))):
+               HAVING n >= ?""", (gid, *seed_args, gid, max(1, min_seeds))):
         try:
             item = json.loads(r["item_json"] or "{}")
         except (json.JSONDecodeError, TypeError):
