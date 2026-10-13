@@ -423,14 +423,23 @@ def _ingest_group(conn, cfg: Config, prof: Profile, group_id: int, *,
 
         # 入库前去重:Crossref 同一 DOI 可能被多条查询、甚至同一响应重复返回,
         # 不去重会白白多花 LLM 精排的钱。
-        seen: set[str] = set()
-        found: list[dict] = []
+        merged: dict[str, dict] = {}
         for data in raw:
             key = normalize_doi(data.get("doi")) or title_norm(data.get("title"))
-            if not key or key in seen:
+            if not key:
                 continue
-            seen.add(key)
-            found.append(data)
+            current = merged.setdefault(key, {})
+            # Preserve the first nonempty value, but retain complementary
+            # abstracts, authors and enrichment fields from later sources.
+            for field, value in data.items():
+                if current.get(field) in (None, "", [], "[]"):
+                    current[field] = value
+                elif (field == "published_at" and value
+                      and current[field].endswith("-01-01")
+                      and not value.endswith("-01-01")):
+                    # Match upsert_item's year-only placeholder replacement.
+                    current[field] = value
+        found = list(merged.values())
         stat["unique"] = len(found)
 
         for data in found:

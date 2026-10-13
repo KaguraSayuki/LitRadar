@@ -50,3 +50,25 @@ def test_full_title_keys_preserve_distinct_papers_and_legacy_state(tmp_path, sou
     assert first in db.starred_ids(conn)
     assert conn.execute("SELECT item_id FROM feedback").fetchone()[0] == first
     conn.close()
+
+
+def test_same_run_merges_complementary_source_metadata(tmp_path, monkeypatch):
+    cfg = config(tmp_path, search_queries=["synthetic"], s2_queries=["synthetic"])
+    cfg.sources.crossref_search_enabled = cfg.sources.s2_search_enabled = True
+    monkeypatch.setattr(pipeline, "read_secret", lambda *_: "synthetic-key")
+    monkeypatch.setattr(pipeline.crossref_search, "search", lambda *a, **k: [
+        paper("10.9999/MERGED", journal="Canonical Synthetic Journal", published_at="2026-01-01")])
+    monkeypatch.setattr(semanticscholar, "search_bulk", lambda *a, **k: [
+        semanticscholar._to_dict({"title": "Synthetic paper", "externalIds": {"DOI": "10.9999/merged"},
+                                  "venue": "Short J.", "abstract": "Available synthetic abstract",
+                                  "citationCount": 0, "authors": [{"name": "Synthetic Author"}],
+                                  "publicationDate": "2026-09-17",
+                                  "openAccessPdf": {"url": "https://example.invalid/paper.pdf"}})])
+    result = pipeline.ingest_keyword_search(cfg, verbose=False)
+    assert result["new"] == result["unique"] == 1 and result["errors"] == 0
+    conn = db.Database(cfg.db_file).connect()
+    row = conn.execute("SELECT i.journal,i.abstract,i.authors,e.cited_by_count,e.oa_url,i.published_at "
+                       "FROM item i JOIN item_enrichment e ON e.item_id=i.id").fetchone()
+    assert tuple(row) == ("Canonical Synthetic Journal", "Available synthetic abstract",
+                          '["Synthetic Author"]', 0, "https://example.invalid/paper.pdf", "2026-09-17")
+    conn.close()
