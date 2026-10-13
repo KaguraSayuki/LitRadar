@@ -34,9 +34,9 @@ def _prepare(data: dict) -> dict | None:
             data["dedup_key"] = f"doi:{doi}"
     if not data.get("title_norm"):
         data["title_norm"] = title_norm(data["title"])
-    if not data.get("dedup_key"):
+    if not data.get("dedup_key") or (not doi and str(data["dedup_key"]).startswith("title:")):
         data["dedup_key"] = (f"doi:{doi}" if doi
-                             else f"title:{data['title_norm'][:120]}")
+                             else f"title:{data['title_norm']}")
     return data
 
 

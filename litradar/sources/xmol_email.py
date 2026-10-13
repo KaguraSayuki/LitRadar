@@ -191,7 +191,7 @@ def to_item_data(rec: XmolRecord, source_ref: str | None = None) -> dict:
 def _fallback_key(title: str) -> str:
     from ..normalize import title_norm
 
-    return title_norm(title)[:120]
+    return title_norm(title)
 
 
 def dumps(recs: list[XmolRecord]) -> str:

@@ -1030,6 +1030,25 @@ def upsert_item_status(conn: sqlite3.Connection,
         "SELECT * FROM item WHERE dedup_key = ?", (data["dedup_key"],)
     ).fetchone()
 
+    if not doi and str(data["dedup_key"]).startswith("title:"):
+        from .normalize import title_norm
+
+        normalized = title_norm(data["title"])
+        data["title_norm"] = normalized
+        data["dedup_key"] = f"title:{normalized}"
+        row = conn.execute("SELECT * FROM item WHERE dedup_key=?",
+                           (data["dedup_key"],)).fetchone()
+        if row is None:
+            # Older releases truncated title keys. Reuse only a full-title
+            # match: a matching prefix can belong to a different paper.
+            legacy = conn.execute("SELECT * FROM item WHERE dedup_key=?",
+                                  (f"title:{normalized[:120]}",)).fetchone()
+            if legacy is not None and title_norm(legacy["title"]) == normalized:
+                conn.execute("UPDATE item SET dedup_key=?, title_norm=? WHERE id=?",
+                             (data["dedup_key"], normalized, legacy["id"]))
+                row = conn.execute("SELECT * FROM item WHERE id=?",
+                                   (legacy["id"],)).fetchone()
+
     payload = {k: data.get(k) for k in ITEM_FIELDS}
     # 刊名在入库这个唯一入口统一洗干净(HTML 实体 / 换行),见 clean_journal
     payload["journal"] = clean_journal(payload.get("journal"))
