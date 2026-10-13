@@ -411,26 +411,32 @@ def _ingest_group(conn, cfg: Config, prof: Profile, group_id: int, *,
         # X-MOL 个人空间订阅结果。与邮件通道互补:邮件是推送的精选 teaser,
         # 这里是首屏 60 条(实测覆盖约 4 个月)且自带摘要。同一 DOI 入库时合并。
         #
-        # 这里**不吞异常**:会话过期(401)和限流(429)都必须让人看见,
-        # 否则雷达会安静地停止更新而用户以为一切正常。失败只影响本组采集,
-        # 由外层记进 stat["errors"]。
+        # 会话过期(401)和限流(429)必须如实报告且不重试,但不能丢掉
+        # 本组其他来源已经取得的文献。统一记为部分失败后继续入库。
         if cfg.sources.ispace_enabled:
             ispace_token = read_secret(cfg.sources.ispace_token_env)
             if not ispace_token:
                 stat["ispace_skipped"] = f"未设置 {cfg.sources.ispace_token_env}"
             else:
                 progress.report(f'{prof.name} · X-MOL 订阅，拉取第 {cfg.sources.ispace_page} 页', 0, 1)
-                got = xmol_ispace.fetch(
-                    ispace_token,
-                    page=cfg.sources.ispace_page,
-                    min_interval=cfg.sources.ispace_min_interval,
-                    timeout=cfg.sources.ispace_timeout,
-                )
-                stat["ispace"] = len(got.items)
-                stat["ispace_total"] = got.total
-                if got.notes:
-                    stat["ispace_notes"] = got.notes
-                raw += got.items
+                try:
+                    got = xmol_ispace.fetch(
+                        ispace_token,
+                        page=cfg.sources.ispace_page,
+                        min_interval=cfg.sources.ispace_min_interval,
+                        timeout=cfg.sources.ispace_timeout,
+                    )
+                except xmol_ispace.IspaceError as exc:
+                    stat["errors"] += 1
+                    stat.setdefault("source_errors", []).append(f"X-MOL 订阅: {exc}")
+                    if verbose:
+                        print(f"  [warn] X-MOL 订阅采集失败: {exc}")
+                else:
+                    stat["ispace"] = len(got.items)
+                    stat["ispace_total"] = got.total
+                    if got.notes:
+                        stat["ispace_notes"] = got.notes
+                    raw += got.items
 
         # 引用滚雪球:第三条召回腿。前两条靠词表,这条靠领域前辈的引用关系 ——
         # 所以它能捞到"换了说法"的工作,那是关键词召回天然的盲区。

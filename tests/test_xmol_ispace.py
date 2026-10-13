@@ -370,3 +370,79 @@ def test_与邮件源同_DOI_合并为一条(tmp_path):
     assert row["abstract_zh"] == "合成的中文摘要，用于验证中文列写入。"
     assert row["url"] == "https://example.org/paper-a"
     conn.close()
+
+
+def _pipeline_cfg(tmp_path, monkeypatch):
+    from litradar import pipeline
+    from litradar.config import Config
+
+    cfg = Config()
+    cfg.app.db_path = str(tmp_path / "ispace-pipeline.db")
+    cfg.interests_data = {"groups": [{"slug": "synthetic", "search_queries": ["synthetic"]}]}
+    cfg.sources.crossref_search_enabled = cfg.sources.ispace_enabled = True
+    cfg.sources.s2_search_enabled = cfg.sources.openalex_enabled = cfg.sources.snowball_enabled = False
+    cfg.sources.ispace_min_interval = 0
+    monkeypatch.setattr(pipeline, "read_secret", lambda *_: "synthetic-session-token")
+    xi._KEYWORD_CACHE = (9e18, dict(SUBS))
+    return cfg
+
+
+@pytest.mark.parametrize("http_status,message", [(401, "过期"), (429, "429")])
+def test_ispace_failure_preserves_other_sources_and_reports_partial_run(
+        tmp_path, monkeypatch, http_status, message):
+    from litradar import cli, pipeline, progress
+
+    cfg = _pipeline_cfg(tmp_path, monkeypatch)
+    session = _Session([_Resp(http_status, content=b"")])
+    monkeypatch.setattr(xi, "_session", lambda: session)
+    monkeypatch.setattr(pipeline.crossref_search, "search", lambda *a, **kw: [{
+        "kind": "paper", "source": "crossref", "doi": "10.5555/litradar.example.retained",
+        "title": "Synthetic retained paper", "abstract": "Synthetic retained abstract",
+    }])
+
+    events = []
+    with progress.observe(events.append):
+        result = progress.run_stage("ingest_search", lambda:
+            pipeline.ingest_keyword_search(cfg, verbose=False))
+
+    assert len(session.calls) == 1, "401/429 不得因整合流水线而重试"
+    assert result["new"] == result["crossref"] == result["errors"] == 1
+    assert result["ispace"] == 0
+    errors = result["groups"]["synthetic"]["source_errors"]
+    assert len(errors) == 1 and "X-MOL" in errors[0] and message in errors[0]
+    assert events[-1]["status"] == "partial"
+    assert cli._result_exit_code(result) == 1
+    conn = db.Database(cfg.db_file).connect()
+    assert tuple(conn.execute("SELECT doi,abstract FROM item").fetchone()) == (
+        "10.5555/litradar.example.retained", "Synthetic retained abstract")
+    assert conn.execute("SELECT status FROM run_log").fetchone()[0] == "partial"
+    conn.close()
+
+
+def test_same_run_crossref_ispace_merge_preserves_chinese_abstract_and_duplicate_counts(
+        tmp_path, monkeypatch):
+    from litradar import pipeline
+
+    cfg = _pipeline_cfg(tmp_path, monkeypatch)
+    payload = _envelope({"pageNo": 1, "totalRecord": 1, "results": [_paper()]})
+    session = _Session([_json_resp(payload), _json_resp(payload)])
+    monkeypatch.setattr(xi, "_session", lambda: session)
+    monkeypatch.setattr(pipeline.crossref_search, "search", lambda *a, **kw: [{
+        "kind": "paper", "source": "crossref", "doi": "10.5555/LITRADAR.EXAMPLE.PAPER-A",
+        "title": "Synthetic Study of Exemplary Cascades",
+        "abstract": "Synthetic complete English abstract", "published_at": "2026-01-01",
+    }])
+
+    first = pipeline.ingest_keyword_search(cfg, verbose=False)
+    second = pipeline.ingest_keyword_search(cfg, verbose=False)
+
+    assert (first["new"], first["updated"], first["duplicate"], first["errors"]) == (1, 0, 0, 0)
+    assert (second["new"], second["updated"], second["duplicate"], second["errors"]) == (0, 0, 1, 0)
+    assert first["ispace"] == first["crossref"] == first["unique"] == 1
+    assert first["groups"]["synthetic"]["raw"] == 2
+    conn = db.Database(cfg.db_file).connect()
+    assert conn.execute("SELECT COUNT(*) FROM item").fetchone()[0] == 1
+    assert tuple(conn.execute("SELECT abstract,abstract_zh,published_at FROM item").fetchone()) == (
+        "Synthetic complete English abstract", "合成的中文摘要，用于验证中文列写入。", "2026-01-02")
+    assert [row[0] for row in conn.execute("SELECT status FROM run_log ORDER BY id")] == ["ok", "ok"]
+    conn.close()
