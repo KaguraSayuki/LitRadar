@@ -143,6 +143,14 @@ _SUMMARY_STALE = """COALESCE((
                  AND su.limitation = '摘要未提及')))
 ), 0)"""
 
+# A paper hidden in one group can still need a shared summary for another.
+# Every summary query joins item_group as ig, so this also scopes the top-N pool.
+_SUMMARY_VISIBLE = """NOT EXISTS (
+    SELECT 1 FROM group_state gs
+     WHERE gs.item_id=i.id AND gs.group_id=ig.group_id
+       AND (gs.excluded=1 OR gs.ignored=1)
+)"""
+
 
 def verify_numbers(summary: dict, abstract: str) -> dict:
     """key_results 里出现但摘要原文没有的数字 -> 标疑,避免幻觉数据流到界面。"""
@@ -244,6 +252,7 @@ def _summarize_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
                 LEFT JOIN score            sc ON sc.item_id = i.id AND sc.group_id = ?
                 LEFT JOIN item_enrichment  e  ON e.item_id  = i.id
                 WHERE {where} AND i.kind='paper' AND {db.in_window('i')}
+                  AND {_SUMMARY_VISIBLE}
                   AND i.id NOT IN (SELECT item_id FROM temp.summary_run_done)
                 ORDER BY fs DESC, i.published_at DESC
                 LIMIT ?""",
@@ -266,6 +275,7 @@ def _summarize_group(conn: sqlite3.Connection, cfg: Config, prof: Profile,
                 LEFT JOIN summary su ON su.item_id = i.id
                 LEFT JOIN item_enrichment e ON e.item_id = i.id
                 WHERE i.kind='paper' AND {db.in_window('i')}
+                  AND {_SUMMARY_VISIBLE}
                 ORDER BY fs DESC, i.published_at DESC
                 LIMIT ?""",
             (group_id, group_id, *w, deep_n),
@@ -347,6 +357,7 @@ def _complete_group_relevance(conn: sqlite3.Connection, cfg: Config, prof: Profi
             LEFT JOIN summary_group sg ON sg.item_id = i.id AND sg.group_id = ?
             LEFT JOIN item_enrichment e ON e.item_id = i.id
             WHERE i.kind='paper' AND su.depth='deep'
+              AND {_SUMMARY_VISIBLE}
               AND NOT {stale}
               AND (sg.item_id IS NULL OR (? AND NOT EXISTS (
                     SELECT 1 FROM temp.summary_run_done done
@@ -411,6 +422,7 @@ def run(cfg: Config, *, limit: int = 200, days: int = 30, verbose: bool = True,
                             JOIN item_group ig ON ig.item_id=i.id AND ig.group_id=?
                             LEFT JOIN score sc ON sc.item_id=i.id AND sc.group_id=?
                             WHERE i.kind='paper' AND {db.in_window('i')}
+                              AND {_SUMMARY_VISIBLE}
                             ORDER BY COALESCE(sc.final_score,-1) DESC, i.published_at DESC
                             LIMIT ?""",
                         (gid, gid, f"-{days} days", f"-{days} days", cfg.llm.deep_summary_top_n),

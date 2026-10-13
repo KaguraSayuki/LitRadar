@@ -436,3 +436,43 @@ def test_新组说明失败后下轮只重试说明(tmp_path, monkeypatch):
     FakeLLM.calls = []
     summarize.run(cfg, verbose=False)
     assert FakeLLM.calls == ["relevance:钙钛矿材料"]
+
+
+@pytest.mark.parametrize("hidden_state", ["excluded", "ignored"])
+def test_hidden_papers_do_not_take_summary_slots_from_visible_group_members(tmp_path, hidden_state):
+    cfg = _cfg(tmp_path)
+    cfg.llm.deep_summary_top_n = 1
+    ids = _ids(cfg)
+    conn = db.Database(cfg.db_file).connect()
+    shared = _seed(conn, "Synthetic shared paper", groups=list(ids.values()))
+    hidden = _seed(conn, "Synthetic hidden paper", groups=[ids["org"]])
+    visible = _seed(conn, "Synthetic visible paper", groups=[ids["org"]])
+    other_top = _seed(conn, "Synthetic other top", groups=[ids["mat"]])
+    for iid, slug, score in [(shared, "org", 99), (shared, "mat", 10),
+                             (hidden, "org", 100), (visible, "org", 70),
+                             (other_top, "mat", 90)]:
+        db.save_score(conn, iid, group_id=ids[slug], final_score=score)
+    for iid in (shared, hidden):
+        if hidden_state == "excluded":
+            db.set_excluded(conn, [iid], True, group_slug="org")
+        else:
+            db.set_action(conn, iid, "ignore", group_slug="org")
+    conn.commit()
+
+    out = summarize.run(cfg, verbose=False)
+
+    assert out["errors"] == 0
+    depths = {r[0]: r[1] for r in conn.execute("SELECT item_id,depth FROM summary")}
+    assert depths == {visible: "deep", other_top: "deep", shared: "brief"}
+    assert out["groups"]["org"]["deep"] == 1
+    # The shared paper is legitimate in mat, but org's hidden high score must
+    # not add it to the shared deep-summary pool ahead of mat's own ranking.
+    db.save_score(conn, shared, group_id=ids["mat"], final_score=95)
+    conn.commit()
+    out = summarize.run(cfg, verbose=False)
+    assert out["errors"] == 0 and out["deep"] == 1
+    assert conn.execute("SELECT depth FROM summary WHERE item_id=?", (shared,)).fetchone()[0] == "deep"
+    assert set(_relevances(cfg)) == {("org", "Synthetic visible paper"),
+                                   ("mat", "Synthetic other top"),
+                                   ("mat", "Synthetic shared paper")}
+    conn.close()
