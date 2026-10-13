@@ -22,7 +22,6 @@ from .. import credentials, db, execution, journal_rank, pipeline, progress, ran
 from ..config import Config, load_config
 from ..lock import AlreadyRunning, single_instance
 from ..normalize import days_ago
-from ..passwords import verify_password
 from ..rank import Profile, load_groups, load_interests, validate_interests
 
 HERE = Path(__file__).resolve().parent
@@ -223,16 +222,18 @@ def require_admin_password(request: Request, cfg: Config) -> None:
     与 require_token 同样是"设了就校验":没配密码就不拦 —— 但那种状态下
     ``litradar check`` 会明确告诉你花钱接口没有这道闸。
     """
-    from .access import admin_expires
+    from .access import admin_expires, check_password
     if admin_expires(request, cfg):
         return
     stored = cfg.app.admin_password_hash
     if not stored:
         return
     got = request.headers.get(ADMIN_PASSWORD_HEADER, "")
-    if not verify_password(got, stored):
+    # Ordinary expired grants carry no password and are not failed guesses.
+    error = check_password(cfg, got) if got else "操作授权已过期，请在页面内验证密码后继续。"
+    if error:
         raise HTTPException(
-            401, "操作授权已过期，请在页面内验证密码后继续。",
+            401, error,
             headers={ADMIN_PASSWORD_REQUIRED_HEADER: "1"},
         )
 

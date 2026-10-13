@@ -100,7 +100,7 @@ def set_admin_session(response, request, cfg, *, expires=None):
 
 
 def check_password(cfg, password: str) -> str:
-    """Share the persisted attempt limit between login and short operation grants."""
+    """Share the persisted attempt limit across login, grants, and API headers."""
     def attempt(data):
         state = data.setdefault("login_attempts", {"start": time.time(), "failures": 0})
         if time.time() - state["start"] >= 300:

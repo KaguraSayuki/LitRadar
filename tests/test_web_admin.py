@@ -24,6 +24,7 @@ def client(tmp_path, monkeypatch):
     不这么做的话,一次"成功"的用例会去读真实数据库、真的发请求。
     """
     cfg = Config()
+    cfg.config_file = tmp_path / "config.yaml"
     cfg.app.db_path = str(tmp_path / "t.db")
     cfg.app.interests = str(tmp_path / "interests.yaml")   # 别碰仓库里的真实文件
     monkeypatch.setattr(webapp, "get_cfg", lambda: cfg)
@@ -345,6 +346,38 @@ def test_guarded_stage_rejects_missing_or_wrong_password_and_accepts_correct_pas
     r = client.post("/admin/run/rank",
                     headers={"X-Token": TOKEN, "X-Admin-Password": pw})
     assert r.status_code == 200
+
+
+def test_password_header_shares_login_throttle_without_counting_missing_grants(client, monkeypatch):
+    from litradar.web import access
+
+    pw = _set_password(monkeypatch)
+    cfg = webapp.get_cfg()
+    clock = [1_800_000_000]
+    monkeypatch.setattr(access.time, "time", lambda: clock[0])
+    headers = {"X-Token": TOKEN}
+    for _ in range(12):
+        assert client.post("/admin/run/rank", headers=headers).status_code == 401
+    assert not access.credentials.read_store(cfg).get("login_attempts")
+
+    for i in range(10):
+        if i % 2:
+            response = client.post("/login", data={"password": "wrong"})
+        else:
+            response = client.post("/admin/run/rank", headers={
+                **headers, "X-Admin-Password": "wrong"})
+        assert response.status_code == 401
+    assert access.credentials.read_store(cfg)["login_attempts"]["failures"] == 10
+    for response in (
+        client.post("/admin/run/rank", headers={**headers, "X-Admin-Password": pw}),
+        client.post("/access/unlock", data={"password": pw}, headers={"Accept": "application/json"}),
+    ):
+        assert response.status_code == 401 and "尝试次数过多" in response.text
+
+    clock[0] += 300
+    assert client.post("/admin/run/rank", headers={
+        **headers, "X-Admin-Password": pw}).status_code == 200
+    assert not access.credentials.read_store(cfg).get("login_attempts")
 
 
 @pytest.mark.parametrize("bind_host,expected_status", [("0.0.0.0", 403), ("127.0.0.1", 200)])
