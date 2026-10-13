@@ -86,7 +86,8 @@ function litradarAfterAction(itemId, action) {
   var leaves = (action === 'ignore' && view !== 'ignored' && view !== 'starred')
             || (action === 'unignore' && view === 'ignored')
             || (view === 'new' && action === 'read')
-            || (view === 'read' && action === 'unread');
+            || (view === 'read' && action === 'unread')
+            || (view === 'starred' && action === 'unstar');
   if (!leaves) return;
   var row = document.getElementById('card-' + itemId);
   if (!row) return;
@@ -94,9 +95,9 @@ function litradarAfterAction(itemId, action) {
   row.classList.add('is-leaving');
   var timer = setTimeout(function () { row.remove(); }, 260);
   var label = { read: '已标为已读', ignore: '已否决,可在「不感兴趣」里找到',
-                unread: '已设为未读', unignore: '已恢复' }[action];
+                unread: '已设为未读', unignore: '已恢复', unstar: '已取消收藏' }[action];
   var reverse = { read: 'unread', ignore: 'unignore', unread: 'read',
-                  unignore: 'ignore' }[action];
+                  unignore: 'ignore', unstar: 'star' }[action];
   litradarToast(label, { ms: 4500, action: { label: '撤销', run: async function () {
     clearTimeout(timer);
     if (!row.isConnected) parent.insertBefore(row, (next && next.isConnected) ? next : null);

@@ -137,6 +137,32 @@ def test_未知action返回400(client):
     assert r.status_code == 400
 
 
+def test_unstar_from_favorites_removes_card_and_undo_restores_favorite(client):
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("前端执行回归需要 Node.js 18+")
+    cfg = webapp.get_cfg()
+    iid = _add_item(cfg, "Synthetic favorite")
+    assert client.post(f"/item/{iid}/action", data={"action": "star"},
+                       headers={"X-Token": TOKEN}).status_code == 200
+    result = subprocess.run(
+        [node, str(Path(__file__).parent / "helpers" / "starred_actions.cjs")],
+        input=json.dumps({"itemId": iid}), text=True, capture_output=True, check=True,
+    )
+    for request, expected_count in zip(json.loads(result.stdout), (0, 1)):
+        assert client.post(request["url"], data=request["data"],
+                           headers={"X-Token": TOKEN}).status_code == 200
+        conn = webapp.db.Database(cfg.db_file).connect()
+        try:
+            assert webapp.db.count_items(conn, state="starred") == expected_count
+        finally:
+            conn.close()
+
+
 def test_偏好和反馈写入口拒绝跨源(client):
     """口令之外的同源闸门覆盖所有浏览器可触发的写操作。"""
     target = webapp.get_cfg().interests_file
