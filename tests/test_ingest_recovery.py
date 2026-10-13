@@ -85,3 +85,90 @@ def test_venue_queries_run_without_general_s2_queries(tmp_path, monkeypatch):
     assert result["new"] == 1 and result["errors"] == 0
     assert search.call_args.args == ("synthetic query",)
     assert search.call_args.kwargs["venues"] == ["Synthetic Journal"]
+
+
+def test_source_outage_keeps_other_queries_and_partial_s2_pages(tmp_path, monkeypatch):
+    # Query/group names may be "errors" without being confused with a counter.
+    cfg = config(tmp_path, slug="errors", search_queries=["errors", "unavailable"],
+                 s2_queries=["synthetic"])
+    cfg.sources.crossref_search_enabled = cfg.sources.s2_search_enabled = True
+    cfg.sources.s2_search_max_pages = 2
+    monkeypatch.setattr(pipeline, "read_secret", lambda *_: "synthetic-key")
+    monkeypatch.setattr(semanticscholar, "read_secret", lambda *_: "synthetic-key")
+    monkeypatch.setattr(http.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(http, "_throttle", lambda *_: None)
+    monkeypatch.setattr(semanticscholar, "_throttle", lambda *_: None)
+    def crossref_get(url, *, params, **kwargs):
+        if params["query.bibliographic"] == "unavailable":
+            return Mock(status_code=503)
+        return Mock(status_code=200, json=lambda: {"message": {"items": [
+            {"title": ["Successful synthetic query"], "DOI": "10.9999/crossref"}]}})
+    def s2_get(url, *, params, **kwargs):
+        if params.get("token"):
+            return Mock(status_code=503)
+        return Mock(status_code=200, json=lambda: {"data": [
+            {"title": "Successful synthetic page", "externalIds": {"DOI": "10.9999/s2"}}],
+            "token": "second-page"})
+    monkeypatch.setattr(http.SESSION, "get", crossref_get)
+    monkeypatch.setattr(semanticscholar.requests, "get", s2_get)
+    result = pipeline.ingest_keyword_search(cfg, verbose=False)
+    assert result["new"] == 2 and result["errors"] == 2
+    assert result["groups"]["errors"]["per_query"]["errors"] == 1
+    assert progress.has_errors(result) and cli._result_exit_code(result) == 1
+    conn = db.Database(cfg.db_file).connect()
+    assert {row[0] for row in conn.execute("SELECT doi FROM item")} == {
+        "10.9999/crossref", "10.9999/s2"}
+    assert conn.execute("SELECT status FROM run_log").fetchone()[0] == "partial"
+    conn.close()
+
+
+@pytest.mark.parametrize("source", ["crossref", "openalex"])
+def test_successful_empty_source_response_is_not_failure(monkeypatch, source):
+    adapter = getattr(pipeline, f"{source}_search")
+    payload = {"message": {"items": []}} if source == "crossref" else {"results": []}
+    monkeypatch.setattr(adapter, "get_json", lambda *a, **kw: payload)
+    assert adapter.search("synthetic query") == []
+
+
+@pytest.mark.parametrize("operation", ["search", "citations"])
+def test_s2_malformed_later_record_preserves_earlier_records(monkeypatch, operation):
+    monkeypatch.setattr(semanticscholar, "read_secret", lambda *_: "synthetic-key")
+    monkeypatch.setattr(semanticscholar, "_throttle", lambda *_: None)
+    valid = {"title": "Synthetic valid record", "externalIds": {"DOI": "10.9999/valid"},
+             "publicationDate": "2026-10-01"}
+    records = [valid, None] if operation == "search" else [{"citingPaper": valid}, None]
+    monkeypatch.setattr(semanticscholar.requests, "get", lambda *a, **kw:
+                        Mock(status_code=200, json=lambda: {"data": records}))
+    with pytest.raises(http.SourceFetchError) as caught:
+        if operation == "search":
+            semanticscholar.search_bulk("synthetic query")
+        else:
+            semanticscholar.fetch_citations("DOI:10.9999/seed")
+    assert [p["doi"] for p in caught.value.partial] == ["10.9999/valid"]
+
+
+@pytest.mark.parametrize("source", ["crossref", "s2"])
+def test_strict_batch_failure_keeps_successful_record(monkeypatch, source):
+    if source == "crossref":
+        adapter = pipeline.crossref_search
+        monkeypatch.setattr(adapter, "get_json", lambda *a, **kw: {"message": {"items": [
+            {"title": ["Synthetic valid paper"], "DOI": "10.9999/valid"}, None]}})
+        operation = lambda: adapter.fetch_many_by_doi(["10.9999/valid", "10.9999/other"], strict=True)
+    else:
+        monkeypatch.setattr(semanticscholar, "_throttle", lambda *_: None)
+        monkeypatch.setattr(semanticscholar.time, "sleep", lambda *_: None)
+        monkeypatch.setattr(semanticscholar.requests, "post", lambda *a, **kw:
+                            Mock(status_code=200, json=lambda: [
+                                {"title": "Synthetic valid paper"}, "malformed record"]))
+        operation = lambda: semanticscholar.fetch_many_by_doi(
+            ["10.9999/valid", "10.9999/other"], strict=True, retries=1)
+    with pytest.raises(http.SourceFetchError) as caught:
+        operation()
+    assert set(caught.value.partial) == {"10.9999/valid"}
+
+
+def test_strict_s2_batch_accepts_null_for_unindexed_doi(monkeypatch):
+    monkeypatch.setattr(semanticscholar, "_throttle", lambda *_: None)
+    monkeypatch.setattr(semanticscholar.requests, "post", lambda *a, **kw:
+                        Mock(status_code=200, json=lambda: [None]))
+    assert semanticscholar.fetch_many_by_doi(["10.9999/unindexed"], strict=True) == {}

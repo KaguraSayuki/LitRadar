@@ -7,6 +7,7 @@ from typing import Any
 
 from . import db, enrich, progress, rank, summarize
 from .config import Config, read_secret
+from .http import SourceFetchError
 from .normalize import normalize_doi, title_norm
 from .rank import (Profile, load_enabled_groups, load_groups,
                    load_interests)
@@ -257,21 +258,25 @@ def _ingest_snowball(conn: sqlite3.Connection, cfg: Config, prof: Profile,
                                  group_id=group_id)
     for index, seed in enumerate(todo):
         progress.report(f'{prof.name} · 检索种子文献的引用', index, len(todo))
-        got = semanticscholar.fetch_citations(
-            f"DOI:{seed}", year=yr, since=cutoff.isoformat(),
-            limit=cfg.sources.snowball_per_seed,
-            interval=cfg.sources.s2_min_interval, verbose=verbose)
-        if not got:
-            # 记失败也更新时间戳:否则一个 404 的死种子会每轮都排在最前面
-            db.mark_seed_queried(conn, seed, 0, group_id=group_id,
-                                 status="failed")
+        failed = False
+        try:
+            got = semanticscholar.fetch_citations(
+                f"DOI:{seed}", year=yr, since=cutoff.isoformat(),
+                limit=cfg.sources.snowball_per_seed,
+                interval=cfg.sources.s2_min_interval, verbose=verbose)
+        except Exception as exc:  # one bad seed must not discard other results
+            got = exc.partial if isinstance(exc, SourceFetchError) and exc.partial else []
+            failed = True
             stat["snowball_failed"] += 1
-            conn.commit()
-            continue
+            stat["errors"] = stat.get("errors", 0) + 1
+            stat.setdefault("source_errors", []).append(f"引用查询: {exc}")
+            if verbose:
+                print(f"  [warn] 引用查询失败: {exc}")
         stat["snowball_new_cites"] += db.save_seed_cites(conn, seed, got,
                                                       group_id=group_id)
-        db.mark_seed_queried(conn, seed, len(got), group_id=group_id)
-        stat["snowball_refreshed"] += 1
+        db.mark_seed_queried(conn, seed, len(got), group_id=group_id,
+                             status="failed" if failed else "ok")
+        stat["snowball_refreshed"] += int(not failed)
         conn.commit()          # 逐种子提交:中断也不丢已花掉的额度
 
     # ---- 2. 在累积的引用关系上做共被引闸门 ----
@@ -312,6 +317,18 @@ def _ingest_group(conn, cfg: Config, prof: Profile, group_id: int, *,
                             "raw": 0, "new": 0, "updated": 0, "duplicate": 0,
                             "errors": 0}
     started = db.now()
+
+    def fetch_source(label, operation, *args, **kwargs):
+        """Keep each successful query/page even when another source fails."""
+        try:
+            return operation(*args, **kwargs)
+        except Exception as exc:
+            stat["errors"] += 1
+            stat.setdefault("source_errors", []).append(f"{label}: {exc}")
+            if verbose:
+                print(f"  [warn] {label} 检索失败: {exc}")
+            return exc.partial if isinstance(exc, SourceFetchError) and exc.partial else []
+
     try:
         raw: list[dict] = []
 
@@ -320,7 +337,7 @@ def _ingest_group(conn, cfg: Config, prof: Profile, group_id: int, *,
             # 收益在**召回**而不在精确率(精确率反而略降),精确交给 LLM 精排。
             for index, q in enumerate(queries):
                 progress.report(f'{prof.name} · Crossref，检索第 {index + 1} 项', index, len(queries))
-                got = crossref_search.search(
+                got = fetch_source("Crossref", crossref_search.search,
                     q,
                     lookback_days=cfg.sources.crossref_lookback_days,
                     limit=cfg.sources.crossref_rows,
@@ -345,7 +362,7 @@ def _ingest_group(conn, cfg: Config, prof: Profile, group_id: int, *,
                 stat["s2_since"] = cutoff.isoformat()
                 for index, q in enumerate(prof.s2_queries):
                     progress.report(f'{prof.name} · Semantic Scholar，检索第 {index + 1} 项', index, len(prof.s2_queries))
-                    got = semanticscholar.search_bulk(
+                    got = fetch_source("Semantic Scholar", semanticscholar.search_bulk,
                         q,
                         year=yr,
                         since=cutoff.isoformat(),
@@ -360,7 +377,7 @@ def _ingest_group(conn, cfg: Config, prof: Profile, group_id: int, *,
                 # 期刊定向的宽查询:替代 Crossref 原来的 ISSN 白名单覆盖
                 for index, q in enumerate(prof.s2_venue_queries):
                     progress.report(f'{prof.name} · Semantic Scholar 期刊检索，检索第 {index + 1} 项', index, len(prof.s2_venue_queries))
-                    got = semanticscholar.search_bulk(
+                    got = fetch_source("Semantic Scholar 期刊", semanticscholar.search_bulk,
                         q,
                         year=yr,
                         since=cutoff.isoformat(),
@@ -377,7 +394,7 @@ def _ingest_group(conn, cfg: Config, prof: Profile, group_id: int, *,
         if cfg.sources.openalex_enabled and openalex_key:
             for index, q in enumerate(queries):
                 progress.report(f'{prof.name} · OpenAlex，检索第 {index + 1} 项', index, len(queries))
-                got = openalex_search.search(
+                got = fetch_source("OpenAlex", openalex_search.search,
                     q,
                     lookback_days=cfg.sources.openalex_lookback_days,
                     limit=cfg.sources.openalex_per_query,
@@ -456,7 +473,7 @@ def _ingest_group(conn, cfg: Config, prof: Profile, group_id: int, *,
                 if verbose:
                     print(f"  [warn] 入库失败: {e}")
         conn.commit()
-        db.log_run(conn, "ingest_search", "ok", stat, started_at=started,
+        db.log_run(conn, "ingest_search", "partial" if stat["errors"] else "ok", stat, started_at=started,
                    group_slug=prof.slug)
         conn.commit()
         if verbose:

@@ -15,6 +15,7 @@ from typing import Any
 import requests
 
 from ..config import read_secret
+from ..http import SourceFetchError
 from ..normalize import normalize_doi
 
 BASE = "https://api.semanticscholar.org/graph/v1"
@@ -116,7 +117,8 @@ BATCH_SIZE = 100
 
 def fetch_many_by_doi(dois: list[str], retries: int = 3,
                       verbose: bool = False,
-                      interval: float | None = None) -> dict[str, dict]:
+                      interval: float | None = None,
+                      strict: bool = False) -> dict[str, dict]:
     """批量按 DOI 取。返回 ``{doi: record}``,取不到的 DOI 不出现在结果里。
 
     用 ``POST /graph/v1/paper/batch``:一次请求最多 500 篇,实测 6 篇 0.3 秒,
@@ -148,6 +150,7 @@ def fetch_many_by_doi(dois: list[str], retries: int = 3,
                 # 带 key 却 403 = key 不可用 -> 摘掉 key 立即重试
                 if r.status_code == 403 and read_secret("S2_API_KEY") \
                         and not _key_state["rejected"]:
+                    last_err = "HTTP 403 密钥不可用"
                     _note_rejected()
                     continue
                 # 429 = 限流;403 = 未认证共享池耗尽时的另一种表现。
@@ -161,7 +164,10 @@ def fetch_many_by_doi(dois: list[str], retries: int = 3,
                     break
                 r.raise_for_status()
                 got = 0
-                for doi, rec in zip(chunk, r.json()):
+                payload = r.json()
+                if strict and (not isinstance(payload, list) or len(payload) != len(chunk)):
+                    raise ValueError("批量响应未对应每个请求 DOI")
+                for doi, rec in zip(chunk, payload):
                     if rec:
                         out[doi] = _to_dict(rec, doi)
                         got += 1
@@ -176,6 +182,9 @@ def fetch_many_by_doi(dois: list[str], retries: int = 3,
         if last_err:
             print(f"    [warn] S2 批量 {start + 1}-{start + len(chunk)} 失败: "
                   f"{last_err[:140]}")
+            if strict:
+                raise SourceFetchError(f"Semantic Scholar 批量查询失败: {last_err}",
+                                       partial=out)
     return out
 
 
@@ -303,9 +312,16 @@ def search_bulk(query: str, *, year: str | None = None, since: str | None = None
 
         if r is None or r.status_code != 200:
             print(f"    [warn] S2 bulk 放弃({last or '未知'}): query={query[:44]!r}")
-            break
+            raise SourceFetchError(
+                f"Semantic Scholar 检索失败: {last or ('HTTP ' + str(r.status_code))}",
+                partial=out)
 
-        j = r.json()
+        try:
+            j = r.json()
+            if not isinstance(j, dict) or not isinstance(j.get("data"), list):
+                raise ValueError("缺少 data 列表")
+        except (ValueError, TypeError) as exc:
+            raise SourceFetchError("Semantic Scholar 检索响应格式无效", partial=out) from exc
         data = j.get("data") or []
         if verbose:
             print(f"    [S2] {query[:44]!r} 第 {page + 1} 页:命中 {j.get('total')},"
@@ -313,11 +329,14 @@ def search_bulk(query: str, *, year: str | None = None, since: str | None = None
         for p in data:
             # year 只有年粒度(传 "2025-2026" 会把 2025 年 1 月的也拉回来,
             # 那可能是一年半以前)。这里按精确日期再过一道,和排序窗口对齐。
-            if since:
-                d = p.get("publicationDate") or ""
-                if d and d < since:
-                    continue
-            out.append(_to_dict(p))
+            try:
+                if since:
+                    d = p.get("publicationDate") or ""
+                    if d and d < since:
+                        continue
+                out.append(_to_dict(p))
+            except (ValueError, TypeError, AttributeError) as exc:
+                raise SourceFetchError("Semantic Scholar 文献记录格式无效", partial=out) from exc
         token = j.get("token")
         if not token or not data:
             break
@@ -386,21 +405,32 @@ def fetch_citations(paper_ref: str, *, year: str | None = None,
         if r is None or r.status_code != 200:
             if verbose:
                 print(f"    [warn] 滚雪球放弃({last or '未知'}): {paper_ref[:34]}")
-            break
+            raise SourceFetchError(
+                f"Semantic Scholar 引用查询失败: {last or ('HTTP ' + str(r.status_code))}",
+                partial=out)
 
-        data = r.json().get("data") or []
+        try:
+            payload = r.json()
+            if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+                raise ValueError("缺少 data 列表")
+            data = payload["data"]
+        except (ValueError, TypeError) as exc:
+            raise SourceFetchError("Semantic Scholar 引用响应格式无效", partial=out) from exc
         if not data:
             break
         for item in data:
-            citing = item.get("citingPaper") or {}
-            d = citing.get("publicationDate") or ""
-            if since and d and d < since:
-                continue          # 只要窗口内的新文献
-            if not d:
-                continue          # 没日期就没法判断新旧,宁可不要
-            rec = _to_dict(citing)
-            if rec.get("title"):
-                out.append(rec)
+            try:
+                citing = item.get("citingPaper") or {}
+                d = citing.get("publicationDate") or ""
+                if since and d and d < since:
+                    continue          # 只要窗口内的新文献
+                if not d:
+                    continue          # 没日期就没法判断新旧,宁可不要
+                rec = _to_dict(citing)
+                if rec.get("title"):
+                    out.append(rec)
+            except (ValueError, TypeError, AttributeError) as exc:
+                raise SourceFetchError("Semantic Scholar 引用记录格式无效", partial=out) from exc
         if len(data) < take:
             break
         offset += len(data)

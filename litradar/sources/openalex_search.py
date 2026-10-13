@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..http import get_json
+from ..http import SourceFetchError, get_json
 from ..normalize import days_ago, normalize_doi, parse_date
 
 BASE = "https://api.openalex.org"
@@ -110,12 +110,18 @@ def search(
     if api_key:
         params["api_key"] = api_key
 
-    data = get_json(f"{BASE}/works", params=params)
+    data = get_json(f"{BASE}/works", params=params, strict=True)
     if not data:
-        return []
+        raise SourceFetchError("OpenAlex 检索没有返回有效响应")
     out = []
-    for w in data.get("results", []):
-        it = _work_to_item(w)
-        if it:
-            out.append(it)
+    try:
+        results = data["results"]
+        if not isinstance(results, list):
+            raise ValueError("results 不是列表")
+        for w in results:
+            it = _work_to_item(w)
+            if it:
+                out.append(it)
+    except (KeyError, ValueError, TypeError, AttributeError) as exc:
+        raise SourceFetchError("OpenAlex 检索响应格式无效", partial=out) from exc
     return out

@@ -152,7 +152,7 @@ def test_一个组失败不影响其它组(tmp_path, monkeypatch):
     out = pipeline.ingest_keyword_search(cfg, verbose=False)
 
     assert out["errors"] == 1
-    assert "boom" in out["groups"]["org"]["error"]
+    assert "boom" in out["groups"]["org"]["source_errors"][0]
     assert out["groups"]["mat"]["new"] == 1
     assert _membership(cfg) == [("mat", "10.1/mat")]
 

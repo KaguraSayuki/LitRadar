@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ..http import get_json
+from ..http import SourceFetchError, get_json
 from ..normalize import days_ago, normalize_doi, parse_date
 
 BASE = "https://api.crossref.org"
@@ -117,7 +117,8 @@ _SELECT = ("DOI,title,container-title,issued,published-online,published-print,"
            "created,author,abstract,ISSN,URL")
 
 
-def fetch_many_by_doi(dois: list[str], mailto: str = "") -> dict[str, dict]:
+def fetch_many_by_doi(dois: list[str], mailto: str = "", *,
+                      strict: bool = False) -> dict[str, dict]:
     """批量按 DOI 查询,返回 ``{doi: record}``。
 
     实测 ``filter=doi:A,doi:B``(重复过滤器名)有效,而 ``filter=doi:A,B`` 会报错,
@@ -134,13 +135,26 @@ def fetch_many_by_doi(dois: list[str], mailto: str = "") -> dict[str, dict]:
         }
         if mailto:
             params["mailto"] = mailto
-        data = get_json(f"{BASE}/works", params=params)
+        try:
+            data = get_json(f"{BASE}/works", params=params, strict=strict)
+        except SourceFetchError as exc:
+            raise SourceFetchError(str(exc), partial=out) from exc
         if not data:
+            if strict:
+                raise SourceFetchError("Crossref 批量查询没有返回有效响应", partial=out)
             continue
-        for m in data.get("message", {}).get("items", []):
-            it = _msg_to_item(m)
-            if it and it.get("doi"):
-                out[it["doi"]] = it
+        try:
+            items = data["message"]["items"] if strict else data.get("message", {}).get("items", [])
+            if not isinstance(items, list):
+                raise ValueError("items 不是列表")
+            for m in items:
+                it = _msg_to_item(m)
+                if it and it.get("doi"):
+                    out[it["doi"]] = it
+        except (KeyError, ValueError, TypeError, AttributeError) as exc:
+            if strict:
+                raise SourceFetchError("Crossref 批量响应格式无效", partial=out) from exc
+            raise
     return out
 
 
@@ -172,12 +186,18 @@ def search(
     if mailto:
         params["mailto"] = mailto
 
-    data = get_json(f"{BASE}/works", params=params)
+    data = get_json(f"{BASE}/works", params=params, strict=True)
     if not data:
-        return []
+        raise SourceFetchError("Crossref 检索没有返回有效响应")
     out = []
-    for m in data.get("message", {}).get("items", []):
-        it = _msg_to_item(m)
-        if it:
-            out.append(it)
+    try:
+        items = data["message"]["items"]
+        if not isinstance(items, list):
+            raise ValueError("items 不是列表")
+        for m in items:
+            it = _msg_to_item(m)
+            if it:
+                out.append(it)
+    except (KeyError, ValueError, TypeError, AttributeError) as exc:
+        raise SourceFetchError("Crossref 检索响应格式无效", partial=out) from exc
     return out
