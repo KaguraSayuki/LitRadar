@@ -72,3 +72,16 @@ def test_same_run_merges_complementary_source_metadata(tmp_path, monkeypatch):
     assert tuple(row) == ("Canonical Synthetic Journal", "Available synthetic abstract",
                           '["Synthetic Author"]', 0, "https://example.invalid/paper.pdf", "2026-09-17")
     conn.close()
+
+
+def test_venue_queries_run_without_general_s2_queries(tmp_path, monkeypatch):
+    cfg = config(tmp_path, s2_venue_queries=["synthetic query"])
+    cfg.sources.s2_search_enabled = True
+    cfg.sources.s2_venues = ["Synthetic Journal"]
+    monkeypatch.setattr(pipeline, "read_secret", lambda *_: "synthetic-key")
+    search = Mock(return_value=[paper("10.9999/venue")])
+    monkeypatch.setattr(semanticscholar, "search_bulk", search)
+    result = pipeline.ingest_keyword_search(cfg, verbose=False)
+    assert result["new"] == 1 and result["errors"] == 0
+    assert search.call_args.args == ("synthetic query",)
+    assert search.call_args.kwargs["venues"] == ["Synthetic Journal"]

@@ -333,7 +333,7 @@ def _ingest_group(conn, cfg: Config, prof: Profile, group_id: int, *,
 
         # Semantic Scholar bulk:第三条腿。与 Crossref 互补 —— Crossref 模糊匹配、
         # 召回高噪声大;bulk 是精确 AND、召回低但准确率高。用 DOI 合并。
-        if cfg.sources.s2_search_enabled and prof.s2_queries:
+        if cfg.sources.s2_search_enabled and (prof.s2_queries or prof.s2_venue_queries):
             if not read_secret("S2_API_KEY"):
                 stat["s2_skipped"] = "未设 S2_API_KEY"
             else:
