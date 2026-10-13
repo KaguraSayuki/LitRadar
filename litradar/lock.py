@@ -108,7 +108,10 @@ def _write_holder(fd: int) -> None:
 def _read_holder(fd: int) -> str:
     """尽力读出持锁进程的 pid;读不到就返回空串(不影响锁语义)。"""
     try:
-        raw = os.pread(fd, _PID_BYTES, 0)
+        # Each lock attempt owns this descriptor, so seeking cannot disturb a
+        # concurrent holder. Windows does not provide os.pread.
+        os.lseek(fd, 0, os.SEEK_SET)
+        raw = os.read(fd, _PID_BYTES)
     except OSError:
         return ""
     return raw.decode("utf-8", "replace").replace("\x00", " ").strip()

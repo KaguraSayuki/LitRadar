@@ -119,9 +119,14 @@ def test_windows_lock_uses_msvcrt_at_a_pid_safe_offset(tmp_path, monkeypatch):
 def test_windows_lock_conflict_raises_already_running(tmp_path, monkeypatch):
     fake = FakeMsvcrt(held_times=1)
     with simulated_windows(monkeypatch, fake) as win:
-        with pytest.raises(win.AlreadyRunning, match="正在运行"):
-            with win.single_instance(tmp_path / "litradar.lock"):
+        # The POSIX host otherwise hides a Windows-only failure in pid reading.
+        monkeypatch.delattr(win.os, "pread", raising=False)
+        path = tmp_path / "litradar.lock"
+        path.write_text("12345\n", encoding="utf-8")
+        with pytest.raises(win.AlreadyRunning, match=r"正在运行\(pid 12345\)"):
+            with win.single_instance(path):
                 pass
+        assert fake.calls[-1] == (fake.LK_UNLCK, 1, win._WINDOWS_LOCK_OFFSET)
 
 
 def test_windows_lock_prepares_the_locked_byte(tmp_path, monkeypatch):
