@@ -72,3 +72,14 @@ def test_名为errors的检索词和组不会被当作阶段错误(stages, monke
     })
     assert cli.main(["ingest", "search"]) == 0
     assert cli.main(["run"]) == 0
+
+
+@pytest.mark.parametrize('command, module, result', [
+    ('rank', rank, {'errors': 0, 'llm_scored': 1, 'llm_failed': 1}),
+    ('summarize', summarize, {'errors': 0, 'groups': {'synthetic': {'deep_failed': 1}}}),
+    ('enrich', pipeline.enrich, {'enriched': 1, 'failed': 1}),
+])
+def test_item_failures_produce_nonzero_cli_exit(stages, monkeypatch, command, module, result):
+    monkeypatch.setattr(module, 'run', lambda *a, **kw: result)
+    assert cli.main([command]) == 1
+    assert cli.main(['run']) == 1

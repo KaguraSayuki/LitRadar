@@ -137,3 +137,24 @@ def test_selected_directions_share_one_summary_run(cfg, monkeypatch):
     scheduler.run_selected(cfg)
     assert [name for name, _ in calls] == ['mail', 'search', 'search', 'enrich', 'rank', 'rank', 'summary']
     assert [group.slug for group in calls[-1][1]['selected_groups']] == ['a', 'c']
+
+
+def test_partial_item_failure_marks_scheduled_run_as_error(cfg, monkeypatch):
+    cfg.sources.xmol_enabled = False
+    cfg.interests_data = {'groups': [{'slug': 'errors', 'name': 'Synthetic direction'}]}
+    cfg.admin.cooldown_seconds = cfg.admin.daily_limit = 0
+    calls = []
+    def phase(name, result):
+        def run(*args, **kwargs):
+            calls.append(name)
+            return result
+        return run
+    monkeypatch.setattr(scheduler.pipeline, 'ingest_keyword_search',
+        phase('search', {'errors': 0, 'groups': {'errors': {'per_query': {'errors': 2}}}}))
+    monkeypatch.setattr(scheduler.enrich, 'run', phase('enrich', {'enriched': 1}))
+    monkeypatch.setattr(scheduler.rank, 'run', phase('rank', {'errors': 0, 'llm_failed': 1}))
+    monkeypatch.setattr(scheduler.summarize, 'run', phase('summarize', {'deep': 1}))
+    now = datetime(2026, 9, 14, 15, tzinfo=timezone.utc)
+    assert scheduler.tick(cfg, now) == 'error'
+    assert calls == ['search', 'enrich', 'rank', 'summarize']
+    assert scheduler.status(cfg, now)['last']['status'] == 'error'

@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import credentials, db, enrich, execution, pipeline, rank, summarize
+from . import credentials, db, enrich, execution, pipeline, progress, rank, summarize
 from .config import load_config, read_secret
 from .lock import AlreadyRunning, single_instance
 from .sources import easyscholar, mail, xmol_email
@@ -55,7 +55,7 @@ def _result_exit_code(*results: dict) -> int:
     调用方传各阶段汇总;不递归查询词/组名映射(其中也可能有名为 errors 的键)。
     未配置可选来源等 skipped 结果仍算正常完成。
     """
-    return int(any(result.get("errors", 0) for result in results))
+    return int(any(progress.has_errors(result) for result in results))
 
 
 def cmd_ingest(cfg, args):
@@ -70,8 +70,9 @@ def cmd_ingest(cfg, args):
 
 
 def cmd_enrich(cfg, args):
-    print(json.dumps(enrich.run(cfg, limit=args.limit), ensure_ascii=False, indent=2))
-    return 0
+    out = enrich.run(cfg, limit=args.limit)
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+    return _result_exit_code(out)
 
 
 def cmd_rank(cfg, args):

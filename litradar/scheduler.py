@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import credentials, db, enrich, execution, pipeline, rank, summarize
+from . import credentials, db, enrich, execution, pipeline, progress, rank, summarize
 from .config import load_config
 from .lock import AlreadyRunning, single_instance
 from .settings import SettingsError
@@ -90,7 +90,7 @@ def run_selected(cfg):
             results.append(rank.run(cfg, days=cfg.app.pipeline_window_days, group=group, verbose=False))
         results.append(summarize.run(cfg, days=cfg.app.pipeline_window_days,
                                      selected_groups=groups, verbose=False))
-        if any(result.get('errors',0) for result in results):
+        if any(progress.has_errors(result) for result in results):
             raise SettingsError("部分阶段失败，请查看统计页运行记录。")
 
 

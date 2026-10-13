@@ -27,11 +27,18 @@ def report(message: str, current=None, total=None):
 
 
 def has_errors(value) -> bool:
+    """Inspect result fields, not user-defined query or direction names."""
     if not isinstance(value, dict):
         return False
-    return any((key in ('error', 'errors', 'failed', 'brief_failed', 'deep_failed',
-                       'relevance_failed', 'llm_failed', 'jr_failed') and bool(item))
-               or (isinstance(item, dict) and has_errors(item)) for key, item in value.items())
+    failures = ('error', 'errors', 'failed', 'brief_failed', 'deep_failed',
+                'relevance_failed', 'llm_failed', 'jr_failed', 'snowball_failed')
+    if any(bool(value.get(key)) and not isinstance(value[key], dict) for key in failures):
+        return True
+    groups = value.get('groups')
+    if isinstance(groups, dict) and any(has_errors(group) for group in groups.values()):
+        return True
+    return any(has_errors(value.get(stage)) for stage in
+               ('ingest_mail', 'ingest_search', 'enrich', 'rank', 'summarize'))
 
 
 def summary(result) -> str:
