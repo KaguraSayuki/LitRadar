@@ -347,6 +347,53 @@ def test_guarded_stage_rejects_missing_or_wrong_password_and_accepts_correct_pas
     assert r.status_code == 200
 
 
+@pytest.mark.parametrize("bind_host,expected_status", [("0.0.0.0", 403), ("127.0.0.1", 200)])
+def test_serve_uses_runtime_host_and_selected_config_after_reload(tmp_path, monkeypatch, bind_host, expected_status):
+    import multiprocessing
+    import threading
+    from types import SimpleNamespace
+    import uvicorn
+    from litradar import cli
+    from litradar.config import load_config
+
+    path = tmp_path / "selected.yaml"
+    saved = {"app": {"host": "127.0.0.1", "db_path": str(tmp_path / "test.db"),
+                     "interests": str(tmp_path / "interests.yaml"),
+                     "token_env": "SYNTHETIC_EMPTY_TOKEN", "admin_password_env": "SYNTHETIC_EMPTY_PASSWORD"},
+             "admin": {"cooldown_seconds": 0, "daily_limit": 0}}
+    path.write_text(yaml.safe_dump(saved), encoding="utf-8")
+    monkeypatch.delenv("SYNTHETIC_EMPTY_TOKEN", raising=False)
+    monkeypatch.delenv("SYNTHETIC_EMPTY_PASSWORD", raising=False)
+    monkeypatch.setattr(webapp, "CONFIG_PATH", str(tmp_path / "old-import-path.yaml"))
+    # Register state changes with monkeypatch so a stopped test server does not
+    # supply launch options to unrelated TestClient instances.
+    monkeypatch.setattr(webapp.app.state, "config_path", None, raising=False)
+    monkeypatch.setattr(webapp.app.state, "bind_host", None, raising=False)
+    monkeypatch.setenv("LITRADAR_CONFIG", str(path))
+    worker = SimpleNamespace(start=lambda: None, join=lambda **kw: None, is_alive=lambda: False)
+    monkeypatch.setattr(multiprocessing, "get_context", lambda _: SimpleNamespace(
+        Event=threading.Event, Process=lambda **kw: worker))
+    calls = []
+    monkeypatch.setattr(webapp.rank, "run", lambda cfg, **kw: calls.append(cfg.db_file) or {"scored": 0})
+
+    def run(application, **options):
+        assert application is webapp.app and options["host"] == bind_host
+        client = TestClient(application)
+        for window in (200, 201):
+            saved["app"]["pipeline_window_days"] = window
+            path.write_text(yaml.safe_dump(saved), encoding="utf-8")
+            effective = webapp.get_cfg()
+            assert effective.config_file == path
+            assert effective.app.host == bind_host
+            assert effective.app.pipeline_window_days == window
+            assert client.post("/admin/run/rank").status_code == expected_status
+        assert yaml.safe_load(path.read_text())["app"]["host"] == "127.0.0.1"
+
+    monkeypatch.setattr(uvicorn, "run", run)
+    assert cli.cmd_serve(load_config(path), SimpleNamespace(host=bind_host, port=None)) == 0
+    assert len(calls) == (2 if expected_status == 200 else 0)
+
+
 def test_免费阶段不要密码(client, monkeypatch):
     """mail / search 只花免费额度,不该每次点都弹密码框。"""
     _set_password(monkeypatch)

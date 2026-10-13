@@ -589,6 +589,12 @@ def cmd_serve(cfg, args):
     import multiprocessing
     import uvicorn
     from .scheduler import serve
+    from .web import app as web
+    host = args.host if args.host is not None else cfg.app.host
+    # Keep launch options in process state, not in saved configuration. Passing
+    # the app also handles callers that imported it before choosing --config.
+    web.app.state.config_path = cfg.config_file
+    web.app.state.bind_host = host
     context = multiprocessing.get_context('spawn')
     stop = context.Event()
     worker = context.Process(target=serve, args=(str(cfg.config_file), stop), daemon=True)
@@ -596,7 +602,7 @@ def cmd_serve(cfg, args):
         os.environ['LITRADAR_CONFIG'] = str(cfg.config_file)
     worker.start()
     try:
-        uvicorn.run('litradar.web.app:app', host=args.host or cfg.app.host,
+        uvicorn.run(web.app, host=host,
                     port=args.port or cfg.app.port)
     finally:
         stop.set()

@@ -118,7 +118,11 @@ _cfg_cache: dict[str, Any] = {}
 
 def get_cfg() -> Config:
     """Read a fresh configuration and credential snapshot for each operation."""
-    return load_config(CONFIG_PATH)
+    cfg = load_config(getattr(app.state, "config_path", CONFIG_PATH))
+    # A CLI listening override lasts for this server process, even when settings
+    # are reloaded. It must not be mistaken for the host saved on disk.
+    cfg.app.host = getattr(app.state, "bind_host", cfg.app.host)
+    return cfg
 
 
 def require_token(request: Request) -> None:
